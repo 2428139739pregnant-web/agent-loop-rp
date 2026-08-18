@@ -1,0 +1,23 @@
+{
+  "enabled": false,
+  "maxRounds": 2,
+  "densityMax": 0.6,
+  "deferExtract": true,
+  "modelOverrides": {},
+  "activePresetId": "default",
+  "presets": [
+    {
+      "id": "default",
+      "name": "默认",
+      "config": {
+        "enabled": true,
+        "maxRounds": 2,
+        "densityMax": 0.6,
+        "deferExtract": true,
+        "modelOverrides": {}
+      },
+      "createdAt": 0,
+      "updatedAt": 0
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+node_modules/
+api-config.json
+characters/
+imagery/
+personas/
+sessions/
+summary/
+worldbooks/
+worldbook_index/
+*.log
+.test-dist/

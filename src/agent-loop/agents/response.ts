@@ -1,0 +1,331 @@
+/** Agent ③ — Final reply generation.
+ *
+ * Combines the three upstream products (① intent, 2.1 worldbook matches,
+ * 2.2 context segmentation) with the preprocessed 3-document character card
+ * into one system prompt, asks the LLM to stay in character, and returns the
+ * raw reply plus light diagnostics (turn count, which subsystems actually
+ * contributed). The output is plain text — no JSON parsing required.
+ */
+
+import type { PreprocessedCharacter } from '../character-loader.ts'
+import type { ChatMessage } from '../provider.ts'
+import { substituteUserCharMacros } from '../persona-store.ts'
+import {
+  readMvuStateFromMessages,
+  substituteMvuMacros,
+} from '../../mvu.ts'
+import {
+  AI_OUTPUT_PLACEMENT,
+  renderCharacterPromptView,
+  USER_INPUT_PLACEMENT,
+} from '../../frontend-regex.ts'
+import {
+  type ContextSegmentOutput,
+  type IntentOutput,
+  type ReplyResult,
+  type WorldbookMatchOutput,
+} from '../schema.ts'
+import type { Agent, AgentContext } from './types.ts'
+import { applyWorldbookPromptInjections } from '../worldbook-plugin.ts'
+import { classifyWorldbookEntry } from '../worldbook-compat.ts'
+
+/** Input contract for {@link responseAgent}. */
+export interface ResponseInput {
+  /** ① intent recognition output. */
+  intent: IntentOutput
+  /** 2.1 activated worldbook entries (already resolved to authoritative content). */
+  worldbook: WorldbookMatchOutput
+  /** 2.2 per-segment injection mode. */
+  contextSegmentation: ContextSegmentOutput
+  /** Raw user turn text, threaded through by the loop. */
+  userInput: string
+  /** 3-document character card, preprocessed at session bind time. */
+  character: PreprocessedCharacter
+  /** 用户 persona(酒馆 {{user}})。null = 未配置,系统按"用户"称呼。 */
+  userPersona?: { name: string; description: string } | null
+}
+
+/** Placeholder pattern, e.g. `{{persona}}`. */
+const TEMPLATE_VAR_RE = /\{\{(\w+)\}\}/g
+
+/** Placeholder when no worldbook entries activated. */
+const NO_WORLDBOOK = '(无激活的世界书条目)'
+
+/** Placeholder when no relevant history segments. */
+const NO_HISTORY = '(无相关历史)'
+
+/** Placeholder when the user gave no meta commands / no involved characters. */
+const NO_META = '(无)'
+
+/** Placeholder when the card carries no mes_example / system_prompt / post_history_instructions. */
+const NO_EXAMPLE_DIALOGUE = '(无示例对话)'
+const NO_CARD_SYSTEM_PROMPT = '(卡片未提供 system_prompt)'
+const NO_POST_HISTORY = '(无回复后指令)'
+
+function regexCharacter(card: PreprocessedCharacter): {
+  readonly name: string
+  readonly frontend: NonNullable<PreprocessedCharacter['raw']['frontend']>
+} {
+  return {
+    name: card.name,
+    frontend: card.raw.frontend ?? {
+      regexScripts: [], tavernHelperScriptNames: [], tavernHelperScripts: [], tavernHelperVariables: {},
+    },
+  }
+}
+
+/** Render the supported ST-Prompt-Template EJS subset when the host provides it. */
+function renderEjs(
+  ctx: AgentContext,
+  value: string,
+  target?: { readonly worldInfoBookId?: string },
+): string {
+  if (!/<%[=_-]?[\s\S]*?%>/u.test(value) || ctx.renderTemplate === undefined) return value
+  const rendered = ctx.renderTemplate(value, target)
+  return rendered.ok === true ? rendered.text : value
+}
+
+/**
+ * 独立世界书(worldbooks/)蓝灯条目的 position → 文档 映射(与 ST 的差异,§8 之 2):
+ * 0/before_char → persona;1/after_char → worldview;其他 position(2-7)→ style 尾部。
+ * 卡片内嵌书的蓝灯已在 preprocess 阶段合并进三文档,不会出现在 worldbook store,
+ * 所以这里只会捞到独立书的蓝灯,无双重注入风险。
+ */
+export function constantWorldbookDoc(position: number | undefined): 'persona' | 'worldview' | 'style' {
+  // position 缺省按 ST 默认 0(before)处理。
+  const st = typeof position === 'number' && Number.isFinite(position) ? position : 0
+  if (st === 0) return 'persona'
+  if (st === 1) return 'worldview'
+  return 'style'
+}
+
+/**
+ * 从 ctx.worldbook 提取**独立世界书**的蓝灯条目(constant && enabled),
+ * 按 position 映射分到三文档,组内按 order **降序**拼接(ST world-info.js:87)。
+ * 蓝灯语义 = 无条件每轮注入,不受消息内容/关键词影响(ST checkWorldInfo 第 3 步)。
+ * 与 ST 的差异:ST 对 probability<100 的蓝灯也会掷骰,本项目蓝灯严格无条件。
+ */
+export function buildConstantWorldbookBlocks(
+  worldbook: { list(): readonly import('../session.ts').WorldbookEntry[] },
+  macro: (text: string) => string,
+): { persona: string; worldview: string; style: string } {
+  const buckets: Record<'persona' | 'worldview' | 'style', string[]> = {
+    persona: [], worldview: [], style: [],
+  }
+  const constants = worldbook
+    .list()
+    .filter(e => e.constant === true
+      && e.enabled !== false
+      && classifyWorldbookEntry(e).owner !== 'plugin')
+    .sort((a, b) => b.order - a.order) // ST:同注入点 order 降序
+  for (const e of constants) {
+    buckets[constantWorldbookDoc(e.position)].push(
+      `### ${e.path} (常驻条目,order=${e.order})\n${macro(e.content)}`,
+    )
+  }
+  const render = (blocks: string[]): string =>
+    blocks.length === 0 ? '' : `\n\n---\n\n## 常驻世界书条目(独立世界书蓝灯,每轮注入;按 order 降序)\n\n${blocks.join('\n\n')}`
+  return {
+    persona: render(buckets.persona),
+    worldview: render(buckets.worldview),
+    style: render(buckets.style),
+  }
+}
+
+/**
+ * Replace `{{name}}` placeholders in a template with values from `vars`.
+ * Unknown variables are left untouched so the user can spot them in the
+ * rendered prompt instead of silently losing data.
+ */
+export function renderTemplate(
+  template: string,
+  vars: Readonly<Record<string, string>>,
+): string {
+  return template.replace(TEMPLATE_VAR_RE, (match, key: string) => {
+    const value = vars[key]
+    return value === undefined ? match : value
+  })
+}
+
+/**
+ * Build the context block fed to the LLM, honoring the 2.2 segmentation.
+ *
+ * Segment ids are 1-based over assistant turns in `history` (user turns are
+ * skipped — only the assistant's voice counts as a "segment"). Missing ids
+ * default to `drop` so the LLM never sees a stale mode if 2.2 ever drops one.
+ * The `_sessionId` parameter is reserved for the ④ summary hook and is
+ * intentionally unused this round.
+ */
+export function buildContextBlock(
+  segmentation: ContextSegmentOutput,
+  history: readonly ChatMessage[],
+  _sessionId: string,
+  readSummary: (turn: number) => string | undefined,
+  card?: PreprocessedCharacter,
+  userName?: string,
+): string {
+  const lines: string[] = []
+  let assistantTurn = 0
+  for (const [historyIndex, msg] of history.entries()) {
+    if (msg.role !== 'assistant') continue
+    assistantTurn += 1
+    const seg = segmentation.segments.find(s => s.id === assistantTurn)
+    const mode = seg?.mode ?? 'drop'
+    if (mode === 'drop') continue
+    if (mode === 'full') {
+      const content = card === undefined ? msg.content : renderCharacterPromptView(
+        msg.content, regexCharacter(card),
+        AI_OUTPUT_PLACEMENT,
+        history.length - 1 - historyIndex,
+        userName,
+      )
+      lines.push(`[对话 ${assistantTurn}]\n${content}\n`)
+      continue
+    }
+    // mode === 'summary'
+    const summary = readSummary(assistantTurn)
+    if (summary) lines.push(`[对话 ${assistantTurn} 摘要]\n${summary}\n`)
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Render worldbook matches as a markdown block, sorted by (order asc,
+ * weight desc). 2.1 already sorts, this re-sorts defensively in case the
+ * upstream ordering ever drifts.
+ */
+export function buildWorldbookBlock(
+  matches: WorldbookMatchOutput,
+  card?: PreprocessedCharacter,
+  userName?: string,
+): string {
+  if (matches.matches.length === 0) return ''
+  const sorted = [...matches.matches].sort((a, b) => {
+    if (a.order !== b.order) return a.order - b.order
+    return b.weight - a.weight
+  })
+  return sorted
+    .map(m => `### ${m.path} (order=${m.order}, weight=${m.weight})\n${card === undefined
+      ? m.content
+      : renderCharacterPromptView(m.content, regexCharacter(card), 5, undefined, userName)}`)
+    .join('\n\n')
+}
+
+export const responseAgent: Agent<ResponseInput, ReplyResult> = {
+  name: 'response',
+
+  async run(input: ResponseInput, ctx: AgentContext): Promise<ReplyResult> {
+    // 1. Load + render the system prompt.
+    const template = renderEjs(ctx, await ctx.prompts.load('response'))
+    const history = ctx.session.getHistory(ctx.sessionId)
+    const currentMvu = ctx.statData === undefined
+      ? readMvuStateFromMessages(input.character.raw, history)
+      : { statData: ctx.statData, updateCount: 0 }
+    const statData = currentMvu?.statData
+
+    const metaCommandsBlock = input.intent.metaCommands.length > 0
+      ? input.intent.metaCommands.join('\n')
+      : NO_META
+    const involvedBlock = input.intent.involvedCharacters.length > 0
+      ? input.intent.involvedCharacters.join(', ')
+      : NO_META
+
+    // {{user}}/{{char}} 宏替换:角色三文档 + 世界书块 + 用户人设描述统一过一遍,
+    // 保证卡文本里的 {{user}} 在进 prompt 前就落到实际用户名(酒馆同款时机)。
+    const userName = input.userPersona?.name ?? null
+    const charName = input.character.name
+    const macro = (text: string): string =>
+      substituteUserCharMacros(substituteMvuMacros(renderEjs(ctx, text), statData), userName, charName)
+    const contextBlock = buildContextBlock(
+      input.contextSegmentation,
+      history,
+      ctx.sessionId,
+      // Stub: ④ summary agent isn't wired in yet, so no summaries available.
+      () => undefined,
+      input.character,
+      userName ?? undefined,
+    )
+    const worldbookBlock = buildWorldbookBlock({
+      matches: input.worldbook.matches.map(match => ({
+        ...match,
+        content: renderEjs(ctx, match.content),
+      })),
+    }, input.character, userName ?? undefined)
+
+    // 用户人设段:有 persona 且带描述时注入;只有名字时也注入名字段(角色至少
+    // 该知道怎么称呼用户);完全没配置时留占位,提示模型用"用户"泛称。
+    const userPersonaBlock = input.userPersona !== undefined && input.userPersona !== null
+      ? (input.userPersona.description.length > 0
+        ? `名字:${input.userPersona.name}\n${input.userPersona.description}`
+        : `名字:${input.userPersona.name}\n(未提供详细人设,以"用户"身份参与剧情)`)
+      : '(未配置用户人设,以"用户"泛称)'
+
+    // 独立世界书蓝灯条目:position 映射追加进三文档尾部(每轮注入,不受消息影响)。
+    // 卡片内嵌书的蓝灯已在 preprocess 合并进文档,这里只处理 worldbooks/ 的独立书。
+    const constantBlocks = buildConstantWorldbookBlocks(ctx.worldbook, macro)
+
+    // 三个新字段(mes_example / system_prompt / post_history_instructions)都过宏替换。
+    // 旧存档/旧客户端可能不带这些字段(undefined),兜底空串 → 占位文案。
+    const mesExample = macro(input.character.mesExample ?? '')
+    const cardSystemPrompt = macro(input.character.systemPrompt ?? '')
+    const postHistoryInstructions = macro(input.character.postHistoryInstructions ?? '')
+
+    const systemPrompt = renderTemplate(template, {
+      character_name: macro(input.character.name),
+      persona: macro(input.character.persona) + constantBlocks.persona,
+      worldview: macro(input.character.worldview) + constantBlocks.worldview,
+      style: macro(input.character.style) + constantBlocks.style,
+      at_depth_worldbook: (input.character.atDepthLorebookEntries ?? []).map(entry =>
+        `### ${entry.name ?? `世界书 #${entry.insertionOrder}`} (atDepth=${entry.stPosition ?? 4})\n${macro(entry.content)}`,
+      ).join('\n\n') || '(无 atDepth 条目)',
+      mvu_state: statData === undefined ? '(未启用 MVU)' : JSON.stringify(statData, null, 2),
+      user_persona: macro(userPersonaBlock),
+      card_system_prompt: cardSystemPrompt.length > 0 ? cardSystemPrompt : NO_CARD_SYSTEM_PROMPT,
+      example_dialogue: mesExample.length > 0 ? mesExample : NO_EXAMPLE_DIALOGUE,
+      post_history_instructions: postHistoryInstructions.length > 0 ? postHistoryInstructions : NO_POST_HISTORY,
+      user_narration: input.intent.userNarration,
+      meta_commands: metaCommandsBlock,
+      involved_characters: involvedBlock,
+      keywords: input.intent.keywords.join(', '),
+      worldbook_block: macro(worldbookBlock) || NO_WORLDBOOK,
+      context_block: contextBlock || NO_HISTORY,
+    })
+
+    const promptUserInput = renderCharacterPromptView(
+      input.userInput,
+      regexCharacter(input.character),
+      USER_INPUT_PLACEMENT,
+      0,
+      userName ?? undefined,
+    )
+
+    // 2. Apply ST-Prompt-Template prompt injections to the exact message array
+    //    that this project sends. This is deterministic and happens before the
+    //    one existing response call; it never creates a second LLM stage.
+    const baseMessages: ChatMessage[] = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: promptUserInput },
+    ]
+    const promptMessages = applyWorldbookPromptInjections(
+      baseMessages,
+      input.worldbook.plugin?.promptInjections ?? [],
+    )
+
+    // 3. Call the LLM. Plain text — no response_format.
+    const result = await ctx.provider.chat(
+      promptMessages,
+      {
+        model: ctx.model,
+        temperature: ctx.temperature,
+      },
+    )
+
+    return {
+      reply: result.content,
+      sessionId: ctx.sessionId,
+      turn: ctx.session.turnCount(ctx.sessionId),
+      usedWorldbook: input.worldbook.matches.length > 0,
+      usedContextSegmentation: input.contextSegmentation.segments.length > 0,
+    }
+  },
+}

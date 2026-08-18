@@ -1,0 +1,2110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DSH Agent RP · 角色扮演 Harness</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+      "marked": "https://esm.sh/marked@16.4.2"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="module">
+    import React, { useState, useEffect, useRef, useCallback } from 'react'
+    import { createRoot } from 'react-dom/client'
+    import { marked } from 'marked'
+
+    const h = React.createElement
+
+    // ─── Wire types ──────────────────────────────────────────────────────
+    /**
+     * @typedef {Object} Character
+     * @property {string} name
+     * @property {string} persona
+     * @property {string} worldview
+     * @property {string} style
+     * @property {string} firstMes
+     * @property {string[]} alternateGreetings
+     * @property {string} preprocessedAt
+     * @property {{name:string, entryCount:number, enabledCount:number} | null} lorebook
+     */
+    /** @typedef {{id:string, name:string, createdAt:string, updatedAt:string, hasLorebook:boolean, lorebookName:string|null, personaPreview:string, greetingCount:number}} CharacterSummary */
+    /** @typedef {{role:'user'|'assistant'|'system', content:string}} HistoryMessage */
+    /** @typedef {{sessionId:string, label:string, characterName:string, createdAt:string, turnCount:number}} SessionInfo */
+    /** @typedef {{sourceId:string, name:string|null, keys:string[], secondaryKeys:string[], content:string, enabled:boolean, insertionOrder:number, selective:boolean, constant:boolean, caseSensitive:boolean, matchWholeWords:boolean, useRegex:boolean, position:'before_char'|'after_char', priority:number|null, selectiveLogic?:string, probability?:number, useProbability?:boolean, stPosition?:number}} WBEntry */
+    /** @typedef {{id:string, name:string, entryCount:number, enabledCount:number}} WBBook */
+    /** @typedef {{scanDepth:number, useLlmMatcher:boolean}} WorldbookSettingsView */
+    /** @typedef {{name:string, length:number, overridden:boolean}} PromptSummary */
+    /** @typedef {{provider:'openai'|'mock', baseUrl:string, apiKey:string, model:string}} ApiConfigView */
+    /**
+     * @typedef {Object} AgentTrace
+     * @property {string} name
+     * @property {string} inputJson
+     * @property {string} outputJson
+     * @property {number} durationMs
+     * @property {string} ts
+     * @property {{promptTokens:number,completionTokens:number,totalTokens:number,calls:number,estimated:boolean,reused?:boolean,deferred?:boolean,reusedFromRunId?:string}} usage
+     * @property {{promptTokens:number,completionTokens:number,totalTokens:number,calls:number,estimated:boolean}} usageTotal
+     * @property {string} runId
+     * @property {number} turn
+     * @property {boolean} reroll
+     */
+
+    // ─── API helpers ──────────────────────────────────────────────────────
+    async function apiGet(path) {
+      const res = await fetch(path)
+      if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error(`GET ${path} failed (${res.status}): ${t}`) }
+      return res.json()
+    }
+    async function apiPost(path, body) {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: body instanceof FormData
+          ? {}
+          : { 'Content-Type': 'application/json; charset=utf-8' },
+        body: body instanceof FormData
+          ? body
+          : (typeof body === 'string' ? body : JSON.stringify(body)),
+      })
+      if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error(`POST ${path} failed (${res.status}): ${t}`) }
+      return res.json()
+    }
+    async function apiPut(path, body) {
+      const res = await fetch(path, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error(`PUT ${path} failed (${res.status}): ${t}`) }
+      return res.json()
+    }
+    async function apiPatch(path, body) {
+      const res = await fetch(path, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error(`PATCH ${path} failed (${res.status}): ${t}`) }
+      return res.json()
+    }
+    async function apiDelete(path) {
+      const res = await fetch(path, { method: 'DELETE' })
+      if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error(`DELETE ${path} failed (${res.status}): ${t}`) }
+      return res.json()
+    }
+
+    function fmtTime(iso) {
+      if (!iso) return ''
+      const d = new Date(iso)
+      if (Number.isNaN(d.getTime())) return iso
+      return d.toLocaleString()
+    }
+
+    function fmtTokens(value) {
+      if (!Number.isFinite(Number(value))) return '—'
+      return Number(value).toLocaleString()
+    }
+
+    function tokenLabel(usage) {
+      if (!usage) return ''
+      const suffix = usage.estimated ? ' 估算' : ''
+      return `${fmtTokens(usage.totalTokens)} tok${suffix}`
+    }
+
+    const API_KEY_MASK = '***'
+
+    // ─── API config panel ─────────────────────────────────────────────────
+    function ApiConfigPanel(/** @type {{onConfigChange?: () => void}} */ props) {
+      const [cfg, setCfg] = useState(/** @type {ApiConfigView} */({
+        provider: 'mock', baseUrl: 'https://api.openai.com/v1', apiKey: API_KEY_MASK, model: 'mock-model',
+      }))
+      const [models, setModels] = useState([])
+      const [loading, setLoading] = useState(false)
+      const [error, setError] = useState(null)
+      const [hasSavedKey, setHasSavedKey] = useState(false)
+      // ⑤ 后处理设置 + SillyTavern 风格的可保存 preset
+      const [ppSettings, setPpSettings] = useState({
+        enabled: true, maxRounds: 2, densityMax: 0.6, deferExtract: true,
+        modelOverrides: {}, activePresetId: 'default', presets: [],
+      })
+      const [ppSaving, setPpSaving] = useState(false)
+      const [ppPresetName, setPpPresetName] = useState('')
+      // MVU 是独立的正文后分析调用：单独模型、温度和 generation preset。
+      const [mvuSettings, setMvuSettings] = useState({
+        enabled: true, model: '', temperature: 0, promptName: 'mvu', activePresetId: 'default', presets: [],
+      })
+      const [mvuSaving, setMvuSaving] = useState(false)
+      const [mvuPresetName, setMvuPresetName] = useState('')
+      const applyPpSettingsResponse = (value) => {
+        if (value && typeof value === 'object') setPpSettings((prev) => ({ ...prev, ...value }))
+      }
+      useEffect(() => {
+        (async () => {
+          try {
+            const r = await apiGet('/api/postprocess-settings')
+            applyPpSettingsResponse(r)
+          } catch { /* ignore */ }
+        })()
+      }, [])
+      useEffect(() => {
+        (async () => {
+          try {
+            const r = await apiGet('/api/mvu-settings')
+            if (r && typeof r === 'object') setMvuSettings((prev) => ({ ...prev, ...r }))
+          } catch (err) { setError(String(err.message || err)) }
+        })()
+      }, [])
+      const ppPayload = (overrides = {}) => ({
+        enabled: ppSettings.enabled,
+        maxRounds: ppSettings.maxRounds,
+        densityMax: ppSettings.densityMax,
+        deferExtract: ppSettings.deferExtract,
+        modelOverrides: ppSettings.modelOverrides || {},
+        ...overrides,
+      })
+      const savePpSettings = async (overrides = {}) => {
+        setPpSaving(true)
+        try {
+          const r = await apiPut('/api/postprocess-settings', ppPayload(overrides))
+          applyPpSettingsResponse(r)
+        } catch (err) { setError(String(err.message || err)) }
+        finally { setPpSaving(false) }
+      }
+      const togglePostprocess = () => {
+        const next = !ppSettings.enabled
+        setPpSettings((prev) => ({ ...prev, enabled: next }))
+        void savePpSettings({ enabled: next })
+      }
+      const updatePp = (key, value) => setPpSettings((prev) => ({ ...prev, [key]: value }))
+      const updatePpModel = (key, value) => setPpSettings((prev) => ({
+        ...prev, modelOverrides: { ...(prev.modelOverrides || {}), [key]: value },
+      }))
+      const selectPpPreset = async (id) => {
+        if (!id) return
+        setPpSaving(true)
+        try { applyPpSettingsResponse(await apiPut('/api/postprocess-settings', { presetId: id })) }
+        catch (err) { setError(String(err.message || err)) }
+        finally { setPpSaving(false) }
+      }
+      const savePpPreset = async () => {
+        const name = ppPresetName.trim()
+        if (!name) { setError('请输入预设名称。'); return }
+        setPpSaving(true)
+        try {
+          const current = await apiPut('/api/postprocess-settings', ppPayload())
+          applyPpSettingsResponse(current)
+          applyPpSettingsResponse(await apiPost('/api/postprocess-presets', { name }))
+          setPpPresetName('')
+        } catch (err) { setError(String(err.message || err)) }
+        finally { setPpSaving(false) }
+      }
+      const overwritePpPreset = async () => {
+        if (!ppSettings.activePresetId) return savePpPreset()
+        setPpSaving(true)
+        try {
+          const current = await apiPut('/api/postprocess-settings', ppPayload())
+          applyPpSettingsResponse(current)
+          applyPpSettingsResponse(await apiPut(`/api/postprocess-presets/${encodeURIComponent(ppSettings.activePresetId)}`, {}))
+        } catch (err) { setError(String(err.message || err)) }
+        finally { setPpSaving(false) }
+      }
+      const deletePpPreset = async () => {
+        if (!ppSettings.activePresetId || ppSettings.activePresetId === 'default') return
+        setPpSaving(true)
+        try { applyPpSettingsResponse(await apiDelete(`/api/postprocess-presets/${encodeURIComponent(ppSettings.activePresetId)}`)) }
+        catch (err) { setError(String(err.message || err)) }
+        finally { setPpSaving(false) }
+      }
+      const updateMvu = (key, value) => setMvuSettings((prev) => ({ ...prev, [key]: value }))
+      const applyMvuSettings = async (overrides = {}) => {
+        setMvuSaving(true)
+        try {
+          const r = await apiPut('/api/mvu-settings', {
+            enabled: mvuSettings.enabled,
+            model: mvuSettings.model,
+            temperature: mvuSettings.temperature,
+            promptName: mvuSettings.promptName,
+            ...overrides,
+          })
+          if (r && typeof r === 'object') setMvuSettings((prev) => ({ ...prev, ...r }))
+        } catch (err) { setError(String(err.message || err)) }
+        finally { setMvuSaving(false) }
+      }
+      const selectMvuPreset = async (id) => {
+        if (!id) return
+        setMvuSaving(true)
+        try {
+          const r = await apiPut('/api/mvu-settings', { presetId: id })
+          if (r && typeof r === 'object') setMvuSettings((prev) => ({ ...prev, ...r }))
+        } catch (err) { setError(String(err.message || err)) }
+        finally { setMvuSaving(false) }
+      }
+      const saveMvuPreset = async () => {
+        const name = mvuPresetName.trim()
+        if (!name) { setError('请输入 MVU 预设名称。'); return }
+        setMvuSaving(true)
+        try {
+          await applyMvuSettings()
+          const r = await apiPost('/api/mvu-presets', { name })
+          if (r && typeof r === 'object') setMvuSettings((prev) => ({ ...prev, ...r }))
+          setMvuPresetName('')
+        } catch (err) { setError(String(err.message || err)) }
+        finally { setMvuSaving(false) }
+      }
+      const overwriteMvuPreset = async () => {
+        if (!mvuSettings.activePresetId) return saveMvuPreset()
+        setMvuSaving(true)
+        try {
+          await applyMvuSettings()
+          const r = await apiPut(`/api/mvu-presets/${encodeURIComponent(mvuSettings.activePresetId)}`, {})
+          if (r && typeof r === 'object') setMvuSettings((prev) => ({ ...prev, ...r }))
+        } catch (err) { setError(String(err.message || err)) }
+        finally { setMvuSaving(false) }
+      }
+      const deleteMvuPreset = async () => {
+        if (!mvuSettings.activePresetId || mvuSettings.activePresetId === 'default') return
+        setMvuSaving(true)
+        try {
+          const r = await apiDelete(`/api/mvu-presets/${encodeURIComponent(mvuSettings.activePresetId)}`)
+          if (r && typeof r === 'object') setMvuSettings((prev) => ({ ...prev, ...r }))
+        } catch (err) { setError(String(err.message || err)) }
+        finally { setMvuSaving(false) }
+      }
+      useEffect(() => {
+        (async () => {
+          try {
+            const c = await apiGet('/api/config')
+            setCfg({ provider: c.provider, baseUrl: c.baseUrl, apiKey: API_KEY_MASK, model: c.model })
+            setHasSavedKey(true)
+          } catch (err) { setError(String(err.message || err)) }
+        })()
+      }, [])
+      useEffect(() => { setModels([]); setError(null) }, [cfg.provider])
+      const update = (key, value) => setCfg((p) => ({ ...p, [key]: value }))
+      const fetchModels = async () => {
+        setError(null); setLoading(true)
+        try {
+          const params = new URLSearchParams()
+          params.set('provider', cfg.provider)
+          if (cfg.provider === 'openai') {
+            params.set('baseUrl', cfg.baseUrl)
+            // `***` is only the wire placeholder; let the server use its persisted key.
+            if (cfg.apiKey !== API_KEY_MASK) params.set('apiKey', cfg.apiKey)
+          }
+          const result = await apiGet('/api/models?' + params.toString())
+          setModels(result.models || [])
+          if ((result.models || []).length === 0) setError('没有拉到任何模型。')
+        } catch (err) { setError(String(err.message || err)) } finally { setLoading(false) }
+      }
+      const saveConfig = async () => {
+        setError(null); setLoading(true)
+        try {
+          const result = await apiPut('/api/config', cfg)
+          setCfg({ provider: result.provider, baseUrl: result.baseUrl, apiKey: API_KEY_MASK, model: result.model })
+          setHasSavedKey(true)
+          if (props && typeof props.onConfigChange === 'function') props.onConfigChange()
+        } catch (err) { setError(String(err.message || err)) } finally { setLoading(false) }
+      }
+      const isMock = cfg.provider === 'mock'
+      const modelOptions = [{ id: cfg.model || '—' }, ...models.filter((m) => m.id !== cfg.model)]
+      return h('div', { className: 'panel' },
+        h('h2', null, 'API 配置'),
+        h('div', { className: 'field' },
+          h('label', null, 'Provider'),
+          h('div', { className: 'row' },
+            radioButton('openai', 'OpenAI 兼容', cfg.provider, (v) => update('provider', v)),
+            radioButton('mock', 'Mock', cfg.provider, (v) => update('provider', v)),
+          ),
+        ),
+        h('div', { className: 'field' },
+          h('label', null, 'Base URL'),
+          h('input', { type: 'text', value: cfg.baseUrl, onChange: (e) => update('baseUrl', e.target.value), placeholder: 'https://api.openai.com/v1', disabled: isMock, autoComplete: 'off', spellCheck: false }),
+        ),
+        h('div', { className: 'field' },
+          h('label', null, 'API Key'),
+          h('input', { type: 'password', value: cfg.apiKey, onChange: (e) => update('apiKey', e.target.value), placeholder: 'sk-...', disabled: isMock, autoComplete: 'off', spellCheck: false }),
+          cfg.apiKey === API_KEY_MASK && hasSavedKey ? h('div', { className: 'hint' }, '已保存 — 输入新值以替换') : null,
+        ),
+        h('div', { className: 'field' },
+          h('label', null, 'Model'),
+          h('div', { className: 'row' },
+            h('select', { value: cfg.model, onChange: (e) => update('model', e.target.value), disabled: isMock && models.length === 0, style: { flex: 1 } },
+              ...modelOptions.map((m) => h('option', { key: m.id, value: m.id }, m.id))),
+            h('button', { onClick: fetchModels, disabled: loading, title: '拉取 /v1/models' }, loading ? '…' : '↻ 拉取'),
+          ),
+          models.length === 0 ? h('div', { className: 'hint' }, '尚未拉取,点 ↻ 拉取模型列表。') : h('div', { className: 'hint' }, `${models.length} 个模型可选用`),
+        ),
+        h('div', { className: 'field postprocess-settings' },
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', cursor: 'pointer' } },
+            h('input', { type: 'checkbox', checked: ppSettings.enabled, disabled: ppSaving, onChange: togglePostprocess }),
+            '⑤ 后处理(postprocess)',
+            ppSaving ? h('span', { style: { color: 'var(--text-dim)', fontSize: '11px' } }, '保存中…') : null,
+          ),
+          h('div', { className: 'hint' }, '关闭后 AI 回复不经过修订管线;下面的参数会随当前预设保存。'),
+          h('div', { className: 'field' },
+            h('label', null, '后处理预设'),
+            h('div', { className: 'row' },
+              h('select', {
+                value: ppSettings.activePresetId || '', disabled: ppSaving, style: { flex: 1 },
+                onChange: (e) => selectPpPreset(e.target.value),
+              },
+                ...(ppSettings.presets || []).map((preset) => h('option', { key: preset.id, value: preset.id }, preset.name)),
+              ),
+              h('button', { onClick: deletePpPreset, disabled: ppSaving || !ppSettings.activePresetId || ppSettings.activePresetId === 'default', title: '删除当前预设' }, '删除'),
+            ),
+          ),
+          h('div', { className: 'row' },
+            h('label', { className: 'compact-field' }, '轮数', h('input', { type: 'number', min: 1, max: 4, step: 1, value: ppSettings.maxRounds, onChange: (e) => updatePp('maxRounds', Number(e.target.value)) })),
+            h('label', { className: 'compact-field' }, '密度上限', h('input', { type: 'number', min: 0, max: 1, step: 0.05, value: ppSettings.densityMax, onChange: (e) => updatePp('densityMax', Number(e.target.value)) })),
+          ),
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', cursor: 'pointer', marginTop: '6px' } },
+            h('input', { type: 'checkbox', checked: ppSettings.deferExtract, onChange: (e) => updatePp('deferExtract', e.target.checked) }),
+            '意象抽取异步执行',
+          ),
+          h('div', { className: 'hint' }, 'A/B/C 按顺序执行；Verify 已移除。轮数越高耗时越长，建议默认 1-2 轮。'),
+          h('div', { className: 'field' },
+            h('label', null, 'Agent 模型覆盖（留空使用主模型）'),
+            ...[
+              ['a', 'A 扩写张力'], ['b', 'B 感官去重'], ['c', 'C 密度收尾'], ['extract', '意象抽取'],
+            ].map(([key, label]) => h('input', {
+              key, type: 'text', value: (ppSettings.modelOverrides || {})[key] || '', placeholder: label,
+              onChange: (e) => updatePpModel(key, e.target.value), autoComplete: 'off', spellCheck: false,
+            })),
+          ),
+          h('div', { className: 'row' },
+            h('button', { onClick: () => savePpSettings(), disabled: ppSaving, style: { flex: 1 } }, '应用设置'),
+            h('button', { onClick: overwritePpPreset, disabled: ppSaving, style: { flex: 1 } }, '保存当前预设'),
+          ),
+          h('div', { className: 'row', style: { marginTop: '6px' } },
+            h('input', { type: 'text', value: ppPresetName, onChange: (e) => setPpPresetName(e.target.value), placeholder: '新预设名称', autoComplete: 'off', style: { flex: 1 } }),
+            h('button', { onClick: savePpPreset, disabled: ppSaving }, '另存为'),
+          ),
+        ),
+        h('div', { className: 'field postprocess-settings' },
+          h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', cursor: 'pointer' } },
+            h('input', { type: 'checkbox', checked: mvuSettings.enabled, disabled: mvuSaving, onChange: (e) => { updateMvu('enabled', e.target.checked); void applyMvuSettings({ enabled: e.target.checked }) } }),
+            'MVU 变量处理（独立 LLM）',
+            mvuSaving ? h('span', { style: { color: 'var(--text-dim)', fontSize: '11px' } }, '保存中…') : null,
+          ),
+          h('div', { className: 'hint' }, '正文完成后单独分析并更新卡片变量；不占用 response 阶段，不改变正文生成模型。'),
+          h('div', { className: 'field' },
+            h('label', null, 'MVU 处理预设'),
+            h('div', { className: 'row' },
+              h('select', { value: mvuSettings.activePresetId || '', disabled: mvuSaving, style: { flex: 1 }, onChange: (e) => selectMvuPreset(e.target.value) },
+                ...(mvuSettings.presets || []).map((preset) => h('option', { key: preset.id, value: preset.id }, preset.name)),
+              ),
+              h('button', { onClick: deleteMvuPreset, disabled: mvuSaving || !mvuSettings.activePresetId || mvuSettings.activePresetId === 'default' }, '删除'),
+            ),
+          ),
+          h('div', { className: 'row' },
+            h('label', { className: 'compact-field', style: { flex: 1 } }, '模型（留空复用主模型）', h('input', { type: 'text', value: mvuSettings.model, onChange: (e) => updateMvu('model', e.target.value), placeholder: cfg.model, autoComplete: 'off', spellCheck: false })),
+            h('label', { className: 'compact-field' }, '温度', h('input', { type: 'number', min: 0, max: 2, step: 0.05, value: mvuSettings.temperature, onChange: (e) => updateMvu('temperature', Number(e.target.value)) })),
+          ),
+          h('div', { className: 'hint' }, '处理提示词使用 /api/prompts/mvu，可在提示词编辑面板直接修改。'),
+          h('div', { className: 'row' },
+            h('button', { onClick: () => applyMvuSettings(), disabled: mvuSaving, style: { flex: 1 } }, '应用 MVU 设置'),
+            h('button', { onClick: overwriteMvuPreset, disabled: mvuSaving, style: { flex: 1 } }, '保存当前预设'),
+          ),
+          h('div', { className: 'row', style: { marginTop: '6px' } },
+            h('input', { type: 'text', value: mvuPresetName, onChange: (e) => setMvuPresetName(e.target.value), placeholder: '新 MVU 预设名称', autoComplete: 'off', style: { flex: 1 } }),
+            h('button', { onClick: saveMvuPreset, disabled: mvuSaving }, '另存为'),
+          ),
+        ),
+        h('div', { className: 'field' },
+          h('button', { className: 'primary', onClick: saveConfig, disabled: loading, style: { width: '100%' } }, '保存配置'),
+        ),
+        error ? h('div', { className: 'error-banner' }, error) : null,
+      )
+    }
+
+    function radioButton(value, label, current, onPick) {
+      return h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '12px', cursor: 'pointer' } },
+        h('input', { type: 'radio', name: 'api-provider', value, checked: current === value, onChange: () => onPick(value) }),
+        ' ' + label,
+      )
+    }
+
+    // ─── Agent progress with expandable I/O trace ──────────────────────────
+    // ⑤ postprocess 的正文链路是 4 个同步 stage；⑤.3 意象抽取在后台异步执行，
+    // 不阻塞 final，也不再让当前请求一直显示 extract 处理中。
+    // 不再用写死的 STAGE_ORDER,而是根据收到过的 stage 事件实时生成。
+    const TOP_LEVEL_STAGES = ['intent', 'worldbook', 'context', 'response', 'mvu', 'summarize']
+    const STAGE_LABELS = {
+      intent: '① 意图识别', worldbook: '2.1 世界书匹配', context: '2.2 上下文处理',
+      response: '③ 输出回复', mvu: 'MVU 变量处理(独立)', summarize: '④ 摘要(异步)',
+      'postprocess-gate': '⑤.0 关键词门',
+      'postprocess-pass-a': '⑤.1A 扩写张力',
+      'postprocess-pass-b': '⑤.1B 感官去重',
+      'postprocess-pass-c': '⑤.1C 密度收尾',
+      'postprocess-extract': '⑤.3 意象抽取',
+    }
+    const INITIAL_STAGES = Object.fromEntries(TOP_LEVEL_STAGES.map(s => [s, 'pending']))
+
+    function parseSseBuffer(buf) {
+      const events = []
+      const parts = buf.split('\n\n')
+      const rest = parts.pop() || ''
+      for (const block of parts) {
+        if (block.length === 0) continue
+        let evt = 'message'
+        const dataLines = []
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event: ')) evt = line.slice(7).trim()
+          else if (line.startsWith('data: ')) dataLines.push(line.slice(6))
+          else if (line.startsWith('data:')) dataLines.push(line.slice(5))
+        }
+        if (dataLines.length > 0) events.push({ event: evt, data: dataLines.join('\n') })
+      }
+      return { events, rest }
+    }
+
+    // ─── 聊天消息的 HTML 安全渲染(酒馆卡的状态栏/内嵌 HTML) ────────────────
+    // 白名单净化:DOMParser 解析后逐节点过滤。script/iframe/object/embed 一律剥掉,
+    // on* 事件属性与 javascript: URL 剥掉;<style> 保留(酒馆状态栏大量依赖内联样式,
+    // 与 SillyTavern 行为一致——样式作用于整个文档,本地单用户场景可接受)。
+    const ALLOWED_TAGS = new Set(['DIV','SPAN','P','BR','HR','B','STRONG','I','EM','U','S','SMALL','H1','H2','H3','H4','H5','H6','UL','OL','LI','DL','DT','DD','TABLE','THEAD','TBODY','TFOOT','TR','TD','TH','CAPTION','COLGROUP','COL','IMG','FONT','A','CODE','PRE','BLOCKQUOTE','DETAILS','SUMMARY','STYLE','CENTER','SECTION','ARTICLE','HEADER','FOOTER','FIGURE','FIGCAPTION','SUB','SUP','MARK','PROGRESS','METER'])
+    const ALLOWED_ATTRS = new Set(['style','class','src','alt','width','height','align','colspan','rowspan','href','title','bgcolor','color','size','face','dir','open','value','max','min','id'])
+
+    function sanitizeHtml(html) {
+      const doc = new DOMParser().parseFromString(html, 'text/html')
+      const walk = (node) => {
+        for (const child of [...node.childNodes]) {
+          if (child.nodeType === Node.ELEMENT_NODE) {
+            const tag = child.tagName
+            if (!ALLOWED_TAGS.has(tag)) {
+              // 危险/未知标签:保留其子文本,丢弃标签本身(script/style 内容除外,直接整树丢)
+              if (tag === 'SCRIPT' || tag === 'IFRAME' || tag === 'OBJECT' || tag === 'EMBED' || tag === 'LINK' || tag === 'META' || tag === 'BASE') {
+                child.remove(); continue
+              }
+              const frag = doc.createDocumentFragment()
+              while (child.firstChild) frag.appendChild(child.firstChild)
+              node.replaceChild(frag, child)
+              walk(frag); continue
+            }
+            for (const attr of [...child.attributes]) {
+              const name = attr.name.toLowerCase()
+              if (name.startsWith('on') || !ALLOWED_ATTRS.has(name)) child.removeAttribute(attr.name)
+              else if ((name === 'href' || name === 'src') && /^\s*javascript:/i.test(attr.value)) child.removeAttribute(attr.name)
+            }
+            walk(child)
+          } else if (child.nodeType === Node.COMMENT_NODE) {
+            child.remove()
+          }
+        }
+      }
+      walk(doc.body)
+      return doc.body.innerHTML
+    }
+
+    /** 消息内容渲染:先过 display 位正则(不落库,酒馆 MD_DISPLAY 语义),
+     *  再用 GFM Markdown 转成 HTML,最后经过同一套白名单净化。
+     *  这样普通段落、列表、引用和 ```markdown 代码块都会正确显示,
+     *  同时保留酒馆状态栏所需的安全 HTML。 */
+    function MessageContent({ content, role, character }) {
+      const processed = applyDisplayRegex(content, role === 'user' ? 1 : 2, character)
+      const markdownHtml = marked.parse(processed, { gfm: true, breaks: true })
+      return h('div', { className: 'msg-text msg-markdown', dangerouslySetInnerHTML: { __html: sanitizeHtml(markdownHtml) } })
+    }
+
+    /** 单个 stage 的可展开 trace 卡片。⑤ postprocess 的同步正文链路拆成独立 stage,
+     *  每个 stage 都是独立卡片,不再嵌套 sub-trace。 */
+    function StageTraceCard(/** @type {{name:string, status:string, trace: AgentTrace|null}} */ props) {
+      const { name, status, trace } = props
+      const [open, setOpen] = useState(false)
+      const [tab, setTab] = useState('output')
+      const label = STAGE_LABELS[name] || name
+      return h('div', { className: `stage-card stage-card-${status}` },
+        h('div', { className: 'stage-card-head', onClick: () => setOpen((o) => !o) },
+          h('span', { className: 'stage-card-dot' }),
+          h('span', { className: 'stage-card-label' }, label),
+          trace ? h('span', { className: 'stage-card-duration' }, `${trace.durationMs}ms`) : null,
+          trace?.usageTotal ? h('span', { className: 'stage-card-tokens' }, tokenLabel(trace.usageTotal)) : null,
+          trace?.reused ? h('span', { className: 'stage-card-reused' }, '复用') : null,
+          h('span', { className: 'stage-card-status' }, status === 'done' ? '✓' : (status === 'error' ? '✗' : (status === 'running' ? '…' : '○'))),
+          h('span', { className: 'stage-card-toggle' }, open ? '▾' : '▸'),
+        ),
+        open && trace ? h('div', { className: 'stage-card-body' },
+          h('div', { className: 'stage-card-tabs' },
+            h('button', { className: 'mini ' + (tab === 'output' ? 'active' : ''), onClick: () => setTab('output') }, '输出'),
+            h('button', { className: 'mini ' + (tab === 'input' ? 'active' : ''), onClick: () => setTab('input') }, '输入'),
+            trace.outputJson.length > 500 || trace.inputJson.length > 500
+              ? h('span', { className: 'hint', style: { marginLeft: 'auto' } }, 'JSON 可能很长,可滚动')
+              : null,
+          ),
+          h('pre', { className: 'stage-card-payload' },
+            tab === 'output' ? prettyJson(trace.outputJson) : prettyJson(trace.inputJson),
+          ),
+        ) : null,
+        open && !trace ? h('div', { className: 'stage-card-body hint' }, '(无 I/O,等待 stage 完成…)') : null,
+      )
+    }
+
+    function prettyJson(s) {
+      // 简单 pretty-print:把字符串用 JSON.parse 解析再 stringify(indent 2)
+      // 如果解析失败(被截断),原样返回
+      try { return JSON.stringify(JSON.parse(s), null, 2) } catch { return s }
+    }
+
+    /** 从当前 progressStages 里挑出所有 stage name,按"顶层 + 后处理子"顺序排:
+     *   - 顶层:intent → worldbook → context → response → summarize
+     *   - 后处理子:postprocess-gate → postprocess-pass-a → pass-b → pass-c
+     *  实际跑的子集(看 progressStages 当前 key 集合),按这个固定顺序展示。 */
+    function AgentProgress(/** @type {{stages: typeof INITIAL_STAGES, traces: Record<string, AgentTrace>}} */ { stages, traces }) {
+      const allOrder = [
+        'intent', 'worldbook', 'context', 'response', 'mvu',
+        'postprocess-gate', 'postprocess-pass-a', 'postprocess-pass-b',
+        'postprocess-pass-c', 'postprocess-extract',
+        'summarize',
+      ]
+      const visible = allOrder.filter((n) => stages[n] !== undefined || traces[n] !== undefined)
+      return h('div', { className: 'stage-traces' },
+        h('div', { className: 'stage-traces-head' }, 'Agent 链路(点击展开 I/O)'),
+        visible.map((name) => h(StageTraceCard, {
+          key: name,
+          name,
+          status: stages[name] || 'pending',
+          trace: traces[name] || null,
+        })),
+      )
+    }
+
+    // ─── Trace viewer:按轮回看持久化的 agent trace(traces.jsonl) ────────
+    const TRACE_STAGE_ORDER = ['intent', 'worldbook', 'context', 'response', 'mvu']
+    const TRACE_PREVIEW_CHARS = 500
+
+    /** 单个 JSON payload 展示:pretty-print,超长默认截断 + "展开全部"。 */
+    function TracePayload(/** @type {{jsonStr: string, expandKey: string, expanded: boolean, onExpand: (k: string) => void}} */ props) {
+      const pretty = prettyJson(props.jsonStr)
+      if (pretty.length <= TRACE_PREVIEW_CHARS || props.expanded) {
+        return h('pre', { className: 'stage-card-payload' }, pretty)
+      }
+      return h('div', null,
+        h('pre', { className: 'stage-card-payload' }, pretty.slice(0, TRACE_PREVIEW_CHARS) + ` …(共 ${pretty.length} 字符,已截断)`),
+        h('button', { className: 'mini', style: { marginTop: '2px' }, onClick: () => props.onExpand(props.expandKey) }, '展开全部'),
+      )
+    }
+
+    /** 一轮里的单个 stage 卡片(持久化 trace 版,只读)。 */
+    function TraceStageCard(/** @type {{trace: AgentTrace, traceKey: string}} */ props) {
+      const [open, setOpen] = useState(false)
+      const [tab, setTab] = useState('output')
+      const [expandedAll, setExpandedAll] = useState(() => new Set())
+      const t = props.trace
+      const toggleAll = (k) => setExpandedAll((prev) => {
+        const next = new Set(prev); if (next.has(k)) next.delete(k); else next.add(k); return next
+      })
+      const expandKey = `${props.traceKey}:${tab}`
+      return h('div', { className: 'stage-card stage-card-done' },
+        h('div', { className: 'stage-card-head', onClick: () => setOpen((o) => !o) },
+          h('span', { className: 'stage-card-dot' }),
+          h('span', { className: 'stage-card-label' }, STAGE_LABELS[t.name] || t.name),
+          h('span', { className: 'stage-card-duration' }, `${t.durationMs}ms`),
+          t.usageTotal ? h('span', { className: 'stage-card-tokens' }, tokenLabel(t.usageTotal)) : null,
+          t.reused ? h('span', { className: 'stage-card-reused' }, '复用') : null,
+          h('span', { className: 'stage-card-toggle' }, open ? '▾' : '▸'),
+        ),
+        open ? h('div', { className: 'stage-card-body' },
+          h('div', { className: 'stage-card-tabs' },
+            h('button', { className: 'mini ' + (tab === 'output' ? 'active' : ''), onClick: () => setTab('output') }, '输出'),
+            h('button', { className: 'mini ' + (tab === 'input' ? 'active' : ''), onClick: () => setTab('input') }, '输入'),
+            h('span', { className: 'hint', style: { marginLeft: 'auto' } }, fmtTime(t.ts)),
+          ),
+          h(TracePayload, {
+            jsonStr: tab === 'output' ? t.outputJson : t.inputJson,
+            expandKey,
+            expanded: expandedAll.has(expandKey),
+            onExpand: toggleAll,
+          }),
+        ) : null,
+      )
+    }
+
+    /** Agent 追踪查看器:选会话 → GET /api/sessions/:id/traces → 按 turn 分组。 */
+    function TracePanel(/** @type {{currentSessionId: string|null, refreshTick: number, onError: (e: string) => void}} */ props) {
+      const [sessions, setSessions] = useState(/** @type {SessionInfo[]} */([]))
+      const [selected, setSelected] = useState(null)
+      const [traces, setTraces] = useState(/** @type {AgentTrace[]} */([]))
+      const [turnStats, setTurnStats] = useState([])
+      const [loading, setLoading] = useState(false)
+      const [error, setError] = useState(null)
+      const [expandedTurns, setExpandedTurns] = useState(() => new Set())
+
+      const refreshSessions = useCallback(async () => {
+        try {
+          const r = await apiGet('/api/sessions')
+          setSessions(r.sessions || [])
+        } catch (err) { setError(String(err.message || err)) }
+      }, [])
+
+      useEffect(() => { void refreshSessions() }, [refreshSessions, props.refreshTick])
+
+      // 跟随主界面当前会话切换
+      useEffect(() => { if (props.currentSessionId !== null) setSelected(props.currentSessionId) }, [props.currentSessionId])
+
+      const load = useCallback(async (sid) => {
+        if (sid === null) { setTraces([]); setTurnStats([]); return }
+        setLoading(true); setError(null)
+        try {
+          const r = await apiGet(`/api/sessions/${encodeURIComponent(sid)}/traces`)
+          const list = /** @type {AgentTrace[]} */ (r.traces || [])
+          setTraces(list)
+          setTurnStats(r.turnStats || [])
+          // 数据量大时只默认展开最后一次生成；runId 让同一 user turn 的重 roll 分开。
+          const turns = [...new Set(list.map((t) => `${t.turn}:${t.runId || 'legacy'}`))]
+          const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null
+          setExpandedTurns(lastTurn === null ? new Set() : new Set([lastTurn]))
+        } catch (err) {
+          setError(String(err.message || err)); setTraces([]); setTurnStats([])
+        } finally { setLoading(false) }
+      }, [])
+
+      useEffect(() => { void load(selected) }, [selected, load, props.refreshTick])
+
+      const toggleTurn = (k) => setExpandedTurns((prev) => {
+        const next = new Set(prev); if (next.has(k)) next.delete(k); else next.add(k); return next
+      })
+
+      // 按 user turn + generation 分组；同一轮的重 roll 不与原回复混在一起。
+      const runKey = (t) => `${t.turn}:${t.runId || 'legacy'}`
+      const byTurn = new Map()
+      for (const t of traces) {
+        const k = runKey(t)
+        if (!byTurn.has(k)) byTurn.set(k, [])
+        byTurn.get(k).push(t)
+      }
+      const turnKeys = [...byTurn.keys()].reverse()
+
+      return h('div', { className: 'panel' },
+        h('h2', null, `Agent 追踪 (${traces.length})`),
+        h('div', { className: 'field' },
+          h('div', { className: 'row' },
+            h('select', {
+              value: selected ?? '', style: { flex: 1 },
+              onChange: (e) => setSelected(e.target.value.length > 0 ? e.target.value : null),
+            },
+              h('option', { value: '' }, '— 选择会话 —'),
+              ...sessions.map((s) => h('option', { key: s.sessionId, value: s.sessionId },
+                `${s.label} · ${s.characterName} · ${s.turnCount}t`)),
+            ),
+            h('button', { onClick: () => { void load(selected) }, disabled: loading || selected === null, title: '重新拉取 traces' }, loading ? '…' : '↻'),
+          ),
+          h('div', { className: 'hint' }, '每轮 4 个 stage 的输入/输出落盘回看(刷新不丢);默认只展开最后一轮。'),
+        ),
+        error ? h('div', { className: 'error-banner' }, error) : null,
+        selected === null
+          ? h('div', { className: 'list-empty' }, '先选择一个会话')
+          : traces.length === 0
+            ? h('div', { className: 'list-empty' }, loading ? '加载中…' : '该会话暂无 trace(发一轮对话后生成)')
+            : h('div', { className: 'trace-turns' },
+                turnKeys.map((k) => {
+                  const group = byTurn.get(k) || []
+                  const runStat = turnStats.find((s) => s.runId === group[0]?.runId) || null
+                  const turnNumber = group[0]?.turn ?? '—'
+                  const ordered = [
+                    ...group.filter((t) => TRACE_STAGE_ORDER.includes(t.name))
+                      .sort((a, b) => TRACE_STAGE_ORDER.indexOf(a.name) - TRACE_STAGE_ORDER.indexOf(b.name)),
+                    ...group.filter((t) => !TRACE_STAGE_ORDER.includes(t.name)),
+                  ]
+                  const totalMs = ordered.reduce((sum, t) => sum + (t.durationMs || 0), 0)
+                  return h('div', { key: k, className: 'trace-turn' },
+                    h('div', { className: 'trace-turn-head', onClick: () => toggleTurn(k) },
+                      h('span', { className: 'trace-turn-toggle' }, expandedTurns.has(k) ? '▾' : '▸'),
+                      h('span', { className: 'trace-turn-label' }, `第 ${turnNumber} 轮${runStat?.reroll ? ' · 重 roll' : ''}`),
+                      h('span', { className: 'trace-turn-count' }, `${ordered.length} stage · ${totalMs}ms${runStat ? ` · 总 ${fmtTokens(runStat.total.totalTokens)} tok` : ''}`),
+                    ),
+                    expandedTurns.has(k) ? h('div', { className: 'trace-turn-stages' },
+                      runStat ? h('div', { className: 'trace-token-summary' },
+                        h('div', { className: 'trace-token-total' }, `本轮总计：${fmtTokens(runStat.total.totalTokens)} token${runStat.total.estimated ? '（估算）' : ''}`),
+                        h('div', { className: 'trace-token-agents' },
+                          Object.entries(runStat.agents || {}).map(([name, usage]) => h('span', { key: name, className: 'trace-token-agent' },
+                            `${STAGE_LABELS[name] || name} ${tokenLabel(usage)}${usage.reused ? ' · 复用' : ''}${usage.deferred ? ' · 异步' : ''}`,
+                          )),
+                        ),
+                      ) : null,
+                      ordered.map((t, i) => h(TraceStageCard, { key: `${k}:${t.name}:${i}`, trace: t, traceKey: `${k}:${i}` })),
+                    ) : null,
+                  )
+                }),
+              ),
+      )
+    }
+
+    // ─── 全局正则脚本(酒馆 Regex 扩展) ────────────────────────────────────
+    // display 位在前端渲染时应用(不落库);user_input/ai_output 位由服务端应用。
+    // 应用逻辑与 src/agent-loop/regex-scripts.ts 保持一致(前端无法 import ts,双实现)。
+    let displayRegexScripts = /** @type {{id:string,scriptName:string,findRegex:string,replaceString:string,trimStrings:string[],placement:string[],disabled:boolean}[]} */([])
+    function regexFromStringUI(input) {
+      try {
+        const m = input.match(/(\/?)(.+)\1([a-z]*)/i)
+        if (m === null) return null
+        if (m[3] && !/^(?!.*?(.).*?\1)[gmixXsuUAJ]+$/.test(m[3])) return new RegExp(input)
+        return new RegExp(m[2], m[3] || '')
+      } catch { return null }
+    }
+    function runRegexScriptUI(script, rawString) {
+      if (script.disabled || !script.findRegex || !rawString) return rawString
+      const find = regexFromStringUI(script.findRegex)
+      if (!find) return rawString
+      try {
+        return rawString.replace(find, (...args) => {
+          const groups = args[args.length - 1]
+          const template = script.replaceString.replace(/\{\{match\}\}/gi, '$0')
+          return template.replace(/\$(\d+)|\$<([^>]+)>/g, (_m, num, name) => {
+            let captured = num !== undefined ? args[Number(num)] : (groups && typeof groups === 'object' ? groups[name] : undefined)
+            if (captured === undefined || captured === null) return ''
+            let out = String(captured)
+            for (const t of (script.trimStrings || [])) { if (t) out = out.split(t).join('') }
+            return out
+          })
+        })
+      } catch { return rawString }
+    }
+    function cardMacro(value, character, userName = '用户') {
+      const name = character && typeof character.name === 'string' ? character.name : ''
+      return String(value || '')
+        .replace(/\{\{char\}\}|<char>|<bot>/giu, name)
+        .replace(/\{\{user\}\}|<user>/giu, userName)
+    }
+    function cardRegexFind(script, character, userName) {
+      let find = String(script.findRegex || '')
+      const mode = Number(script.substituteRegex || 0)
+      if (mode === 1) find = cardMacro(find, character, userName)
+      if (mode === 2) find = cardMacro(find, character, userName).replace(/[\\^$.*+?{}[\]\\/|()]/g, '\\$&')
+      return find
+    }
+    function runCardRegexScriptUI(script, rawString, character, userName = '用户') {
+      if (script.disabled || !script.findRegex || !rawString) return rawString
+      const find = regexFromStringUI(cardRegexFind(script, character, userName))
+      if (!find) return rawString
+      try {
+        return rawString.replace(find, (...args) => {
+          const groups = args[args.length - 1]
+          let replacement = String(script.replaceString || '').replace(/\{\{match\}\}/giu, '$0')
+          replacement = replacement.replace(/\$(\d+)|\$<([^>]+)>/gu, (_m, num, name) => {
+            let captured = num !== undefined ? args[Number(num)] : (groups && typeof groups === 'object' ? groups[name] : undefined)
+            if (captured === undefined || captured === null) return ''
+            let out = String(captured)
+            for (const trim of (script.trimStrings || [])) if (trim) out = out.split(cardMacro(trim, character, userName)).join('')
+            return out
+          })
+          return cardMacro(replacement, character, userName)
+        })
+      } catch { return rawString }
+    }
+    function applyDisplayRegex(text, placement = 2, character = null) {
+      let out = text
+      for (const s of displayRegexScripts) {
+        if (s.disabled || !s.placement.includes('display')) continue
+        out = runRegexScriptUI(s, out)
+      }
+      const scoped = character && character.frontend && Array.isArray(character.frontend.regexScripts)
+        ? character.frontend.regexScripts : []
+      for (const s of scoped) {
+        if (s.disabled || !Array.isArray(s.placement) || !s.placement.includes(placement)) continue
+        if (!s.markdownOnly && s.promptOnly) continue
+        out = runCardRegexScriptUI(s, out, character)
+      }
+      return out
+    }
+    function refreshDisplayRegexScripts() {
+      return apiGet('/api/regex').then((r) => { displayRegexScripts = r.scripts || [] }).catch(() => {})
+    }
+
+    function RegexPanel(/** @type {{onError:(e:string)=>void}} */ props) {
+      const [scripts, setScripts] = useState(/** @type {any[]} */([]))
+      const [editingId, setEditingId] = useState(/** @type {string|null} */(null))
+      const [name, setName] = useState('')
+      const [find, setFind] = useState('')
+      const [replace, setReplace] = useState('')
+      const [trims, setTrims] = useState('')
+      const [placements, setPlacements] = useState(['display'])
+      const [loading, setLoading] = useState(false)
+      const [testIn, setTestIn] = useState('')
+      const [testOut, setTestOut] = useState(null)
+
+      const refresh = useCallback(async () => {
+        try {
+          const r = await apiGet('/api/regex')
+          setScripts(r.scripts || [])
+          displayRegexScripts = r.scripts || []
+        } catch (err) { props.onError(String(err.message || err)) }
+      }, [props])
+      useEffect(() => { refresh() }, [refresh])
+
+      const startCreate = () => { setEditingId(''); setName(''); setFind(''); setReplace(''); setTrims(''); setPlacements(['display']); setTestOut(null) }
+      const startEdit = (s) => { setEditingId(s.id); setName(s.scriptName); setFind(s.findRegex); setReplace(s.replaceString); setTrims((s.trimStrings || []).join('\n')); setPlacements(s.placement || ['display']); setTestOut(null) }
+      const cancelEdit = () => { setEditingId(null); setTestOut(null) }
+      const togglePlacement = (p) => setPlacements((prev) => prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p])
+
+      const save = useCallback(async () => {
+        if (find.trim().length === 0) { props.onError('findRegex 不能为空'); return }
+        const body = {
+          scriptName: name.trim() || '未命名正则',
+          findRegex: find,
+          replaceString: replace,
+          trimStrings: trims.split('\n').map((s) => s.trim()).filter((s) => s.length > 0),
+          placement: placements.length > 0 ? placements : ['display'],
+          disabled: false,
+        }
+        setLoading(true)
+        try {
+          if (editingId === '') await apiPost('/api/regex', body)
+          else if (editingId !== null) await apiPut(`/api/regex/${encodeURIComponent(editingId)}`, body)
+          cancelEdit(); await refresh()
+        } catch (err) { props.onError(String(err.message || err)) } finally { setLoading(false) }
+      }, [editingId, name, find, replace, trims, placements, refresh, props])
+
+      const toggleDisabled = useCallback(async (s) => {
+        try {
+          await apiPut(`/api/regex/${encodeURIComponent(s.id)}`, { disabled: !s.disabled })
+          await refresh()
+        } catch (err) { props.onError(String(err.message || err)) }
+      }, [refresh, props])
+
+      const remove = useCallback(async (s) => {
+        if (!window.confirm(`删除正则「${s.scriptName}」?`)) return
+        try { await apiDelete(`/api/regex/${encodeURIComponent(s.id)}`); await refresh() }
+        catch (err) { props.onError(String(err.message || err)) }
+      }, [refresh, props])
+
+      const runTest = useCallback(async () => {
+        if (testIn.length === 0) { setTestOut(null); return }
+        try {
+          const r = await apiPost('/api/regex-test', { text: testIn, placement: placements[0] || 'display' })
+          setTestOut(r.result)
+        } catch (err) { props.onError(String(err.message || err)) }
+      }, [testIn, placements, props])
+
+      const PLACEMENT_LABELS = { display: '显示', user_input: '用户输入', ai_output: 'AI输出', world_info: '世界书' }
+
+      return h('div', { className: 'panel' },
+        h('h2', null, `正则脚本 (${scripts.length})`),
+        h('div', { className: 'hint' }, '酒馆 Regex 同款:改显示/清洗输入输出。$1 捕获组,{{match}} 整体匹配,trim 从捕获组剥串。'),
+        editingId !== null
+          ? h('div', { className: 'field' },
+              h('input', { placeholder: '脚本名', value: name, onChange: (e) => setName(e.target.value) }),
+              h('input', { placeholder: '查找正则,如 /pattern/g 或裸 pattern', value: find, onChange: (e) => setFind(e.target.value), style: { fontFamily: 'ui-monospace, monospace' } }),
+              h('input', { placeholder: '替换为($1 / {{match}} / {{user}} / {{char}})', value: replace, onChange: (e) => setReplace(e.target.value), style: { fontFamily: 'ui-monospace, monospace' } }),
+              h('textarea', { placeholder: 'trim 串(每行一个,从捕获组内容中剥掉)', value: trims, onChange: (e) => setTrims(e.target.value), style: { minHeight: '36px' } }),
+              h('div', { className: 'row', style: { flexWrap: 'wrap' } },
+                Object.keys(PLACEMENT_LABELS).map((p) => h('label', { key: p, style: { fontSize: '11px', display: 'flex', gap: '3px', alignItems: 'center' } },
+                  h('input', { type: 'checkbox', checked: placements.includes(p), onChange: () => togglePlacement(p) }),
+                  PLACEMENT_LABELS[p],
+                ))),
+              h('div', { className: 'row' },
+                h('button', { onClick: save, disabled: loading }, loading ? '保存中…' : '保存'),
+                h('button', { onClick: cancelEdit }, '取消'),
+              ),
+              h('textarea', { placeholder: '试跑:粘贴样例文本…', value: testIn, onChange: (e) => { setTestIn(e.target.value); setTestOut(null) }, style: { minHeight: '36px' } }),
+              h('div', { className: 'row' },
+                h('button', { onClick: runTest }, '试跑'),
+                testOut !== null ? h('span', { className: 'hint' }, '→') : null,
+              ),
+              testOut !== null ? h('pre', { className: 'hint', style: { whiteSpace: 'pre-wrap', margin: 0 } }, testOut) : null,
+            )
+          : h('button', { onClick: startCreate }, '+ 新建正则'),
+        scripts.length === 0
+          ? h('div', { className: 'list-empty' }, '还没有正则脚本')
+          : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+              scripts.map((s) => h('div', { key: s.id, className: 'session-item' + (s.disabled ? '' : ' selected') },
+                h('div', { className: 'session-item-main', style: { flex: 1, opacity: s.disabled ? 0.5 : 1 } },
+                  h('div', { style: { fontWeight: 600, fontSize: '12px' } }, `${s.disabled ? '○' : '●'} ${s.scriptName}`),
+                  h('div', { className: 'hint', style: { fontFamily: 'ui-monospace, monospace', fontSize: '10px' } },
+                    `${s.findRegex.slice(0, 40)} → ${(s.replaceString || '(删除)').slice(0, 30)}`),
+                  h('div', { className: 'hint' }, (s.placement || []).map((p) => PLACEMENT_LABELS[p] || p).join(' · ')),
+                ),
+                h('div', { className: 'session-actions' },
+                  h('button', { title: s.disabled ? '启用' : '禁用', onClick: () => toggleDisabled(s), style: { fontSize: '10px', padding: '0 6px' } }, s.disabled ? '◻' : '◼'),
+                  h('button', { title: '编辑', onClick: () => startEdit(s), style: { fontSize: '10px', padding: '0 6px' } }, '✎'),
+                  h('button', { title: '删除', onClick: () => remove(s), style: { fontSize: '10px', padding: '0 6px' } }, '✕'),
+                ),
+              )),
+            ),
+      )
+    }
+
+    // ─── User persona panel (酒馆 {{user}}) ───────────────────────────────
+    function PersonaPanel(/** @type {{onPersonaChange?: () => void, onError: (e:string)=>void}} */ props) {
+      const [personas, setPersonas] = useState(/** @type {{id:string,name:string,description:string,createdAt:string}[]} */([]))
+      const [currentId, setCurrentId] = useState(/** @type {string|null} */(null))
+      const [editingId, setEditingId] = useState(/** @type {string|null} */(null))
+      const [name, setName] = useState('')
+      const [desc, setDesc] = useState('')
+      const [loading, setLoading] = useState(false)
+
+      const refresh = useCallback(async () => {
+        try {
+          const r = await apiGet('/api/personas')
+          setPersonas(r.personas || [])
+          setCurrentId(r.currentPersonaId ?? null)
+        } catch (err) { props.onError(String(err.message || err)) }
+      }, [props])
+      useEffect(() => { refresh() }, [refresh])
+
+      const startCreate = () => { setEditingId(''); setName(''); setDesc('') }
+      const startEdit = (p) => { setEditingId(p.id); setName(p.name); setDesc(p.description) }
+      const cancelEdit = () => { setEditingId(null); setName(''); setDesc('') }
+
+      const save = useCallback(async () => {
+        if (name.trim().length === 0) { props.onError('名字不能为空'); return }
+        setLoading(true)
+        try {
+          if (editingId === '') {
+            await apiPost('/api/personas', { name: name.trim(), description: desc })
+          } else if (editingId !== null) {
+            await apiPut(`/api/personas/${encodeURIComponent(editingId)}`, { name: name.trim(), description: desc })
+          }
+          cancelEdit()
+          await refresh()
+          if (typeof props.onPersonaChange === 'function') props.onPersonaChange()
+        } catch (err) { props.onError(String(err.message || err)) } finally { setLoading(false) }
+      }, [editingId, name, desc, refresh, props])
+
+      const select = useCallback(async (id) => {
+        setLoading(true)
+        try {
+          await apiPost(`/api/personas/${encodeURIComponent(id)}/select`, {})
+          await refresh()
+          if (typeof props.onPersonaChange === 'function') props.onPersonaChange()
+        } catch (err) { props.onError(String(err.message || err)) } finally { setLoading(false) }
+      }, [refresh, props])
+
+      const remove = useCallback(async (id, pName) => {
+        if (!window.confirm(`删除用户人设「${pName}」?`)) return
+        setLoading(true)
+        try {
+          await apiDelete(`/api/personas/${encodeURIComponent(id)}`)
+          await refresh()
+          if (typeof props.onPersonaChange === 'function') props.onPersonaChange()
+        } catch (err) { props.onError(String(err.message || err)) } finally { setLoading(false) }
+      }, [refresh, props])
+
+      return h('div', { className: 'panel' },
+        h('h2', null, `用户人设${currentId !== null ? ` · ${personas.find((p) => p.id === currentId)?.name ?? ''}` : ''}`),
+        h('div', { className: 'hint' }, '当前 persona 决定 {{user}} 的名字与人设,注入 agent 3 的系统提示。'),
+        editingId !== null
+          ? h('div', { className: 'field' },
+              h('input', { placeholder: '名字(即 {{user}})', value: name, onChange: (e) => setName(e.target.value) }),
+              h('textarea', { placeholder: '人设描述(可选):外观/性格/身份…', value: desc, onChange: (e) => setDesc(e.target.value), style: { minHeight: '60px' } }),
+              h('div', { className: 'row' },
+                h('button', { onClick: save, disabled: loading }, loading ? '保存中…' : '保存'),
+                h('button', { onClick: cancelEdit }, '取消'),
+              ),
+            )
+          : h('button', { onClick: startCreate }, '+ 新建用户人设'),
+        personas.length === 0
+          ? h('div', { className: 'list-empty' }, '还没有用户人设')
+          : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+              personas.map((p) => h('div', {
+                key: p.id,
+                className: 'session-item' + (p.id === currentId ? ' selected' : ''),
+                style: p.id === currentId ? { borderLeft: '3px solid var(--accent)' } : undefined,
+              },
+                h('div', { className: 'session-item-main', onClick: () => { if (p.id !== currentId) select(p.id) }, style: { cursor: 'pointer', flex: 1 } },
+                  h('div', { style: { fontWeight: p.id === currentId ? 600 : 400 } },
+                    `${p.name}${p.id === currentId ? ' ✓' : ''}`),
+                  h('div', { className: 'hint' }, p.description.length > 0 ? (p.description.slice(0, 50) + (p.description.length > 50 ? '…' : '')) : '(无人设描述)'),
+                ),
+                h('div', { className: 'session-actions' },
+                  h('button', { title: '编辑', onClick: () => startEdit(p), style: { fontSize: '10px', padding: '0 6px' } }, '✎'),
+                  h('button', { title: '删除', onClick: () => remove(p.id, p.name), style: { fontSize: '10px', padding: '0 6px' } }, '✕'),
+                ),
+              )),
+            ),
+      )
+    }
+
+    // ─── Prompts panel ────────────────────────────────────────────────────
+    function PromptsPanel() {
+      const [prompts, setPrompts] = useState(/** @type {PromptSummary[]} */([]))
+      const [selectedName, setSelectedName] = useState(null)
+      const [content, setContent] = useState('')
+      const [loading, setLoading] = useState(false)
+      const [saving, setSaving] = useState(false)
+      const [error, setError] = useState(null)
+      const [dirty, setDirty] = useState(false)
+
+      const refresh = useCallback(async () => {
+        try {
+          const r = await apiGet('/api/prompts')
+          setPrompts(r.prompts || [])
+        } catch (err) { setError(String(err.message || err)) }
+      }, [])
+
+      useEffect(() => { refresh() }, [refresh])
+
+      const openPrompt = useCallback(async (name) => {
+        setSelectedName(name)
+        setError(null)
+        setLoading(true)
+        setDirty(false)
+        try {
+          const r = await apiGet(`/api/prompts/${encodeURIComponent(name)}`)
+          setContent(r.content)
+        } catch (err) { setError(String(err.message || err)) } finally { setLoading(false) }
+      }, [])
+
+      const save = useCallback(async () => {
+        if (selectedName === null) return
+        setSaving(true); setError(null)
+        try {
+          await apiPut(`/api/prompts/${encodeURIComponent(selectedName)}`, { content })
+          setDirty(false)
+          await refresh()
+        } catch (err) { setError(String(err.message || err)) } finally { setSaving(false) }
+      }, [selectedName, content, refresh])
+
+      return h('div', { className: 'panel' },
+        h('h2', null, `Agent 提示词 (${prompts.length})`),
+        h('div', { className: 'hint' }, '点击文件名打开编辑器,改完点保存(写盘,重启后保留)。'),
+        prompts.length === 0
+          ? h('div', { className: 'list-empty' }, loading ? '加载中…' : '暂无 prompt')
+          : h('div', { className: 'list' },
+              prompts.map((p) => h('div', {
+                key: p.name,
+                className: 'list-item' + (p.name === selectedName ? ' active' : ''),
+                onClick: () => openPrompt(p.name),
+              },
+                h('div', null,
+                  h('div', { className: 'name' }, p.name + (p.overridden ? ' *' : '')),
+                  h('div', { className: 'sub' }, `${p.length} 字符`),
+                ),
+                p.overridden ? h('span', { className: 'badge', title: '用户已修改' }, '改') : null,
+              )),
+            ),
+        selectedName !== null ? h('div', { className: 'prompt-editor' },
+          h('div', { className: 'prompt-editor-head' },
+            h('span', null, `编辑: ${selectedName}${dirty ? ' (未保存)' : ''}`),
+            h('div', { className: 'row' },
+              h('button', { onClick: () => { setSelectedName(null); setContent(''); setDirty(false) } }, '关闭'),
+              h('button', { className: 'primary', onClick: save, disabled: saving || !dirty }, saving ? '保存中…' : '保存'),
+            ),
+          ),
+          loading ? h('div', { className: 'hint' }, '加载中…') : null,
+          h('textarea', {
+            value: content,
+            onChange: (e) => { setContent(e.target.value); setDirty(true) },
+            spellCheck: false,
+            style: { minHeight: '300px', fontFamily: 'ui-monospace, monospace', fontSize: '11px' },
+          }),
+          error ? h('div', { className: 'error-banner' }, error) : null,
+        ) : null,
+      )
+    }
+
+    // ─── Worldbooks panel (酒馆风格:按书分组) ────────────────────────────
+    function WorldbooksPanel(/** @type {{currentCharacterId: string|null, onWorldbookChange: () => void, onError: (e:string)=>void}} */ props) {
+      const fileRef = useRef(null)
+      const [importedBooks, setImportedBooks] = useState(/** @type {WBBook[]} */([]))
+      const [characterBook, setCharacterBook] = useState(/** @type {{name:string|null, entries: WBEntry[]}|null} */(null))
+      const [wbConfig, setWbConfig] = useState(/** @type {{enabledBookIds: string[], disabledBookIds: string[], isDefault: boolean}|null} */(null))
+      const [expandedBooks, setExpandedBooks] = useState(new Set())
+      const [expandedEntries, setExpandedEntries] = useState(new Set())
+      const [loading, setLoading] = useState(false)
+      // 世界书全局设置(酒馆 world_info_depth:绿灯匹配扫描的最近消息条数)
+      const [scanDepth, setScanDepth] = useState('2')
+      const [matchMode, setMatchMode] = useState('enhanced')
+      const [savingSettings, setSavingSettings] = useState(false)
+      const scanDepthRef = useRef(null)
+
+      const refreshSettings = useCallback(async () => {
+        try {
+          const r = await apiGet('/api/worldbook-settings')
+          setScanDepth(String(r.scanDepth))
+          setMatchMode(r.mode === 'strict' || r.mode === 'native' || r.mode === 'enhanced'
+            ? r.mode
+            : r.useLlmMatcher === false ? 'strict' : 'enhanced')
+        } catch (err) { props.onError(String(err.message || err)) }
+      }, [props])
+      useEffect(() => { refreshSettings() }, [refreshSettings])
+
+      const saveSettings = useCallback(async () => {
+        const n = Number.parseInt(scanDepth, 10)
+        if (Number.isNaN(n) || n < 0 || n > 100) { props.onError('扫描深度必须是 0-100 的整数'); return }
+        setSavingSettings(true)
+        try {
+          const r = await apiPut('/api/worldbook-settings', { scanDepth: n, mode: matchMode })
+          setScanDepth(String(r.scanDepth))
+          setMatchMode(r.mode || matchMode)
+        } catch (err) { props.onError(String(err.message || err)) } finally { setSavingSettings(false) }
+      }, [scanDepth, matchMode, props])
+
+      const refresh = useCallback(async () => {
+        try {
+          const r = await apiGet('/api/worldbooks')
+          setImportedBooks(r.worldbooks || [])
+        } catch (err) { props.onError(String(err.message || err)) }
+      }, [props])
+
+      // 当前角色对每本独立世界书的启用状态(未选角色时为 null,不渲染开关)
+      const refreshConfig = useCallback(async () => {
+        if (props.currentCharacterId === null) { setWbConfig(null); return }
+        try {
+          const r = await apiGet(`/api/characters/${encodeURIComponent(props.currentCharacterId)}/worldbook-config`)
+          setWbConfig({
+            enabledBookIds: r.enabledBookIds || [],
+            disabledBookIds: r.disabledBookIds || [],
+            isDefault: r.isDefault === true,
+          })
+        } catch (err) { props.onError(String(err.message || err)) }
+      }, [props])
+
+      useEffect(() => { refreshConfig() }, [refreshConfig, props.currentCharacterId])
+
+      const toggleBookForCharacter = useCallback(async (bookId, next) => {
+        if (props.currentCharacterId === null || wbConfig === null) return
+        const disabled = new Set(wbConfig.disabledBookIds)
+        if (next) disabled.delete(bookId)
+        else disabled.add(bookId)
+        try {
+          await apiPut(`/api/characters/${encodeURIComponent(props.currentCharacterId)}/worldbook-config`, { disabledBookIds: [...disabled] })
+          await refreshConfig()
+          if (typeof props.onWorldbookChange === 'function') props.onWorldbookChange()
+        } catch (err) { props.onError(String(err.message || err)) }
+      }, [props, wbConfig, refreshConfig])
+
+      const deleteBook = useCallback(async (bookId) => {
+        try {
+          await apiDelete(`/api/worldbooks/${encodeURIComponent(bookId)}`)
+          await refresh()
+          if (typeof props.onWorldbookChange === 'function') props.onWorldbookChange()
+        } catch (err) { props.onError(String(err.message || err)) }
+      }, [refresh, props])
+
+      const refreshCharacter = useCallback(async () => {
+        if (props.currentCharacterId === null) { setCharacterBook(null); return }
+        try {
+          const r = await apiGet(`/api/characters/${encodeURIComponent(props.currentCharacterId)}/worldbook`)
+          if (r.hasLorebook) {
+            setCharacterBook({ name: r.lorebookName, entries: r.entries })
+          } else {
+            setCharacterBook({ name: null, entries: [] })
+          }
+        } catch (err) { props.onError(String(err.message || err)) }
+      }, [props])
+
+      useEffect(() => { refresh() }, [refresh])
+      useEffect(() => { refreshCharacter() }, [refreshCharacter, props.currentCharacterId])
+
+      const toggleBook = (id) => setExpandedBooks((prev) => {
+        const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next
+      })
+      const toggleEntry = (id) => setExpandedEntries((prev) => {
+        const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next
+      })
+
+      const importJson = useCallback(async (text, name) => {
+        setLoading(true)
+        try {
+          const qs = (typeof name === 'string' && name.length > 0) ? `?name=${encodeURIComponent(name)}` : ''
+          const r = await apiPost(`/api/worldbook-import${qs}`, text)
+          await refresh()
+          setExpandedBooks((prev) => new Set([...prev, r.id]))
+        } catch (err) { props.onError(String(err.message || err)) } finally { setLoading(false) }
+      }, [refresh, props])
+
+      const onUploadJson = (ev) => {
+        const file = ev.target.files && ev.target.files[0]
+        if (!file) return
+        const reader = new FileReader()
+        reader.onload = () => {
+          const suggested = file.name.replace(/\.json$/i, '')
+          const name = window.prompt('世界书名称(留空则使用文件内名称)', suggested)
+          if (name === null) return
+          importJson(String(reader.result || ''), name.trim())
+        }
+        reader.onerror = () => props.onError('读取 JSON 文件失败')
+        reader.readAsText(file)
+        ev.target.value = ''
+      }
+
+      const toggleEntryEnabled = useCallback(async (entry) => {
+        if (props.currentCharacterId === null) return
+        try {
+          await apiPatch(
+            `/api/characters/${encodeURIComponent(props.currentCharacterId)}/worldbook/${encodeURIComponent(entry.sourceId)}`,
+            { enabled: !entry.enabled },
+          )
+          await refreshCharacter()
+          if (typeof props.onWorldbookChange === 'function') props.onWorldbookChange()
+        } catch (err) { props.onError(String(err.message || err)) }
+      }, [props, refreshCharacter])
+
+      // 角色内嵌世界书 group
+      const characterBookGroup = props.currentCharacterId === null
+        ? h('div', { className: 'list-empty' }, '先选中一个角色')
+        : characterBook === null
+          ? h('div', { className: 'list-empty' }, '加载中…')
+          : characterBook.entries.length === 0
+            ? h('div', { className: 'list-empty' }, '该角色无内嵌世界书')
+            : renderBookGroup(
+                `character:${props.currentCharacterId}`,
+                characterBook.name ?? '内嵌世界书',
+                characterBook.entries,
+                'character',
+                expandedBooks, expandedEntries,
+                toggleBook, toggleEntry, toggleEntryEnabled,
+              )
+
+      return h('div', { className: 'panel' },
+        h('h2', null, `世界书库 (${(characterBook?.entries.length ?? 0) + importedBooks.reduce((s, b) => s + b.entryCount, 0)})`),
+        h('div', { className: 'field' },
+          h('div', { className: 'row' },
+            h('button', { onClick: () => fileRef.current && fileRef.current.click(), disabled: loading }, '导入世界书 JSON'),
+            h('input', { ref: fileRef, type: 'file', accept: 'application/json,.json', style: { display: 'none' }, onChange: onUploadJson }),
+          ),
+          h('div', { className: 'hint' }, '支持酒馆 World Info .json 格式;导入后自动展开。🔵=蓝灯(常驻注入) 🟢=绿灯(匹配激活)。'),
+        ),
+        // 世界书全局设置:绿灯扫描深度(酒馆 world_info_depth,默认 2)
+        h('div', { className: 'field' },
+          h('label', null, '绿灯处理模式与扫描深度'),
+          h('div', { className: 'row' },
+            h('select', {
+              value: matchMode,
+              onChange: (e) => setMatchMode(e.target.value),
+              title: '普通绿灯条目的判断权;蓝灯和扩展特殊条目仍由兼容层处理',
+            },
+              h('option', { value: 'strict' }, 'ST strict：只用关键词'),
+              h('option', { value: 'enhanced' }, 'ST enhanced：关键词 + agent'),
+              h('option', { value: 'native' }, 'Agent native：只用 agent'),
+            ),
+            h('input', {
+              ref: scanDepthRef, type: 'number', min: 0, max: 100, value: scanDepth,
+              onChange: (e) => setScanDepth(e.target.value), style: { width: '90px' },
+              title: '2.1 世界书匹配 agent 扫描最近 N 条消息(用户+角色都算);对应 SillyTavern 的 world_info_depth,默认 2',
+            }),
+            h('button', { onClick: saveSettings, disabled: savingSettings }, savingSettings ? '保存中…' : '保存'),
+          ),
+          h('div', { className: 'hint' }, '普通绿灯按所选模式处理;蓝灯 constant、EJS、@INJECT、[GENERATE]/[RENDER] 等扩展特殊条目始终由兼容层处理。enhanced 模式不会新增一次 LLM 调用。'),
+        ),
+        // 角色内嵌世界书(选中角色后才显示)
+        characterBookGroup,
+        // 独立世界书列表
+        importedBooks.length === 0
+          ? null
+          : h('div', { className: 'worldbook-section' },
+              h('div', { className: 'worldbook-section-label' }, '独立世界书'),
+              wbConfig !== null
+                ? h('div', { className: 'hint' }, '书名前的勾选框 = 当前角色是否启用这本独立世界书(只影响当前角色);条目级开关在展开后的书内,对所有角色生效。')
+                : null,
+              importedBooks.map((b) => {
+                const charEnabled = wbConfig !== null ? !wbConfig.disabledBookIds.includes(b.id) : null
+                return h(ImportedBookGroup, {
+                  key: b.id, book: b,
+                  expanded: expandedBooks.has(b.id),
+                  expandedEntries,
+                  charEnabled,
+                  onToggleCharEnabled: (props.currentCharacterId !== null && charEnabled !== null)
+                    ? () => toggleBookForCharacter(b.id, !(charEnabled === true))
+                    : null,
+                  onToggle: () => toggleBook(b.id),
+                  onToggleEntry: toggleEntry,
+                  onDelete: () => deleteBook(b.id),
+                  onError: props.onError,
+                  onWorldbookChange: props.onWorldbookChange,
+                })
+              }),
+            ),
+      )
+    }
+
+    function renderBookGroup(id, name, entries, source, expandedBooks, expandedEntries, toggleBook, toggleEntry, toggleEntryEnabled) {
+      const enabledCount = entries.filter((e) => e.enabled).length
+      const expanded = expandedBooks.has(id)
+      return h('div', { key: id, className: 'book-group' },
+        h('div', { className: 'book-head', onClick: () => toggleBook(id) },
+          h('span', { className: 'book-toggle' }, expanded ? '▾' : '▸'),
+          h('span', { className: 'book-name' }, name),
+          h('span', { className: 'book-count' }, `${enabledCount}/${entries.length}`),
+        ),
+        expanded ? h('div', { className: 'book-entries' },
+          entries.map((e) => h(BookEntryRow, {
+            key: e.sourceId, entry: e, source,
+            expanded: expandedEntries.has(e.sourceId),
+            onToggleExpand: () => toggleEntry(e.sourceId),
+            onToggleEnabled: source === 'character' ? () => toggleEntryEnabled(e) : null,
+          })),
+        ) : null,
+      )
+    }
+
+    function ImportedBookGroup(/** @type {{book: WBBook, expanded: boolean, expandedEntries: Set<string>, charEnabled: boolean|null, onToggleCharEnabled: (()=>void)|null, onToggle: () => void, onToggleEntry: (id: string) => void, onDelete: () => void, onError: (e:string)=>void, onWorldbookChange: () => void}} */ props) {
+      const [entries, setEntries] = useState(/** @type {WBEntry[]|null} */(null))
+      const [loading, setLoading] = useState(false)
+      const load = useCallback(async () => {
+        setLoading(true)
+        try {
+          const r = await apiGet(`/api/worldbooks/${encodeURIComponent(props.book.id)}`)
+          setEntries(r.entries || [])
+        } catch (err) { props.onError(String(err.message || err)) } finally { setLoading(false) }
+      }, [props.book.id, props])
+      useEffect(() => { if (props.expanded && entries === null) load() }, [props.expanded, entries, load])
+      const toggleEnabled = useCallback(async (entry) => {
+        try {
+          await apiPatch(`/api/worldbooks/${encodeURIComponent(props.book.id)}/entry/${encodeURIComponent(entry.sourceId)}`, { enabled: !entry.enabled })
+          setEntries((prev) => prev === null ? prev : prev.map((e) => e.sourceId === entry.sourceId ? { ...e, enabled: !e.enabled } : e))
+          if (typeof props.onWorldbookChange === 'function') props.onWorldbookChange()
+        } catch (err) { props.onError(String(err.message || err)) }
+      }, [props])
+      return h('div', { className: 'book-group' },
+        h('div', { className: 'book-head' + (props.charEnabled === false ? ' char-disabled' : ''), onClick: props.onToggle },
+          props.onToggleCharEnabled !== null
+            ? h('input', {
+                type: 'checkbox', checked: props.charEnabled === true,
+                title: '当前角色启用/禁用这本世界书',
+                onClick: (e) => e.stopPropagation(),
+                onChange: props.onToggleCharEnabled,
+                style: { marginRight: '4px' },
+              })
+            : null,
+          h('span', { className: 'book-toggle' }, props.expanded ? '▾' : '▸'),
+          h('span', { className: 'book-name' }, props.book.name),
+          props.charEnabled === false ? h('span', { className: 'flag', title: '当前角色未启用这本世界书' }, '未启用') : null,
+          h('span', { className: 'book-count' }, `${props.book.enabledCount}/${props.book.entryCount}`),
+          h('button', {
+            title: '删除这本世界书',
+            onClick: (e) => {
+              e.stopPropagation()
+              if (window.confirm(`删除世界书「${props.book.name}」?此操作不可恢复。`)) props.onDelete()
+            },
+            style: { fontSize: '10px', padding: '0 6px', lineHeight: '18px' },
+          }, '✕'),
+        ),
+        props.expanded ? h('div', { className: 'book-entries' },
+          loading
+            ? h('div', { className: 'hint' }, '加载中…')
+            : entries === null
+              ? h('div', { className: 'hint' }, '加载失败')
+              : entries.map((e) => h(BookEntryRow, {
+                  key: e.sourceId, entry: e, source: 'imported',
+                  expanded: props.expandedEntries.has(e.sourceId),
+                  onToggleExpand: () => props.onToggleEntry(e.sourceId),
+                  onToggleEnabled: () => toggleEnabled(e),
+                })),
+        ) : null,
+      )
+    }
+
+    /** ST position 枚举 → 前端标签(0-7,docs/st-adaptation-research.md §4)。 */
+    function stPositionLabel(st) {
+      const n = typeof st === 'number' ? st : (st === 'before_char' ? 0 : 1)
+      return ['0 前(before)', '1 后(after)', '2 AN顶', '3 AN底', '4 深度', '5 例顶', '6 例底', '7 插座'][n] ?? String(n)
+    }
+
+    /** ST selectiveLogic → 前端标签(2.1 匹配 agent 的次关键词逻辑)。 */
+    function selectiveLogicLabel(logic) {
+      const map = {
+        'and-any': 'AND_ANY 任一命中',
+        'and-all': 'AND_ALL 全部命中',
+        'not-any': 'NOT_ANY 全部未命中',
+        'not-all': 'NOT_ALL 任一未命中',
+      }
+      return map[logic] ?? (logic || 'and-any')
+    }
+
+    function BookEntryRow(/** @type {{entry: WBEntry, source: 'character'|'imported', expanded: boolean, onToggleExpand: () => void, onToggleEnabled: (() => void)|null}} */ props) {
+      const e = props.entry
+      const keys = [...e.keys, ...e.secondaryKeys.map((k) => `+${k}`)].join(', ') || '—'
+      const probability = typeof e.probability === 'number' ? e.probability : 100
+      return h('div', { className: 'book-entry' + (e.enabled ? '' : ' disabled') },
+        h('div', { className: 'book-entry-head' },
+          props.onToggleEnabled !== null
+            ? h('input', { type: 'checkbox', checked: e.enabled, onChange: props.onToggleEnabled, title: '启用/禁用', style: { marginRight: '4px' } })
+            : h('span', { className: 'book-entry-dot', title: e.enabled ? '启用' : '禁用' }, e.enabled ? '●' : '○'),
+          h('span', { className: 'book-entry-name', onClick: props.onToggleExpand, style: { cursor: 'pointer', flex: 1 } }, e.name ?? `(未命名 #${e.insertionOrder})`),
+          e.constant
+            ? h('span', { className: 'flag', title: '蓝灯(constant):无条件每轮常驻注入,不走关键词匹配' }, '🔵常驻')
+            : h('span', { className: 'flag', title: '绿灯(keyed):由 2.1 匹配 agent 按最近消息+关键词语义判断激活' }, '🟢匹配'),
+          probability < 100
+            ? h('span', { className: 'flag', title: '激活概率:agent 选中后系统掷骰(Math.random()*100 <= p)' }, `${probability}%`)
+            : null,
+          h('span', { className: 'book-entry-toggle', onClick: props.onToggleExpand, style: { cursor: 'pointer' } }, props.expanded ? '▾' : '▸'),
+        ),
+        props.expanded ? h('div', { className: 'book-entry-body' },
+          h('div', { className: 'book-entry-meta' },
+            h('span', null, `插入顺序: ${e.insertionOrder}`),
+            e.priority !== null ? h('span', null, ` · 优先级: ${e.priority}`) : null,
+            h('span', null, ` · 位置: ${stPositionLabel(e.stPosition ?? e.position)}`),
+            h('span', null, ` · 次关键词逻辑: ${selectiveLogicLabel(e.selectiveLogic)}`),
+            h('span', null, ` · 概率: ${probability}%${e.useProbability === false ? '(关)' : ''}`),
+            e.caseSensitive ? h('span', null, ' · 大小写敏感') : null,
+            e.matchWholeWords ? h('span', null, ' · 整词匹配') : null,
+            e.useRegex ? h('span', null, ' · 正则') : null,
+          ),
+          keys !== '—' ? h('div', { className: 'book-entry-keys' }, `关键词: ${keys}`) : null,
+          h('pre', { className: 'book-entry-content' }, e.content || '(空)'),
+        ) : null,
+      )
+    }
+
+    // ─── Sessions panel:全局历史会话管理(打开/重命名/删除) ─────────────
+    function SessionsPanel(/** @type {{currentSessionId: string|null, currentCharacterId: string|null, onOpenSession: (s: SessionInfo) => void, onSessionDeleted: (sid: string) => void, onError: (e: string) => void, refreshTick: number}} */ props) {
+      const [sessions, setSessions] = useState(/** @type {SessionInfo[]} */([]))
+      const [loading, setLoading] = useState(false)
+      const [renaming, setRenaming] = useState(null) // 正在行内重命名的 sessionId
+      const [renameText, setRenameText] = useState('')
+      const propsRef = useRef(props); propsRef.current = props
+
+      const refresh = useCallback(async () => {
+        setLoading(true)
+        try {
+          const r = await apiGet('/api/sessions')
+          setSessions(r.sessions || [])
+        } catch (err) { propsRef.current.onError(String(err.message || err)) } finally { setLoading(false) }
+      }, [])
+
+      useEffect(() => { void refresh() }, [refresh, props.refreshTick])
+
+      const rename = async (sid) => {
+        const label = renameText.trim()
+        if (label.length === 0) { setRenaming(null); return }
+        try {
+          await apiPatch(`/api/sessions/${encodeURIComponent(sid)}`, { label })
+          setRenaming(null)
+          await refresh()
+        } catch (err) { propsRef.current.onError(String(err.message || err)) }
+      }
+
+      const remove = async (sid, label) => {
+        if (!window.confirm(`删除会话「${label}」?聊天历史与 agent trace 一并删除,不可恢复。`)) return
+        try {
+          await apiDelete(`/api/sessions/${encodeURIComponent(sid)}`)
+          propsRef.current.onSessionDeleted(sid)
+          await refresh()
+        } catch (err) { propsRef.current.onError(String(err.message || err)) }
+      }
+
+      return h('div', { className: 'panel' },
+        h('div', { className: 'panel-head' },
+          h('h2', null, `会话 (${sessions.length})`),
+          h('button', { className: 'mini', onClick: () => { void refresh() }, disabled: loading, title: '刷新会话列表' }, loading ? '…' : '↻'),
+        ),
+        h('div', { className: 'hint' }, '全部角色的历史会话:点行打开,✎ 重命名,✕ 删除。'),
+        sessions.length === 0
+          ? h('div', { className: 'list-empty' }, '暂无会话')
+          : h('div', { className: 'list' },
+              sessions.map((s) => h('div', {
+                key: s.sessionId,
+                className: 'list-item session-item' + (s.sessionId === props.currentSessionId ? ' active' : ''),
+                onClick: () => props.onOpenSession(s),
+                title: `${s.characterName} · ${s.sessionId}`,
+              },
+                renaming === s.sessionId
+                  ? h('div', { className: 'session-rename', onClick: (e) => e.stopPropagation() },
+                      h('input', {
+                        value: renameText, autoFocus: true, spellCheck: false,
+                        onChange: (e) => setRenameText(e.target.value),
+                        onKeyDown: (e) => {
+                          if (e.key === 'Enter') { e.preventDefault(); void rename(s.sessionId) }
+                          if (e.key === 'Escape') { e.preventDefault(); setRenaming(null) }
+                        },
+                        style: { fontSize: '12px' },
+                      }),
+                      h('button', { className: 'mini', onClick: () => { void rename(s.sessionId) }, title: '保存新名称' }, '存'),
+                      h('button', { className: 'mini', onClick: () => setRenaming(null), title: '取消重命名' }, '✕'),
+                    )
+                  : h('div', { style: { minWidth: 0, flex: 1 } },
+                      h('div', { className: 'name session-name' }, s.label),
+                      h('div', { className: 'sub' }, `${s.characterName} · ${fmtTime(s.createdAt)}`),
+                    ),
+                renaming === s.sessionId
+                  ? null
+                  : h('div', { className: 'session-actions', onClick: (e) => e.stopPropagation() },
+                      h('span', { className: 'badge', title: '对话轮数' }, `${s.turnCount}t`),
+                      h('button', { className: 'mini', title: '重命名', onClick: () => { setRenaming(s.sessionId); setRenameText(s.label) } }, '✎'),
+                      h('button', { className: 'mini', title: '删除', onClick: () => { void remove(s.sessionId, s.label) } }, '✕'),
+                    ),
+              )),
+            ),
+      )
+    }
+
+    // ─── App shell: SillyTavern-inspired icon rail + on-demand drawers ────
+    const TOOL_DEFS = [
+      { id: 'character', label: '角色', icon: '◉', side: 'right' },
+      { id: 'sessions', label: '会话', icon: '☷', side: 'right' },
+      { id: 'api', label: '模型', icon: '⚙', side: 'left' },
+      { id: 'persona', label: 'Persona', icon: '☺', side: 'left' },
+      { id: 'worldbooks', label: '世界书', icon: '▤', side: 'left' },
+      { id: 'regex', label: '正则', icon: '⌁', side: 'left' },
+      { id: 'import', label: '导入', icon: '↥', side: 'left' },
+      { id: 'prompts', label: '提示词', icon: '✎', side: 'left' },
+      { id: 'trace', label: 'Trace', icon: '⌘', side: 'left' },
+    ]
+
+    // ─── App ──────────────────────────────────────────────────────────────
+    function App() {
+      const [health, setHealth] = useState(null)
+      const [characters, setCharacters] = useState([])
+      const [currentCharacterId, setCurrentCharacterId] = useState(null)
+      const [currentCharacter, setCurrentCharacter] = useState(null)
+      const [characterSessions, setCharacterSessions] = useState([])
+      const [currentSessionId, setCurrentSessionId] = useState(null)
+      const [history, setHistory] = useState([])
+      const [userInput, setUserInput] = useState('')
+      const [loading, setLoading] = useState(false)
+      const [error, setError] = useState(null)
+      const [progressStages, setProgressStages] = useState(INITIAL_STAGES)
+      const [traces, setTraces] = useState({})
+      const [lastTokenStats, setLastTokenStats] = useState(null)
+      const [greetingIdx, setGreetingIdx] = useState(0)
+      const [activeGreetingIdx, setActiveGreetingIdx] = useState(0)
+      const [bootDone, setBootDone] = useState(false)
+      const [activeTool, setActiveTool] = useState(null)
+      const fileRef = useRef(null)
+      const chatRef = useRef(null)
+
+      useEffect(() => {
+        (async () => {
+          try {
+            const state = await apiGet('/api/state')
+            setCharacters(state.characters || [])
+            setCurrentCharacterId(state.currentCharacterId)
+            setCurrentSessionId(state.currentSessionId)
+            if (state.currentCharacterId) {
+              const detail = await apiGet(`/api/characters/${encodeURIComponent(state.currentCharacterId)}`)
+              setCurrentCharacter(detail.character)
+            }
+            if (state.currentSessionId) {
+              const hist = await apiGet(`/api/history?sessionId=${encodeURIComponent(state.currentSessionId)}`)
+              setHistory(hist.history || [])
+              setActiveGreetingIdx(Number.isInteger(hist.greetingIndex) ? hist.greetingIndex : 0)
+              const traceData = await apiGet(`/api/sessions/${encodeURIComponent(state.currentSessionId)}/traces`)
+              const stats = traceData.turnStats || []
+              setLastTokenStats(stats[stats.length - 1] || null)
+            }
+            setHealth(await apiGet('/api/health'))
+          } catch (err) { setError(String(err.message || err)) } finally { setBootDone(true) }
+        })()
+      }, [])
+
+      useEffect(() => {
+        if (!bootDone) return
+        if (currentSessionId === null) { setHistory([]); setLastTokenStats(null); return }
+        (async () => {
+          try {
+            const r = await apiGet(`/api/history?sessionId=${encodeURIComponent(currentSessionId)}`)
+            setHistory(r.history || [])
+            setActiveGreetingIdx(Number.isInteger(r.greetingIndex) ? r.greetingIndex : 0)
+            const traceData = await apiGet(`/api/sessions/${encodeURIComponent(currentSessionId)}/traces`)
+            const stats = traceData.turnStats || []
+            setLastTokenStats(stats[stats.length - 1] || null)
+          } catch (err) { setError(String(err.message || err)) }
+        })()
+      }, [currentSessionId, bootDone])
+
+      useEffect(() => {
+        const el = chatRef.current
+        if (el) el.scrollTop = el.scrollHeight
+      }, [history])
+
+      useEffect(() => { setGreetingIdx(0) }, [currentCharacterId])
+
+      const refreshCharacters = useCallback(async () => {
+        try { const r = await apiGet('/api/characters'); setCharacters(r.characters || []) } catch (err) { setError(String(err.message || err)) }
+      }, [])
+
+      const refreshHealth = useCallback(async () => {
+        try { setHealth(await apiGet('/api/health')) } catch { /* */ }
+      }, [])
+
+      // 启动时拉一次 display 位正则脚本(RegexPanel CRUD 后也会自行刷新)。
+      useEffect(() => { void refreshDisplayRegexScripts() }, [])
+
+      const selectCharacter = useCallback(async (id) => {
+        if (id === currentCharacterId) return
+        setError(null); setLoading(true)
+        try {
+          const r = await apiPost(`/api/characters/${encodeURIComponent(id)}/select`, {})
+          setCurrentCharacterId(id)
+          setCurrentCharacter(r.character)
+          setCurrentSessionId(null)
+          setHistory([])
+          setLastTokenStats(null)
+          setActiveGreetingIdx(0)
+          const sess = await apiGet(`/api/characters/${encodeURIComponent(id)}/sessions`)
+          setCharacterSessions(sess.sessions || [])
+        } catch (err) { setError(String(err.message || err)) } finally { setLoading(false) }
+      }, [currentCharacterId])
+
+      const afterImport = useCallback(async (id) => {
+        await refreshCharacters()
+        await selectCharacter(id)
+      }, [refreshCharacters, selectCharacter])
+
+      const importPng = useCallback(async (file) => {
+        setError(null); setLoading(true)
+        try {
+          const fd = new FormData(); fd.append('file', file)
+          const r = await apiPost('/api/import-png', fd)
+          await afterImport(r.id)
+        } catch (err) { setError(String(err.message || err)) } finally { setLoading(false) }
+      }, [afterImport])
+
+      const importJson = useCallback(async (text) => {
+        setError(null); setLoading(true)
+        try {
+          const r = await apiPost('/api/import-json', text)
+          await afterImport(r.id)
+        } catch (err) { setError(String(err.message || err)) } finally { setLoading(false) }
+      }, [afterImport])
+
+      const refreshCharacterSessions = useCallback(async () => {
+        if (currentCharacterId === null) return
+        try { const r = await apiGet(`/api/characters/${encodeURIComponent(currentCharacterId)}/sessions`); setCharacterSessions(r.sessions || []) } catch (err) { setError(String(err.message || err)) }
+      }, [currentCharacterId])
+
+      // 历史会话管理:打开任意会话(跨角色时先把角色切过去,再选会话加载历史)
+      const openSession = useCallback(async (s) => {
+        setError(null)
+        try {
+          if (s.characterId && s.characterId !== currentCharacterId) {
+            await selectCharacter(s.characterId)
+          }
+          setCurrentSessionId(s.sessionId)
+        } catch (err) { setError(String(err.message || err)) }
+      }, [currentCharacterId, selectCharacter])
+
+      // 删掉的会话若是当前会话,清掉选中状态回到"未选会话"
+      const onSessionDeleted = useCallback((sid) => {
+        setCurrentSessionId((prev) => (prev === sid ? null : prev))
+      }, [])
+
+      const newSession = useCallback(async () => {
+        if (currentCharacter === null || currentCharacterId === null) { setError('请先选中一个角色。'); return }
+        setError(null); setLoading(true)
+        try {
+          const firstMes = greetingIdx === 0 ? currentCharacter.firstMes : (currentCharacter.alternateGreetings[greetingIdx - 1] || currentCharacter.firstMes)
+          const r = await apiPost('/api/session', {
+            characterId: currentCharacterId,
+            label: currentCharacter.name,
+            firstMes,
+            greetingIndex: greetingIdx,
+          })
+          setCurrentSessionId(r.sessionId); setHistory([]); setLastTokenStats(null)
+          setActiveGreetingIdx(Number.isInteger(r.greetingIndex) ? r.greetingIndex : greetingIdx)
+          await refreshCharacterSessions()
+        } catch (err) { setError(String(err.message || err)) } finally { setLoading(false) }
+      }, [currentCharacter, currentCharacterId, greetingIdx, refreshCharacterSessions])
+
+      // 开场白切换器:当前会话直接替换第一条 assistant 开场白；尚未建会话时
+      // 只记录新会话将使用的开场白。这样重 roll 后控件仍然可用。
+      const switchGreeting = useCallback(async (nextIndex) => {
+        const index = Number(nextIndex)
+        if (!Number.isInteger(index) || currentCharacter === null) return
+        if (currentSessionId === null) { setGreetingIdx(index); return }
+        if (loading) return
+        setError(null); setLoading(true)
+        try {
+          const r = await apiPut(`/api/sessions/${encodeURIComponent(currentSessionId)}/greeting`, { greetingIndex: index })
+          setActiveGreetingIdx(Number.isInteger(r.greetingIndex) ? r.greetingIndex : index)
+          setHistory(r.history || [])
+          await refreshCharacterSessions()
+        } catch (err) { setError(String(err.message || err)) } finally { setLoading(false) }
+      }, [currentCharacter, currentSessionId, loading, refreshCharacterSessions])
+
+      // /api/run 的 SSE 消费核心:send(新输入)与 reroll(重 roll)共用。
+      // 返回 true=流正常结束。bodyObj 为 POST body(不含流处理差异)。
+      const streamRun = useCallback(async (bodyObj) => {
+        let resp
+        try {
+          resp = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyObj) })
+        } catch (err) {
+          setError(`网络错误: ${err instanceof Error ? err.message : String(err)}`)
+          return false
+        }
+        if (!resp.ok || resp.body === null) {
+          const t = await resp.text().catch(() => '')
+          setError(`服务器错误 ${resp.status}: ${t}`)
+          return false
+        }
+        const reader = resp.body.getReader()
+        const decoder = new TextDecoder('utf-8')
+        let buffer = ''
+        let streamErrored = false
+        try {
+          while (true) {
+            const { value, done } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            const parsed = parseSseBuffer(buffer)
+            buffer = parsed.rest
+            for (const ev of parsed.events) {
+              if (ev.event === 'stage') {
+                let payload; try { payload = JSON.parse(ev.data) } catch { continue }
+                if (payload.name === 'final') {
+                  setHistory((prev) => [...prev, { role: 'assistant', content: payload.result.displayReply || payload.result.reply }])
+                  setLastTokenStats(payload.result.tokenStats || null)
+                  setProgressStages((prev) => ({ ...prev, [payload.name]: payload.status }))
+                } else if (payload.name === 'error') {
+                  setError(payload.message || '未知错误')
+                  streamErrored = true
+                  setProgressStages((prev) => ({ ...prev, [payload.name]: 'error' }))
+                } else {
+                  // 顶层 stage(intent/worldbook/context/response/summarize) + 5 个
+                  // 同步 postprocess 子 stage；意象 extract 在后台异步，不阻塞这里。
+                  // 都是独立 stage。
+                  // 后端 status 协议是 'start' / 'done' / 'error',前端 UI 状态机用
+                  // 'pending' / 'running' / 'done' / 'error'。把 'start' 映射成 'running',
+                  // 这样 StageTraceCard 能正确显示转圈(…)而不是看起来像没动(○)。
+                  const mappedStatus = payload.status === 'start' ? 'running' : payload.status
+                  setProgressStages((prev) => ({ ...prev, [payload.name]: mappedStatus }))
+                }
+              } else if (ev.event === 'agent-trace') {
+                let payload; try { payload = JSON.parse(ev.data) } catch { continue }
+                setTraces((prev) => ({ ...prev, [payload.name]: payload }))
+              } else if (ev.event === 'error') {
+                let msg = '未知错误'; try { msg = (JSON.parse(ev.data)).message || msg } catch { /* */ }
+                setError(msg); streamErrored = true
+              }
+            }
+          }
+        } catch (err) {
+          setError(`读取 SSE 失败: ${err instanceof Error ? err.message : String(err)}`)
+          streamErrored = true
+        }
+        return !streamErrored
+      }, [])
+
+      const send = useCallback(async () => {
+        const text = userInput.trim()
+        if (text.length === 0) return
+        if (currentCharacter === null || currentCharacterId === null) { setError('请先选中一个角色。'); return }
+        if (currentSessionId === null) { setError('请先新建一个会话。'); return }
+        setError(null); setLoading(true)
+        setProgressStages({ intent: 'running', worldbook: 'pending', context: 'pending', response: 'pending', summarize: 'pending' })
+        setTraces({})
+        setLastTokenStats(null)
+        setHistory((prev) => [...prev, { role: 'user', content: text }])
+        setUserInput('')
+        const ok = await streamRun({ userInput: text, sessionId: currentSessionId })
+        setLoading(false); setProgressStages(INITIAL_STAGES)
+        if (!ok) setHistory((prev) => prev.slice(0, -1))
+        else refreshCharacterSessions()
+        setTimeout(() => setProgressStages(INITIAL_STAGES), 5000)
+      }, [userInput, currentCharacter, currentCharacterId, currentSessionId, refreshCharacterSessions, streamRun])
+
+      // 重 roll:服务端截掉最后一条 assistant 并复用该轮 user 输入重新生成。
+      const reroll = useCallback(async () => {
+        if (currentSessionId === null || loading) return
+        const last = history[history.length - 1]
+        if (!last || last.role !== 'assistant') { setError('只能重 roll 最后一条角色回复。'); return }
+        setError(null); setLoading(true)
+        // intent/worldbook are reused by the server on reroll; show the
+        // visible pipeline beginning at context instead of implying that
+        // those two agents are executed again.
+        setProgressStages({ intent: 'done', worldbook: 'done', context: 'done', response: 'running', summarize: 'pending' })
+        setTraces({})
+        setLastTokenStats(null)
+        setHistory((prev) => prev.slice(0, -1))
+        const ok = await streamRun({ reroll: true, sessionId: currentSessionId })
+        setLoading(false)
+        if (!ok) {
+          // 失败时从服务端拉真实历史(截断可能已发生也可能没有,以服务端为准)
+          try {
+            const r = await apiGet(`/api/history?sessionId=${encodeURIComponent(currentSessionId)}`)
+            setHistory(r.history || [])
+          } catch { /* swallow */ }
+        } else refreshCharacterSessions()
+        setProgressStages(INITIAL_STAGES)
+        setTimeout(() => setProgressStages(INITIAL_STAGES), 5000)
+      }, [currentSessionId, loading, history, refreshCharacterSessions, streamRun])
+
+      const onKeyDown = (ev) => {
+        if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); send() }
+      }
+
+      const onUploadPng = (ev) => {
+        const file = ev.target.files && ev.target.files[0]
+        if (file) importPng(file)
+        ev.target.value = ''
+      }
+
+      const onUploadJson = (ev) => {
+        const file = ev.target.files && ev.target.files[0]
+        if (!file) return
+        const reader = new FileReader()
+        reader.onload = () => importJson(String(reader.result || ''))
+        reader.onerror = () => setError('读取 JSON 文件失败')
+        reader.readAsText(file)
+        ev.target.value = ''
+      }
+
+      const currentGreeting = currentCharacter === null
+        ? '' : (greetingIdx === 0 ? currentCharacter.firstMes : (currentCharacter.alternateGreetings[greetingIdx - 1] || currentCharacter.firstMes))
+      const greetingTotal = currentCharacter === null ? 0 : (1 + (currentCharacter.alternateGreetings || []).length)
+      const cycleGreeting = () => { if (greetingTotal > 1) setGreetingIdx((idx) => (idx + 1) % greetingTotal) }
+      const chatGreetingIndex = currentSessionId === null ? greetingIdx : activeGreetingIdx
+      const chatGreetingSwitcher = greetingTotal > 1
+        ? h('div', { className: 'chat-greeting-switcher', title: currentSessionId === null ? '新建会话时使用此开场白' : '切换当前会话的开场白' },
+            h('span', { className: 'chat-greeting-label' }, '开局'),
+            h('button', {
+              className: 'mini', disabled: loading || chatGreetingIndex <= 0,
+              onClick: () => { void switchGreeting(chatGreetingIndex - 1) },
+              title: '上一个开场白',
+            }, '‹'),
+            h('select', {
+              className: 'chat-greeting-select', value: String(chatGreetingIndex), disabled: loading,
+              onChange: (e) => { void switchGreeting(e.target.value) },
+              'aria-label': '选择开场白',
+            },
+              h('option', { value: '0' }, `主开场白  ·  1/${greetingTotal}`),
+              (currentCharacter.alternateGreetings || []).map((_, i) => h('option', { key: i + 1, value: String(i + 1) }, `备选开场白 ${i + 1}  ·  ${i + 2}/${greetingTotal}`)),
+            ),
+            h('button', {
+              className: 'mini', disabled: loading || chatGreetingIndex >= greetingTotal - 1,
+              onClick: () => { void switchGreeting(chatGreetingIndex + 1) },
+              title: '下一个开场白',
+            }, '›'),
+          )
+        : null
+
+      const characterBlock = currentCharacter
+        ? h('div', { className: 'character-card' },
+            h('div', { className: 'name' }, currentCharacter.name),
+            h('div', { className: 'greeting' },
+              h('div', { className: 'greeting-head' },
+                h('span', null, `开场白 (${greetingIdx + 1}/${greetingTotal})`),
+                greetingTotal > 1 ? h('button', { onClick: cycleGreeting, disabled: loading, title: '循环切换主开场白与备选开场白' }, '↻ 切换') : null,
+              ),
+              h('textarea', { readOnly: true, value: currentGreeting, rows: 4, style: { marginTop: '4px' } }),
+            ),
+            h('div', { className: 'docs' },
+              docBlock('人设 (persona)', currentCharacter.persona, '基础人设 + 来自世界书的角色档案/性格条目,常驻注入 agent 3'),
+              docBlock('世界观 (worldview)', currentCharacter.worldview, '世界/场景/背景设定,常驻注入 agent 3'),
+              docBlock('文风/要求 (style)', currentCharacter.style, '回复要求 + 来自世界书的叙事风格/回复格式,常驻注入 agent 3'),
+            ),
+            h('div', { className: 'hint' }, `预处理时间: ${fmtTime(currentCharacter.preprocessedAt)}`),
+            h('div', { className: 'row', style: { marginTop: '6px' } },
+              h('button', { className: 'primary', onClick: newSession, disabled: loading, style: { flex: 1 } }, '新建会话(用当前开场白)'),
+            ),
+          )
+        : h('div', { className: 'character-card' },
+            h('div', { className: 'empty' }, bootDone ? '尚未选中角色。打开左侧「角色」面板选择，或从「导入」面板添加。' : '正在加载…'),
+          )
+
+      const charactersBlock = h('div', { className: 'panel' },
+        h('h2', null, `角色库 (${characters.length})`),
+        characters.length === 0
+          ? h('div', { className: 'list-empty' }, bootDone ? '尚无角色' : '加载中…')
+          : h('div', { className: 'list' },
+              characters.map((c) => h('div', {
+                key: c.id, className: 'list-item' + (c.id === currentCharacterId ? ' active' : ''),
+                onClick: () => selectCharacter(c.id), title: c.name,
+              },
+                h('div', null,
+                  h('div', { className: 'name' }, c.name),
+                  h('div', { className: 'sub' }, c.personaPreview || '—'),
+                ),
+                h('div', { className: 'right' },
+                  c.hasLorebook ? h('span', { className: 'badge', title: '内嵌世界书' }, '📖') : null,
+                  h('span', { className: 'meta' }, c.greetingCount + 'g'),
+                ),
+              )),
+            ),
+      )
+
+      const importBlock = h('div', { className: 'panel' },
+        h('div', { className: 'panel-head' },
+          h('h2', null, '导入'),
+          h('span', { className: 'panel-kicker' }, '角色卡 / 世界书'),
+        ),
+        h('div', { className: 'field' },
+          h('div', { className: 'row' },
+            h('button', { onClick: () => fileRef.current && fileRef.current.click(), disabled: loading }, '导入 PNG'),
+            h('button', { onClick: () => {
+              const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/json,.json'
+              inp.onchange = onUploadJson; inp.click()
+            }, disabled: loading }, '导入 JSON'),
+          ),
+          h('input', { ref: fileRef, type: 'file', accept: 'image/png', style: { display: 'none' }, onChange: onUploadPng }),
+          h('div', { className: 'hint' }, '导入角色卡 PNG/JSON；独立世界书在世界书面板中管理。'),
+        ),
+      )
+
+      const sessionsBlock = h(SessionsPanel, {
+        currentSessionId,
+        currentCharacterId,
+        onOpenSession: openSession,
+        onSessionDeleted,
+        onError: setError,
+        refreshTick: history.length,
+      })
+
+      const characterSummary = h('div', { className: 'chat-character-strip' },
+        h('div', { className: 'character-avatar' }, currentCharacter ? currentCharacter.name.slice(0, 2) : 'RP'),
+        h('div', { className: 'chat-character-copy' },
+          h('div', { className: 'chat-character-name' }, currentCharacter ? currentCharacter.name : 'DSH Agent RP'),
+        h('div', { className: 'chat-character-status' }, currentSessionId ? '当前会话已连接' : (currentCharacter ? '尚未开始会话' : '请从角色面板选择角色')),
+        ),
+        h('div', { className: 'chat-character-actions' },
+          lastTokenStats ? h('span', { className: 'turn-token-badge', title: '最近一轮 token 统计；完整 agent 明细见 Trace' }, `本轮 ${fmtTokens(lastTokenStats.total?.totalTokens)} tok`) : null,
+          h('button', { className: 'mini', onClick: () => setActiveTool('character') }, currentCharacter ? '角色信息' : '选择角色'),
+          h('button', { className: 'mini', onClick: () => setActiveTool('sessions') }, '会话'),
+        ),
+      )
+
+      const activeToolDef = TOOL_DEFS.find((tool) => tool.id === activeTool) || null
+      const toolContent = activeTool === 'character'
+        ? h('div', { className: 'tool-stack' }, characterBlock, charactersBlock)
+        : activeTool === 'sessions'
+          ? sessionsBlock
+          : activeTool === 'api'
+            ? h(ApiConfigPanel, { onConfigChange: refreshHealth })
+            : activeTool === 'persona'
+              ? h(PersonaPanel, { onError: setError })
+              : activeTool === 'worldbooks'
+                ? h(WorldbooksPanel, { currentCharacterId, onWorldbookChange: refreshHealth, onError: setError })
+                : activeTool === 'regex'
+                  ? h(RegexPanel, { onError: setError })
+                  : activeTool === 'import'
+                    ? importBlock
+                    : activeTool === 'prompts'
+                      ? h(PromptsPanel, null)
+                      : activeTool === 'trace'
+                        ? h(TracePanel, { currentSessionId, refreshTick: history.length, onError: setError })
+                        : null
+
+      const toggleTool = (id) => setActiveTool((previous) => previous === id ? null : id)
+      const railTools = TOOL_DEFS.map((tool) => h('button', {
+        key: tool.id,
+        className: 'rail-button' + (activeTool === tool.id ? ' active' : ''),
+        onClick: () => toggleTool(tool.id),
+        title: tool.label,
+        'aria-label': tool.label,
+      },
+        h('span', { className: 'rail-icon', 'aria-hidden': 'true' }, tool.icon),
+        h('span', { className: 'rail-label' }, tool.label),
+      ))
+
+      return h('div', { className: 'app' },
+        h('header', { className: 'header' },
+          h('div', { className: 'brand-lockup' },
+            h('div', { className: 'brand-mark' }, 'RP'),
+            h('div', null,
+              h('h1', null, 'DSH Agent RP'),
+              h('div', { className: 'brand-subtitle' }, 'SillyTavern-inspired roleplay workspace'),
+            ),
+          ),
+          h('div', { className: 'header-context' },
+            currentCharacter ? currentCharacter.name : '未选择角色',
+            currentSessionId ? h('span', { className: 'header-context-dot' }, '· 会话中') : null,
+          ),
+          h('div', { className: 'header-actions' },
+            health && h('span', { className: 'connection-pill' },
+              h('span', { className: 'connection-dot' }),
+              `${health.model} · ${health.characterCount} 角色`,
+            ),
+            h('button', { className: 'primary', onClick: newSession, disabled: loading || currentCharacter === null, title: '在当前角色下新建会话' }, '＋ 新建会话'),
+          ),
+        ),
+        h('div', { className: 'body' },
+          h('nav', { className: 'tool-rail', 'aria-label': '工具导航' },
+            h('div', { className: 'rail-top' },
+              h('div', { className: 'rail-brand' }, '⌁'),
+              h('div', { className: 'rail-section-label' }, '工作区'),
+              railTools.slice(0, 2),
+              h('div', { className: 'rail-section-label rail-section-label-secondary' }, '工具'),
+              railTools.slice(2),
+            ),
+            h('div', { className: 'rail-bottom' },
+              h('span', { className: 'rail-version' }, 'DSH'),
+            ),
+          ),
+          h('main', { className: 'main' },
+            characterSummary,
+            error && h('div', { className: 'error-banner', style: { margin: '0 12px' } }, error),
+            loading && h(AgentProgress, { stages: progressStages, traces }),
+            h('div', { className: 'chat', ref: chatRef },
+              history.length === 0
+                ? h('div', { className: 'msg system' },
+                    currentSessionId ? '会话已就绪。输入消息开始聊天 (⌘/Ctrl+Enter 发送)。' :
+                    (currentCharacterId ? '已选中角色。点击右上「新建会话」开始聊天。' : '打开左侧「角色」面板选择一个角色开始。'))
+                : history.map((m, i) => h('div', {
+                    key: `${m.role}-${i}`, className: `msg ${m.role}`,
+                  },
+                    h('span', { className: 'role' }, m.role),
+                    h(MessageContent, { content: m.content, role: m.role, character: currentCharacter }),
+                    currentSessionId !== null && !loading
+                      ? h('span', { className: 'msg-actions' },
+                          i === history.length - 1 && m.role === 'assistant'
+                            ? h('button', { title: '重 roll 这条回复', onClick: reroll, style: { fontSize: '11px', padding: '0 5px' } }, '🎲')
+                            : null,
+                          h('button', {
+                            title: '删除这条消息', style: { fontSize: '11px', padding: '0 5px' },
+                            onClick: async () => {
+                              if (!window.confirm('删除这条消息?')) return
+                              try {
+                                await apiDelete(`/api/sessions/${encodeURIComponent(currentSessionId)}/message/${i}`)
+                                const r = await apiGet(`/api/history?sessionId=${encodeURIComponent(currentSessionId)}`)
+                                setHistory(r.history || [])
+                                refreshCharacterSessions()
+                              } catch (err) { setError(String(err.message || err)) }
+                            },
+                          }, '🗑'),
+                        )
+                      : null,
+                  )),
+            ),
+            h('div', { className: 'composer' },
+              chatGreetingSwitcher,
+              h('div', { className: 'composer-main' },
+                h('textarea', {
+                  value: userInput, onChange: (e) => setUserInput(e.target.value), onKeyDown,
+                  placeholder: currentSessionId ? '输入消息… (⌘/Ctrl+Enter 发送)' : '先打开「角色」或「会话」面板开始',
+                  disabled: loading || currentSessionId === null,
+                }),
+                h('button', {
+                  className: 'primary send', onClick: send,
+                  disabled: loading || userInput.trim().length === 0 || currentSessionId === null,
+                }, loading ? '生成中…' : '发送'),
+              ),
+            ),
+          ),
+          activeTool && h('div', { className: 'drawer-scrim', onClick: () => setActiveTool(null), 'aria-hidden': 'true' }),
+          activeTool && h('aside', { className: `tool-drawer ${activeToolDef?.side || 'left'}`, 'aria-label': activeToolDef?.label || '工具面板' },
+            h('div', { className: 'tool-drawer-header' },
+              h('div', null,
+                h('div', { className: 'tool-drawer-kicker' }, 'WORKSPACE TOOL'),
+                h('h2', null, activeToolDef?.label || '工具'),
+              ),
+              h('button', { className: 'drawer-close', onClick: () => setActiveTool(null), title: '关闭面板', 'aria-label': '关闭面板' }, '×'),
+            ),
+            h('div', { className: 'tool-drawer-body' }, toolContent),
+          ),
+        ),
+      )
+    }
+
+    function docBlock(title, body, hint) {
+      return h('div', { className: 'doc' },
+        h('h3', null, title),
+        h('pre', null, body && body.length > 0 ? body : '—'),
+        hint ? h('div', { className: 'doc-hint' }, hint) : null,
+      )
+    }
+
+    // 顶层错误兜底:React 渲染时抛错会让整页黑屏,这里把异常显示到 root 里方便调试
+    window.addEventListener('error', (e) => {
+      const root = document.getElementById('root')
+      if (root && root.children.length === 0) {
+        root.innerHTML = `<pre style="color:#ff5252;padding:12px;font-size:12px;white-space:pre-wrap">UI 渲染失败:\n${String(e.error?.stack ?? e.message)}</pre>`
+      }
+    })
+    window.addEventListener('unhandledrejection', (e) => {
+      const root = document.getElementById('root')
+      if (root && root.children.length === 0) {
+        root.innerHTML = `<pre style="color:#ff5252;padding:12px;font-size:12px;white-space:pre-wrap">未捕获异常:\n${String(e.reason?.stack ?? e.reason)}</pre>`
+      }
+    })
+
+    try {
+      const root = createRoot(document.getElementById('root'))
+      root.render(h(App))
+    } catch (err) {
+      document.getElementById('root').innerHTML = `<pre style="color:#ff5252;padding:12px;font-size:12px;white-space:pre-wrap">启动失败:\n${String(err?.stack ?? err)}</pre>`
+    }
+  </script>
+</body>
+</html>
