@@ -18,7 +18,7 @@ This reference defines what the Agent RP importer preserves and what it executes
 
 Card `system_prompt` replaces the fallback identity instruction when non-empty and supports `{{original}}`. `post_history_instructions` is appended after the Agent RP behavioral contract. `{{char}}`, `<char>`, and `<bot>` resolve to the V3 nickname when present, otherwise the card name.
 
-Display-regex output containing a complete HTML document runs in the isolated light-frontend frame even when a card labels its Markdown fence as `text` instead of `html`; ordinary fenced markup examples remain inert. Collapsed greeting choices do not expose frontend source and create the preview frame only after expansion. Character-library World Info bodies are fetched in bounded pages only after the read-only section opens, so selecting a card does not transfer or mount every embedded entry.
+Display-regex output containing a complete HTML document, or a fragment with `<style>`/`<script>`, runs in an isolated light-frontend iframe even when a card labels its Markdown fence as `text` instead of `html`; ordinary fenced markup examples remain inert. The frame has no same-origin access to the host, strips nested browsing contexts and external script tags, and provides small compatibility shims for common ST/MVU lifecycle calls and jQuery-style DOM methods. This keeps reference-card HUDs usable without allowing card code to reach the host page, cookies, storage, or parent DOM. Collapsed greeting choices do not expose frontend source and create the preview frame only after expansion. Character-library World Info bodies are fetched in bounded pages only after the read-only section opens, so selecting a card does not transfer or mount every embedded entry.
 
 ## Character lorebooks
 
@@ -41,6 +41,12 @@ Enabled character and preset scripts run in separate browser sandbox frames with
 Classic scripts execute directly. ESM keeps its original module boundaries and may use static imports or literal dynamic imports with complete HTTPS URLs from built-in or player-approved origins. Non-literal, relative, bare, non-HTTPS, oversized, and unapproved root imports fail before execution. Network fetch, images, frames, same-origin access, and parent-page DOM access remain disabled inside the sandbox; module loading is restricted by the frame's script policy.
 
 MVU initialization recognizes both `<initvar>` content and ordered `[initvar]` lorebook entries. The Host provides the public `Mvu` variable read and replacement APIs and canonical lifecycle events, and persists listener changes made during initialization or completed updates. A public MagVarUpdate bundle imported only for its side effects is replaced by this Host capability; its SillyTavern settings panel and parent-page UI are not mounted. The common MVU-Zod path receives fixed YAML and Zod browser modules when its inspected dependency source requires those globals.
+
+## Character-card Regex and HTML display
+
+The importer preserves the common ST `regex_scripts` fields: `scriptName`, `findRegex`, `replaceString`, `trimStrings`, `placement`, `disabled`, `markdownOnly`, `promptOnly`, `runOnEdit`, `substituteRegex`, `minDepth`, and `maxDepth`. The runtime uses the character name/nickname and active persona name for the usual `{{char}}`/`{{user}}` macros, honors user-input and AI-output placements, and executes the normal pass before the display/prompt-specific pass. Display rules are applied only at render time; prompt rules are applied to the model-facing copy, so the stored transcript and reroll source remain unmodified.
+
+When a display rule produces a complete HTML document or a fragment containing a stylesheet/script, the UI mounts it in a sandboxed iframe that spans the conversation width. Markdown remains native Markdown, and ordinary fenced examples remain code/text rather than executable HTML. The sandbox strips external script tags and nested frames, does not grant same-origin access, and exposes only small compatibility shims needed by common ST/MVU HUDs. This is intentionally a compatible safe subset, not arbitrary parent-page extension execution.
 
 ## Security and degradation
 

@@ -44,6 +44,8 @@ const HTML_DISPLAY_TAGS = new Set([
   'select', 'slot', 'small', 'source', 'span', 'strong', 'style', 'sub', 'summary', 'sup',
   'table', 'tbody', 'td', 'template', 'textarea', 'tfoot', 'th', 'thead', 'time', 'title',
   'tr', 'track', 'u', 'ul', 'var', 'video', 'wbr',
+  'svg', 'g', 'path', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'rect',
+  'defs', 'lineargradient', 'radialgradient', 'stop', 'use', 'symbol', 'view',
 ])
 
 function stripUnknownTagsOutsideCode(value: string): {
@@ -165,10 +167,24 @@ function appendMarkdown(
   diagnostics: MutableDiagnostics,
   text: string,
 ): void {
+  if (isFrontendDocument('', text)) {
+    diagnostics.frontendDocuments += 1
+    segments.push({ kind: 'html', source: text })
+    return
+  }
   const normalized = normalizeMarkdown(text)
   diagnostics.unknownWrapperCount += normalized.removedCount
   normalized.removedTags.forEach(tag => { diagnostics.unknownWrapperTags.add(tag) })
   if (normalized.text === '') return
+  // A fragment containing scripts or a style sheet is still a card frontend,
+  // even when it is not a full <html> document. It must use the isolated
+  // renderer; treating it as ordinary inline HTML would discard its script
+  // and make the reference HUD appear as broken source text.
+  if (/<(?:style|script)(?:\s|>)/iu.test(normalized.text)) {
+    diagnostics.frontendDocuments += 1
+    segments.push({ kind: 'html', source: normalized.text })
+    return
+  }
   if (hasDisplayHtmlOutsideCode(normalized.text)) {
     diagnostics.inlineHtml += 1
     segments.push({ kind: 'inline-html', source: normalized.text })

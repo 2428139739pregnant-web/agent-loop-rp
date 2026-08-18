@@ -16,6 +16,7 @@
 - 提供三种普通绿灯匹配模式：`ST strict`、`ST enhanced`、`Agent native`。
 - 支持角色卡自带的部分 EJS、ST-Prompt-Template 注入指令、Tavern Helper 状态和 MVU 变量处理。
 - 支持 SillyTavern 风格的 Regex 脚本，区分用户输入、AI 输出、显示文本和世界书位置。
+- 支持角色卡 Regex 的 `markdownOnly`/`promptOnly`、宏替换、捕获组清理和深度限制；角色卡生成的 HTML/CSS/内联脚本会在会话区域全宽 sandbox iframe 中显示。
 - 支持多个开场白在聊天区域内切换；重 roll 时保留原始用户输入。
 - 重 roll 自动复用该轮的意图、世界书和上下文处理结果，只重新生成正文及其后处理。
 - SSE 实时显示 Agent 阶段、耗时、输入输出 Trace 和每轮 token 统计。
@@ -236,7 +237,7 @@ PNG 中同时存在 `ccv3` 和旧 `chara` 元数据时，优先使用 `ccv3`。�
 
 ### Regex
 
-全局 Regex 脚本字段与 SillyTavern 常见命名保持接近：`scriptName`、`findRegex`、`replaceString`、`trimStrings`、`placement`、`disabled`。
+全局和角色卡 Regex 脚本字段与 SillyTavern 常见命名保持接近：`scriptName`、`findRegex`、`replaceString`、`trimStrings`、`placement`、`disabled`、`markdownOnly`、`promptOnly`、`runOnEdit`、`substituteRegex`、`minDepth`、`maxDepth`。普通脚本先执行，随后按显示/提示词表面执行专用脚本，保证“占位符 → HTML 状态栏”的角色卡写法能正确串起来。
 
 当前支持的 placement：
 
@@ -246,6 +247,8 @@ PNG 中同时存在 `ccv3` 和旧 `chara` 元数据时，优先使用 `ccv3`。�
 - `world_info`：世界书相关文本处理。
 
 Regex 执行失败时保留原文，不让单个脚本阻断整轮回复。
+
+角色卡显示结果中的完整 HTML，或包含 `<style>`/`<script>` 的 HTML 片段，会进入无同源权限的 sandbox iframe；外部脚本、嵌套 iframe 和父页面访问会被隔离。普通 Markdown 仍按 Markdown 渲染，存档正文不会被显示层美化改写。
 
 ## 目录结构
 

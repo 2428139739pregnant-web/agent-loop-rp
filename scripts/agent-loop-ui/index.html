@@ -497,14 +497,181 @@
       return doc.body.innerHTML
     }
 
-    /** 消息内容渲染:先过 display 位正则(不落库,酒馆 MD_DISPLAY 语义),
-     *  再用 GFM Markdown 转成 HTML,最后经过同一套白名单净化。
-     *  这样普通段落、列表、引用和 ```markdown 代码块都会正确显示,
-     *  同时保留酒馆状态栏所需的安全 HTML。 */
-    function MessageContent({ content, role, character }) {
-      const processed = applyDisplayRegex(content, role === 'user' ? 1 : 2, character)
-      const markdownHtml = marked.parse(processed, { gfm: true, breaks: true })
-      return h('div', { className: 'msg-text msg-markdown', dangerouslySetInnerHTML: { __html: sanitizeHtml(markdownHtml) } })
+    // ─── 角色卡 HTML 前端隔离渲染 ────────────────────────────────────────
+    // 角色卡 Regex 常把 ```html ... ``` 或带 <style>/<script> 的片段作为
+    // markdownOnly 替换结果。直接交给 marked 会变成代码块，不能得到 ST
+    // 的状态栏/仪表盘效果；这里把完整前端片段放入无 same-origin 的 sandbox
+    // iframe。它可以运行卡片自己的 DOM 脚本，但不能访问宿主页面、Cookie、
+    // localStorage 或父页面 DOM。
+    const FRAME_SCRIPT_OPEN = '<scr' + 'ipt>'
+    const FRAME_SCRIPT_CLOSE = '</scr' + 'ipt>'
+
+    function cardFrontendJqueryShim() {
+      return `(function(){
+        function wrap(items){
+          const list=Array.from(items||[]);
+          const api={length:list.length};
+          list.forEach((el,i)=>{api[i]=el});
+          api.each=function(fn){list.forEach((el,i)=>fn.call(el,i,el));return api};
+          api.find=function(sel){return wrap(list.flatMap(el=>Array.from(el.querySelectorAll(sel))))};
+          api.parent=function(){return wrap(list.map(el=>el.parentElement).filter(Boolean))};
+          api.siblings=function(){return wrap(list.flatMap(el=>el.parentElement?Array.from(el.parentElement.children).filter(x=>x!==el):[]))};
+          api.addClass=function(v){return api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.add(x)))};
+          api.removeClass=function(v){return api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.remove(x)))};
+          api.toggleClass=function(v){return api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.toggle(x)))};
+          api.hasClass=function(v){return !!list[0]?.classList.contains(String(v||''))};
+          api.html=function(v){if(v===undefined)return list[0]?.innerHTML||'';return api.each((_i,el)=>{el.innerHTML=String(v)})};
+          api.text=function(v){if(v===undefined)return list[0]?.textContent||'';return api.each((_i,el)=>{el.textContent=String(v)})};
+          api.val=function(v){if(v===undefined)return list[0]?.value||'';return api.each((_i,el)=>{el.value=String(v)})};
+          api.attr=function(k,v){if(v===undefined)return list[0]?.getAttribute(k);return api.each((_i,el)=>el.setAttribute(k,String(v)))};
+          api.data=function(k,v){if(v===undefined)return list[0]?.dataset?.[k];return api.each((_i,el)=>{el.dataset[k]=String(v)})};
+          api.empty=function(){return api.each((_i,el)=>{el.replaceChildren()})};
+          api.append=function(v){return api.each((_i,el)=>{if(typeof v==='string')el.insertAdjacentHTML('beforeend',v);else if(v?.nodeType)el.append(v)})};
+          api.sortable=function(){return api};
+          return api;
+        }
+        window.errorCatched=function(fn){return function(){try{return fn.apply(this,arguments)}catch(error){console.error('[agent-rp card script]',error)}}};
+        // Common ST/MVU lifecycle hooks used by character-card HUDs. The
+        // actual variable engine stays outside the sandbox; these no-op
+        // fallbacks let a static HUD finish its initial render instead of
+        // failing before updateHUD() when no MVU bridge is configured.
+        window.waitGlobalInitialized=async function(){return undefined};
+        window.eventOn=function(){return function(){}};
+        window.Mvu={events:{VARIABLE_UPDATE_ENDED:'VARIABLE_UPDATE_ENDED'}};
+        window.$=function(value){
+          if(typeof value==='function'){
+            if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',value,{once:true});else value();
+            return wrap([]);
+          }
+          if(value&&value.nodeType)return wrap([value]);
+          if(Array.isArray(value))return wrap(value);
+          try{return wrap(document.querySelectorAll(String(value||'')))}catch(_){return wrap([])}
+        };
+        window.jQuery=window.$;
+      })();`
+    }
+
+    function buildCardFrontendDocument(source, frameId) {
+      let body = String(source || '').trim()
+      // Do not allow an imported card to create a nested browsing context or
+      // navigate the host. Inline scripts remain available inside the sandbox
+      // because the reference cards use them for tabs, meters and toggles.
+      body = body
+        .replace(/<(iframe|object|embed|base)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, '')
+        .replace(/<(iframe|object|embed|base)\b[^>]*\/?>/giu, '')
+        .replace(/<script\b[^>]*\bsrc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)[^>]*>[\s\S]*?<\/script\s*>/giu, '')
+        .replace(/<script\b[^>]*\bsrc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)[^>]*\/?\s*>/giu, '')
+        .replace(/\s(?:href|src)\s*=\s*(["'])\s*javascript:[\s\S]*?\1/giu, '')
+      const shim = FRAME_SCRIPT_OPEN + cardFrontendJqueryShim() + FRAME_SCRIPT_CLOSE
+      const resize = `${FRAME_SCRIPT_OPEN}(function(){
+        const send=function(){
+          const root=document.documentElement;
+          const height=Math.max(180,Math.min(900,Math.ceil(Math.max(root.scrollHeight,document.body?.scrollHeight||0)+8)));
+          parent.postMessage({type:'agent-rp-card-frame-height',id:${JSON.stringify(frameId)},height},'*');
+        };
+        addEventListener('load',send); addEventListener('resize',send);
+        if(window.ResizeObserver)new ResizeObserver(send).observe(document.documentElement);
+        setTimeout(send,80); setTimeout(send,600);
+      })();${FRAME_SCRIPT_CLOSE}`
+      if (/<html(?:\s|>)/iu.test(body)) {
+        if (/<head(?:\s|>)/iu.test(body)) {
+          body = body.replace(/(<head(?:\s[^>]*)?>)/iu, `$1${shim}`)
+        } else {
+          body = `${shim}${body}`
+        }
+        const withResize = body.replace(/<\/body\s*>/iu, `${resize}</body>`)
+        return withResize === body ? `${body}${resize}` : withResize
+      }
+      return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${shim}</head><body>${body}${resize}</body></html>`
+    }
+
+    function displaySourceLines(value) {
+      const lines = []
+      const re = /[^\r\n]*(?:\r\n|\r|\n|$)/gu
+      for (const match of value.matchAll(re)) {
+        const text = match[0]
+        const start = match.index
+        if (text === '' && start === value.length) break
+        lines.push({ start, end: start + text.length, text })
+      }
+      return lines
+    }
+
+    function isCardFrontendDocument(info, source) {
+      return (/(?:<!doctype\s+html\b|<html(?:\s|>))\s*/iu.test(source) && /<\/html\s*>/iu.test(source))
+        || info.trim().split(/\s+/u)[0]?.toLowerCase() === 'html'
+    }
+
+    function compileDisplaySegments(value) {
+      const lines = displaySourceLines(value)
+      const segments = []
+      let cursor = 0
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i]
+        const opening = line.text.match(/^ {0,3}(`{3,}|~{3,})[ \t]*([^\r\n]*?)[ \t]*(?:\r\n|\r|\n|$)/u)
+        if (!opening) continue
+        const marker = opening[1]
+        let closingIndex = -1
+        for (let j = i + 1; j < lines.length; j += 1) {
+          const closing = lines[j].text.match(/^ {0,3}(`{3,}|~{3,})[ \t]*(?:\r\n|\r|\n|$)/u)
+          if (closing && closing[1][0] === marker[0] && closing[1].length >= marker.length) {
+            closingIndex = j; break
+          }
+        }
+        if (closingIndex < 0) continue
+        const closingLine = lines[closingIndex]
+        const source = value.slice(line.end, closingLine.start)
+        if (!isCardFrontendDocument(opening[2] || '', source)) continue
+        const before = value.slice(cursor, line.start)
+        if (before) segments.push({ kind: 'markdown', source: before })
+        segments.push({ kind: 'html', source })
+        cursor = closingLine.end
+        i = closingIndex
+      }
+      const rest = value.slice(cursor)
+      if (rest) {
+        const hasFrontendMarkup = /<!doctype\s+html\b|<html(?:\s|>)|<style(?:\s|>)|<script(?:\s|>)/iu.test(rest)
+        segments.push({ kind: hasFrontendMarkup ? 'html' : 'markdown', source: rest })
+      }
+      return segments.length > 0 ? segments : [{ kind: 'markdown', source: value }]
+    }
+
+    function CardHtmlFrame({ source }) {
+      const frameRef = useRef(null)
+      const frameId = useRef(`card-frame-${Math.random().toString(36).slice(2)}`)
+      const [height, setHeight] = useState(420)
+      useEffect(() => {
+        const onMessage = (event) => {
+          if (event.source !== frameRef.current?.contentWindow) return
+          const data = event.data
+          if (!data || data.type !== 'agent-rp-card-frame-height' || data.id !== frameId.current) return
+          if (Number.isFinite(data.height)) setHeight(Math.max(180, Math.min(900, Number(data.height))))
+        }
+        window.addEventListener('message', onMessage)
+        return () => window.removeEventListener('message', onMessage)
+      }, [])
+      return h('iframe', {
+        ref: frameRef,
+        className: 'msg-card-html-frame',
+        title: '角色卡 HTML 美化内容',
+        sandbox: 'allow-scripts',
+        scrolling: 'auto',
+        srcDoc: buildCardFrontendDocument(source, frameId.current),
+        style: { height: `${height}px` },
+      })
+    }
+
+    /** 消息内容渲染:角色卡 display Regex → HTML/Markdown 分段 → 安全渲染。
+     * 角色卡的 markdownOnly 脚本只影响显示，promptOnly 脚本不会污染显示；
+     * 普通 Markdown 继续走 marked + 白名单净化，完整 HTML/状态栏进入 sandbox。 */
+    function MessageContent({ content, role, character, depth = 0, userName = '用户' }) {
+      const processed = applyDisplayRegex(content, role === 'user' ? 1 : 2, character, depth, userName)
+      const segments = compileDisplaySegments(processed)
+      return h('div', { className: 'msg-text msg-content-stack' }, segments.map((segment, index) => {
+        if (segment.kind === 'html') return h(CardHtmlFrame, { key: `html-${index}`, source: segment.source })
+        const markdownHtml = marked.parse(segment.source, { gfm: true, breaks: true })
+        return h('div', { key: `md-${index}`, className: 'msg-markdown', dangerouslySetInnerHTML: { __html: sanitizeHtml(markdownHtml) } })
+      }))
     }
 
     /** 单个 stage 的可展开 trace 卡片。⑤ postprocess 的同步正文链路拆成独立 stage,
@@ -792,7 +959,12 @@
         })
       } catch { return rawString }
     }
-    function applyDisplayRegex(text, placement = 2, character = null) {
+    function cardRegexInDepth(script, depth) {
+      if (depth === undefined || depth === null) return true
+      if (script.minDepth !== null && script.minDepth !== undefined && Number(script.minDepth) >= -1 && depth < Number(script.minDepth)) return false
+      return script.maxDepth === null || script.maxDepth === undefined || Number(script.maxDepth) < 0 || depth <= Number(script.maxDepth)
+    }
+    function applyDisplayRegex(text, placement = 2, character = null, depth = undefined, userName = '用户') {
       let out = text
       for (const s of displayRegexScripts) {
         if (s.disabled || !s.placement.includes('display')) continue
@@ -800,10 +972,16 @@
       }
       const scoped = character && character.frontend && Array.isArray(character.frontend.regexScripts)
         ? character.frontend.regexScripts : []
-      for (const s of scoped) {
-        if (s.disabled || !Array.isArray(s.placement) || !s.placement.includes(placement)) continue
-        if (!s.markdownOnly && s.promptOnly) continue
-        out = runCardRegexScriptUI(s, out, character)
+      const eligible = scoped.filter((s) => !s.disabled && Array.isArray(s.placement)
+        && s.placement.includes(placement) && cardRegexInDepth(s, depth))
+      // SillyTavern first runs scripts without an ephemerality flag, then
+      // runs the surface-specific pass. This matters when a normal script
+      // creates a placeholder that a later markdownOnly script expands.
+      for (const s of eligible) {
+        if (!s.markdownOnly && !s.promptOnly) out = runCardRegexScriptUI(s, out, character, userName)
+      }
+      for (const s of eligible) {
+        if (s.markdownOnly) out = runCardRegexScriptUI(s, out, character, userName)
       }
       return out
     }
@@ -1539,6 +1717,7 @@
       const [characters, setCharacters] = useState([])
       const [currentCharacterId, setCurrentCharacterId] = useState(null)
       const [currentCharacter, setCurrentCharacter] = useState(null)
+      const [currentUserName, setCurrentUserName] = useState('用户')
       const [characterSessions, setCharacterSessions] = useState([])
       const [currentSessionId, setCurrentSessionId] = useState(null)
       const [history, setHistory] = useState([])
@@ -1562,6 +1741,11 @@
             setCharacters(state.characters || [])
             setCurrentCharacterId(state.currentCharacterId)
             setCurrentSessionId(state.currentSessionId)
+            try {
+              const personaState = await apiGet('/api/personas')
+              const currentPersona = (personaState.personas || []).find((persona) => persona.id === personaState.currentPersonaId)
+              setCurrentUserName(currentPersona?.name || '用户')
+            } catch { /* persona is optional; keep the ST-compatible fallback */ }
             if (state.currentCharacterId) {
               const detail = await apiGet(`/api/characters/${encodeURIComponent(state.currentCharacterId)}`)
               setCurrentCharacter(detail.character)
@@ -1607,6 +1791,14 @@
 
       const refreshHealth = useCallback(async () => {
         try { setHealth(await apiGet('/api/health')) } catch { /* */ }
+      }, [])
+
+      const refreshCurrentUserName = useCallback(async () => {
+        try {
+          const personaState = await apiGet('/api/personas')
+          const currentPersona = (personaState.personas || []).find((persona) => persona.id === personaState.currentPersonaId)
+          setCurrentUserName(currentPersona?.name || '用户')
+        } catch { /* persona is optional; keep the ST-compatible fallback */ }
       }, [])
 
       // 启动时拉一次 display 位正则脚本(RegexPanel CRUD 后也会自行刷新)。
@@ -1953,7 +2145,7 @@
           : activeTool === 'api'
             ? h(ApiConfigPanel, { onConfigChange: refreshHealth })
             : activeTool === 'persona'
-              ? h(PersonaPanel, { onError: setError })
+              ? h(PersonaPanel, { onError: setError, onPersonaChange: refreshCurrentUserName })
               : activeTool === 'worldbooks'
                 ? h(WorldbooksPanel, { currentCharacterId, onWorldbookChange: refreshHealth, onError: setError })
                 : activeTool === 'regex'
@@ -2025,7 +2217,10 @@
                     key: `${m.role}-${i}`, className: `msg ${m.role}`,
                   },
                     h('span', { className: 'role' }, m.role),
-                    h(MessageContent, { content: m.content, role: m.role, character: currentCharacter }),
+                    h(MessageContent, {
+                      content: m.content, role: m.role, character: currentCharacter,
+                      depth: Math.max(0, history.length - i - 1), userName: currentUserName,
+                    }),
                     currentSessionId !== null && !loading
                       ? h('span', { className: 'msg-actions' },
                           i === history.length - 1 && m.role === 'assistant'

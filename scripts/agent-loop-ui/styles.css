@@ -1007,6 +1007,7 @@ body { overflow: hidden; background: var(--bg); }
 .msg .role { color: #aeb7c4; }
 .msg.system { align-self: center; max-width: 620px; padding: 14px 18px; background: rgba(255,255,255,.025); border-color: var(--border); text-align: center; }
 .msg-text { width: 100%; max-width: 100%; }
+.msg-content-stack { display: flex; flex-direction: column; gap: 10px; }
 .msg-markdown { white-space: normal; overflow-wrap: anywhere; }
 .msg-markdown p { margin: 0 0 1em; }
 .msg-markdown p:last-child { margin-bottom: 0; }
@@ -1022,6 +1023,15 @@ body { overflow: hidden; background: var(--bg); }
 .msg-markdown th { background: rgba(255,255,255,.045); }
 .msg-markdown img { max-width: 100%; height: auto; }
 .msg-markdown hr { margin: 1em 0; border: 0; border-top: 1px solid var(--border); }
+.msg-card-html-frame {
+  display: block;
+  width: 100%;
+  min-height: 180px;
+  border: 1px solid rgba(214,154,98,.18);
+  border-radius: 8px;
+  background: rgba(12,15,20,.72);
+  overflow: auto;
+}
 .composer { display: flex; flex-direction: column; gap: 8px; padding: 10px clamp(16px, 5vw, 72px) 16px; background: rgba(24,27,33,.96); border-top-color: var(--border); }
 .composer-main { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
 .composer textarea { min-height: 50px; max-height: 180px; border-radius: 10px; background: #12151a; }
