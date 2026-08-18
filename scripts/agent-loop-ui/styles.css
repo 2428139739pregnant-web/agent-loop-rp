@@ -844,6 +844,64 @@ button.mini:hover { color: var(--text); border-color: var(--text-dim); }
 .msg-html table { border-collapse: collapse; }
 .msg-html td, .msg-html th { padding: 2px 6px; border: 1px solid var(--border); }
 
+/* ─── SillyTavern-style message floors ───────────────────────────────── */
+.floor-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 26px;
+  margin: -5px 0 9px;
+  padding: 3px 5px;
+  border-bottom: 1px solid rgba(255,255,255,.065);
+  color: var(--text-dim);
+  font-size: 10px;
+}
+.floor-toggle, .floor-action {
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 10px;
+}
+.floor-toggle { width: 20px; padding: 2px 0; color: var(--accent-2); }
+.floor-toggle:hover, .floor-action:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--bg-3);
+  color: var(--text);
+}
+.floor-index { color: var(--accent-2); font-weight: 650; white-space: nowrap; }
+.floor-role { letter-spacing: .08em; font-weight: 650; white-space: nowrap; }
+.floor-preview { min-width: 0; overflow: hidden; flex: 1; color: var(--text-dim); text-overflow: ellipsis; white-space: nowrap; }
+.floor-actions { display: flex; gap: 4px; margin-left: auto; }
+.floor-action { padding: 3px 6px; white-space: nowrap; }
+.floor-action-primary { border-color: rgba(214,154,98,.45); color: var(--accent-2); }
+.floor-action-danger:hover:not(:disabled) { border-color: var(--error); color: var(--error); }
+.floor-action:disabled, .floor-toggle:disabled { cursor: not-allowed; opacity: .45; }
+.floor-collapsed-body {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.floor-editor { display: flex; flex-direction: column; gap: 7px; }
+.floor-editor-input {
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #0e1116;
+  color: var(--text);
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.floor-editor-input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+.floor-editor-hint { color: var(--text-dim); font-size: 10px; }
+.msg-live-card-status { order: 999; margin-top: 4px; }
+
 /* ──────────────────────────────────────────────────────────────────────────
    Workspace shell v2
    The old prototype kept every panel in a permanent left sidebar. This shell

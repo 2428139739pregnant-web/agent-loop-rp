@@ -2071,6 +2071,43 @@ async function handleDeleteMessage(state: AppState, id: string, indexRaw: string
   sendJson(res, 200, { sessionId: id, deletedIndex: index, remaining: next.length })
 }
 
+/** PUT /api/sessions/:id/message/:index — 编辑单条消息内容。 */
+async function handlePutMessage(state: AppState, id: string, indexRaw: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const record = state.sessionRecords.get(id)
+  if (record === undefined) return sendError(res, 404, `session not found: ${id}`)
+  const index = Number.parseInt(indexRaw, 10)
+  if (!Number.isInteger(index)) return sendError(res, 400, `invalid message index: ${indexRaw}`)
+  const payload = parseJsonBody(await readBody(req, 32 * 1024 * 1024))
+  if (payload === null) return sendError(res, 400, 'invalid JSON body')
+  const content = readStringField(payload, 'content')
+  if (content === undefined) return sendError(res, 400, 'content (string) is required')
+
+  const history = [...state.sessions.getHistory(id)]
+  if (index < 0 || index >= history.length) {
+    return sendError(res, 404, `message index out of range: ${index} (history length ${history.length})`)
+  }
+  const current = history[index]
+  if (current === undefined) return sendError(res, 404, `message index out of range: ${index}`)
+  history[index] = { role: current.role, content }
+  state.sessions.setHistory(id, history)
+  try {
+    await rewriteHistoryJsonl(id, history)
+  } catch (err) {
+    process.stderr.write(`[ui-server] warn: failed to rewrite history for ${id}: ${err instanceof Error ? err.message : String(err)}\n`)
+  }
+
+  const mvuState = readMvuStateFromMessages(record.character.raw, history, {
+    user: getCurrentUserPersona(state)?.name ?? '用户',
+    char: record.character.name,
+  })?.statData
+  sendJson(res, 200, {
+    sessionId: id,
+    updatedIndex: index,
+    history: displayHistory(state, id, history),
+    ...(mvuState === undefined ? {} : { mvuState }),
+  })
+}
+
 function handleHealth(state: AppState, res: ServerResponse): void {
   const cfg = getGlobalConfig(state)
   sendJson(res, 200, {
@@ -4130,6 +4167,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
       }
       {
         const m = /^\/api\/sessions\/([^/]+)\/message\/([^/]+)$/u.exec(url.pathname)
+        if (method === 'PUT' && m !== null) {
+          return await handlePutMessage(state, decodeURIComponent(m[1] ?? ''), decodeURIComponent(m[2] ?? ''), req, res)
+        }
         if (method === 'DELETE' && m !== null) {
           return await handleDeleteMessage(state, decodeURIComponent(m[1] ?? ''), decodeURIComponent(m[2] ?? ''), res)
         }

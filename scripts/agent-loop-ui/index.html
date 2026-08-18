@@ -589,7 +589,7 @@
       `
     }
 
-    function buildCardFrontendDocument(source, frameId, mvuState = null, statusOnly = false) {
+    function buildCardFrontendDocument(source, frameId, mvuState = null) {
       let body = String(source || '').trim()
       // Do not allow an imported card to create a nested browsing context or
       // navigate the host. Inline scripts remain available inside the sandbox
@@ -624,15 +624,6 @@
           body = body.replace(/(<head(?:\s[^>]*)?>)/iu, `$1${shim}`)
         } else {
           body = `${shim}${body}`
-        }
-        if (statusOnly) {
-          const statusCss = `${FRAME_SCRIPT_OPEN.replace('<script>', '<style>')}\n            html, body { height: auto !important; min-height: 0 !important; overflow: hidden !important; }
-            body { position: static !important; display: block !important; }
-            body > * { display: none !important; }
-            body > .hud-top { display: flex !important; }
-            .hud-top { min-height: 112px !important; }
-          ${FRAME_SCRIPT_CLOSE.replace('</scr' + 'ipt>', '</style>')}`
-          body = body.replace(/<\/head\s*>/iu, `${statusCss}</head>`)
         }
         const withResize = body.replace(/<\/body\s*>/iu, `${resize}</body>`)
         return withResize === body ? `${body}${resize}` : withResize
@@ -691,34 +682,28 @@
       return segments.length > 0 ? segments : [{ kind: 'markdown', source: value }]
     }
 
-    function CardHtmlFrame({ source, mvuState, statusOnly = false }) {
+    function CardHtmlFrame({ source, mvuState }) {
       const frameRef = useRef(null)
       const frameId = useRef(`card-frame-${Math.random().toString(36).slice(2)}`)
-      const [height, setHeight] = useState(statusOnly ? 220 : 420)
+      const [height, setHeight] = useState(420)
       useEffect(() => {
         const onMessage = (event) => {
           if (event.source !== frameRef.current?.contentWindow) return
           const data = event.data
           if (!data || data.type !== 'agent-rp-card-frame-height' || data.id !== frameId.current) return
-          if (Number.isFinite(data.height)) {
-            const nextHeight = Math.max(180, Math.min(900, Number(data.height)))
-            // A status-only HUD deliberately hides the card's stage/content
-            // layers. Keep a bad early resize measurement from reserving the
-            // full 900px card height in the chat.
-            setHeight(statusOnly ? Math.min(300, nextHeight) : nextHeight)
-          }
+          if (Number.isFinite(data.height)) setHeight(Math.max(180, Math.min(900, Number(data.height))))
         }
         window.addEventListener('message', onMessage)
         return () => window.removeEventListener('message', onMessage)
-      }, [statusOnly])
+      }, [])
       return h('iframe', {
         ref: frameRef,
         className: 'msg-card-html-frame',
         title: '角色卡 HTML 美化内容',
         sandbox: 'allow-scripts',
         scrolling: 'auto',
-        srcDoc: buildCardFrontendDocument(source, frameId.current, mvuState, statusOnly),
-        style: { height: `${statusOnly ? Math.min(300, height) : height}px` },
+        srcDoc: buildCardFrontendDocument(source, frameId.current, mvuState),
+        style: { height: `${height}px` },
       })
     }
 
@@ -734,17 +719,17 @@
         return h('div', { key: `md-${index}`, className: 'msg-markdown', dangerouslySetInnerHTML: { __html: sanitizeHtml(markdownHtml) } })
       })
       if (liveStatusSource) {
-        rendered.unshift(h('div', { key: 'live-card-status', className: 'msg-live-card-status' },
-          h(CardHtmlFrame, { source: liveStatusSource, mvuState, statusOnly: true }),
+        rendered.push(h('div', { key: 'live-card-status', className: 'msg-live-card-status' },
+          h(CardHtmlFrame, { source: liveStatusSource, mvuState }),
         ))
       }
       return h('div', { className: 'msg-text msg-content-stack' }, rendered)
     }
 
     // A number of ST cards put the live HUD only in the opening greeting via
-    // <StatusPlaceHolderImpl/>. Keep that card-owned HUD available beside the
-    // newest assistant reply as a status-only iframe, so MVU updates remain
-    // visible after the chat has scrolled past the opening message.
+    // <StatusPlaceHolderImpl/>. Keep that card-owned frontend available inside
+    // the newest assistant floor, so its own tabs and interactions remain
+    // intact after the chat has scrolled past the opening message.
     function findLiveStatusSource(history, character, userName) {
       if (!Array.isArray(history) || !character) return null
       for (let i = 0; i < history.length; i += 1) {
@@ -757,6 +742,93 @@
         if (statusSegment) return statusSegment.source
       }
       return null
+    }
+
+    /**
+     * SillyTavern-style message floor. The rendered message is only the
+     * display surface; edit mode always exposes the original stored content
+     * so card markers, regex placeholders and MVU blocks can be inspected or
+     * corrected without losing them to the renderer.
+     */
+    function MessageFloor({
+      message, index, total, character, userName, mvuState, liveStatusSource,
+      disabled = false, onReroll = null, onSaveEdit, onDelete,
+    }) {
+      const [collapsed, setCollapsed] = useState(false)
+      const [editing, setEditing] = useState(false)
+      const [draft, setDraft] = useState(message.content)
+      const [saving, setSaving] = useState(false)
+      const isLatestAssistant = index === total - 1 && message.role === 'assistant'
+
+      useEffect(() => {
+        if (!editing) setDraft(message.content)
+      }, [message.content, editing])
+
+      const save = async () => {
+        setSaving(true)
+        try {
+          await onSaveEdit(index, draft)
+          setEditing(false)
+          setCollapsed(false)
+        } finally {
+          setSaving(false)
+        }
+      }
+
+      const roleLabel = message.role === 'assistant' ? 'ASSISTANT' : message.role === 'user' ? 'USER' : 'SYSTEM'
+      const preview = String(message.content || '').replace(/\s+/gu, ' ').trim().slice(0, 180)
+      const floorStatus = collapsed ? ' floor-collapsed' : ''
+
+      return h('div', { className: `msg floor-${message.role}${floorStatus}` },
+        h('div', { className: 'floor-head' },
+          h('button', {
+            className: 'floor-toggle',
+            title: collapsed ? '展开楼层' : '收起楼层',
+            onClick: () => setCollapsed((value) => !value),
+          }, collapsed ? '▸' : '▾'),
+          h('span', { className: 'floor-index' }, `第 ${index + 1} 层`),
+          h('span', { className: 'floor-role' }, roleLabel),
+          collapsed ? h('span', { className: 'floor-preview', title: preview }, preview || '(空消息)') : null,
+          h('div', { className: 'floor-actions' },
+            h('button', {
+              className: 'floor-action', title: editing ? '取消编辑' : '编辑本层', disabled: disabled || saving,
+              onClick: () => { setEditing((value) => !value); setCollapsed(false) },
+            }, editing ? '取消' : '编辑'),
+            editing
+              ? h('button', {
+                  className: 'floor-action floor-action-primary', title: '保存本层', disabled: disabled || saving,
+                  onClick: () => { void save() },
+                }, saving ? '保存中…' : '保存')
+              : null,
+            isLatestAssistant && onReroll
+              ? h('button', {
+                  className: 'floor-action', title: '重 roll 当前回复', disabled: disabled,
+                  onClick: () => { void onReroll() },
+                }, '重 roll')
+              : null,
+            h('button', {
+              className: 'floor-action floor-action-danger', title: '删除本层', disabled: disabled || saving,
+              onClick: () => { void onDelete(index) },
+            }, '删除'),
+          ),
+        ),
+        editing
+          ? h('div', { className: 'floor-editor' },
+              h('textarea', {
+                className: 'floor-editor-input', value: draft, disabled: saving,
+                onChange: (event) => setDraft(event.target.value),
+                spellCheck: false,
+              }),
+              h('div', { className: 'floor-editor-hint' }, '编辑的是原始楼层内容；保存后会重新应用角色卡正则、Markdown、HTML 与 MVU 展示。'),
+            )
+          : collapsed
+            ? h('div', { className: 'floor-collapsed-body' }, preview || '(空消息)')
+            : h(MessageContent, {
+                content: message.content, role: message.role, character,
+                depth: Math.max(0, total - index - 1), userName, mvuState,
+                liveStatusSource: isLatestAssistant && total > 1 ? liveStatusSource : null,
+              }),
+      )
     }
 
     /** 单个 stage 的可展开 trace 卡片。⑤ postprocess 的同步正文链路拆成独立 stage,
@@ -2116,6 +2188,31 @@
         setTimeout(() => setProgressStages(INITIAL_STAGES), 5000)
       }, [currentSessionId, loading, history, refreshCharacterSessions, streamRun])
 
+      const saveMessageEdit = useCallback(async (index, content) => {
+        if (currentSessionId === null) return
+        try {
+          const r = await apiPut(`/api/sessions/${encodeURIComponent(currentSessionId)}/message/${index}`, { content })
+          setHistory(r.history || [])
+          setMvuState(r.mvuState ?? null)
+          refreshCharacterSessions()
+        } catch (err) {
+          setError(String(err.message || err))
+          throw err
+        }
+      }, [currentSessionId, refreshCharacterSessions])
+
+      const deleteMessage = useCallback(async (index) => {
+        if (currentSessionId === null || loading) return
+        if (!window.confirm(`删除第 ${index + 1} 层？此操作不可恢复。`)) return
+        try {
+          await apiDelete(`/api/sessions/${encodeURIComponent(currentSessionId)}/message/${index}`)
+          const r = await apiGet(`/api/history?sessionId=${encodeURIComponent(currentSessionId)}`)
+          setHistory(r.history || [])
+          setMvuState(r.mvuState ?? null)
+          refreshCharacterSessions()
+        } catch (err) { setError(String(err.message || err)) }
+      }, [currentSessionId, loading, refreshCharacterSessions])
+
       const onKeyDown = (ev) => {
         if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); send() }
       }
@@ -2326,36 +2423,16 @@
                 ? h('div', { className: 'msg system' },
                     currentSessionId ? '会话已就绪。输入消息开始聊天 (⌘/Ctrl+Enter 发送)。' :
                     (currentCharacterId ? '已选中角色。点击右上「新建会话」开始聊天。' : '打开左侧「角色」面板选择一个角色开始。'))
-                : history.map((m, i) => h('div', {
-                    key: `${m.role}-${i}`, className: `msg ${m.role}`,
-                  },
-                    h('span', { className: 'role' }, m.role),
-                    h(MessageContent, {
-                      content: m.content, role: m.role, character: currentCharacter,
-                      depth: Math.max(0, history.length - i - 1), userName: currentUserName, mvuState,
-                      liveStatusSource: i === history.length - 1 && m.role === 'assistant' && history.length > 1
-                        ? liveStatusSource : null,
-                    }),
-                    currentSessionId !== null && !loading
-                      ? h('span', { className: 'msg-actions' },
-                          i === history.length - 1 && m.role === 'assistant'
-                            ? h('button', { title: '重 roll 这条回复', onClick: reroll, style: { fontSize: '11px', padding: '0 5px' } }, '🎲')
-                            : null,
-                          h('button', {
-                            title: '删除这条消息', style: { fontSize: '11px', padding: '0 5px' },
-                            onClick: async () => {
-                              if (!window.confirm('删除这条消息?')) return
-                              try {
-                                await apiDelete(`/api/sessions/${encodeURIComponent(currentSessionId)}/message/${i}`)
-                                const r = await apiGet(`/api/history?sessionId=${encodeURIComponent(currentSessionId)}`)
-                                setHistory(r.history || [])
-                                refreshCharacterSessions()
-                              } catch (err) { setError(String(err.message || err)) }
-                            },
-                          }, '🗑'),
-                        )
-                      : null,
-                  )),
+                : history.map((m, i) => h(MessageFloor, {
+                    key: `${m.role}-${i}`,
+                    message: m, index: i, total: history.length,
+                    character: currentCharacter, userName: currentUserName, mvuState,
+                    liveStatusSource,
+                    disabled: currentSessionId === null || loading,
+                    onReroll: i === history.length - 1 && m.role === 'assistant' ? reroll : null,
+                    onSaveEdit: saveMessageEdit,
+                    onDelete: deleteMessage,
+                  })),
             ),
             h('div', { className: 'composer' },
               chatGreetingSwitcher,
