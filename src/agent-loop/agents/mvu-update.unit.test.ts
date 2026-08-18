@@ -4,6 +4,7 @@ import { runMvuUpdate, type MvuRuntimeSettings } from './mvu-update.ts'
 import { InMemoryPromptLoader, type AgentContext } from './types.ts'
 import type { ChatMessage, ChatOptions, LLMProvider } from '../provider.ts'
 import type { PreprocessedCharacter } from '../character-loader.ts'
+import { applyMvuReply, readMvuStateFromMessages } from '../../mvu.ts'
 
 function makeCharacter(): PreprocessedCharacter {
   return {
@@ -80,4 +81,41 @@ test('runMvuUpdate skips the extra call when MVU is disabled', async () => {
   )
   assert.equal(calls, 0)
   assert.equal(result.update, undefined)
+})
+
+test('MVU accepts standard RFC 6902 add operations', () => {
+  const result = applyMvuReply(
+    { score: 0, items: ['a'], meta: {} },
+    '<update><json_patch>['
+      + '{"op":"add","path":"/score","value":1},'
+      + '{"op":"add","path":"/meta/location","value":"神殿"},'
+      + '{"op":"add","path":"/items/-","value":"b"}'
+      + ']</json_patch></update>',
+  )
+  assert.deepEqual(result?.statData, { score: 1, items: ['a', 'b'], meta: { location: '神殿' } })
+  assert.equal(result?.appliedOperations, 3)
+})
+
+test('MVU state applies user and character macros before HUD/template consumption', () => {
+  const character = makeCharacter()
+  const card = {
+    ...character.raw,
+    lorebook: {
+    ...character.raw.lorebook!,
+    entries: [
+      ...(character.raw.lorebook?.entries ?? []),
+      {
+        sourceId: 'init',
+        name: '[initvar]',
+        comment: '',
+        content: '<initvar>\n主角:\n  姓名: <user>\n  称号: "{{char}} 的旅伴"\n</initvar>',
+        enabled: true,
+        insertionOrder: 0,
+      },
+    ],
+    },
+  } as unknown as typeof character.raw
+  const state = readMvuStateFromMessages(card, [], { user: '艾云浮', char: '英妮缇雅' })
+  assert.equal((state?.statData as { 主角: { 姓名: string; 称号: string } }).主角.姓名, '艾云浮')
+  assert.equal((state?.statData as { 主角: { 姓名: string; 称号: string } }).主角.称号, '英妮缇雅 的旅伴')
 })

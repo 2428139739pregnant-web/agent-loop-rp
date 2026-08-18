@@ -1999,6 +1999,23 @@
               } else if (ev.event === 'agent-trace') {
                 let payload; try { payload = JSON.parse(ev.data) } catch { continue }
                 setTraces((prev) => ({ ...prev, [payload.name]: payload }))
+              } else if (ev.event === 'mvu-result') {
+                let payload; try { payload = JSON.parse(ev.data) } catch { continue }
+                const patchedReply = payload.displayReply || payload.reply
+                if (typeof patchedReply === 'string') {
+                  setHistory((prev) => {
+                    const next = [...prev]
+                    for (let i = next.length - 1; i >= 0; i--) {
+                      if (next[i]?.role === 'assistant') {
+                        next[i] = { ...next[i], content: patchedReply }
+                        return next
+                      }
+                    }
+                    return next
+                  })
+                }
+                if (payload.mvuState !== undefined) setMvuState(payload.mvuState)
+                if (payload.tokenStats !== undefined) setLastTokenStats(payload.tokenStats)
               } else if (ev.event === 'error') {
                 let msg = '未知错误'; try { msg = (JSON.parse(ev.data)).message || msg } catch { /* */ }
                 setError(msg); streamErrored = true

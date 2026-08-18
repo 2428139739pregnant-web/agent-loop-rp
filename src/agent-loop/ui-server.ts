@@ -61,7 +61,7 @@ import {
 
 import type { ImportedLorebook, ImportedLorebookEntry } from '../import/types.ts'
 import { EjsTemplateEngine, type EjsTemplateResult, type EjsTemplateTarget } from '../ejs-template.ts'
-import { readMvuStateFromMessages } from '../mvu.ts'
+import { readMvuStateFromMessages, type MvuMacroContext } from '../mvu.ts'
 import { PersonaStore, substituteUserCharMacros } from './persona-store.ts'
 import { RegexScriptStore, applyRegexScripts, type RegexPlacement } from './regex-scripts.ts'
 
@@ -136,7 +136,7 @@ type StageStatus = 'start' | 'done' | 'error'
 
 /** Single SSE event payload sent on the `stage` (or `error`) channel. */
 type StageEvent =
-  | { name: Exclude<StageName, 'final' | 'error'>; status: StageStatus }
+  | { name: Exclude<StageName, 'final' | 'error'>; status: StageStatus; result?: Record<string, unknown> }
   | { name: 'final'; status: 'done'; result: ReplyResult }
   | { name: 'error'; status: 'error'; message: string }
 
@@ -381,7 +381,10 @@ function buildCharacterTemplateRenderer(
 ): ReturnType<EjsTemplateEngine['createRenderer']> | undefined {
   if (state.ejsEngine === undefined) return undefined
   const history = session.getHistory(sessionId)
-  const mvu = readMvuStateFromMessages(character.raw, history)
+  const mvu = readMvuStateFromMessages(character.raw, history, {
+    user: userName,
+    char: character.name,
+  })
   const helperVariables = character.raw.frontend?.tavernHelperVariables ?? {}
   return state.ejsEngine.createRenderer({
     characterName: character.name,
@@ -1396,6 +1399,8 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
   const session = state.sessions
   const worldbook = state.worldbook
   const character = record.character
+  const activeUserName = getCurrentUserPersona(state)?.name ?? '用户'
+  const mvuMacros: MvuMacroContext = { user: activeUserName, char: character.name }
 
   // Persist user message first so 2.2 sees it.
   // (reroll 模式跳过:该轮的 user 消息已在历史里,truncate 时保留了。)
@@ -1415,12 +1420,12 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     character,
     session,
     sessionId,
-    getCurrentUserPersona(state)?.name ?? '用户',
+    activeUserName,
   )
-  const mvuState = readMvuStateFromMessages(character.raw, session.getHistory(sessionId))?.statData
+  const mvuState = readMvuStateFromMessages(character.raw, session.getHistory(sessionId), mvuMacros)?.statData
   const agentCtx = buildAgentContext({
     provider, model: cfg.model, prompts, session, worldbook, sessionId,
-    macros: { user: getCurrentUserPersona(state)?.name ?? null, char: character.name },
+    macros: { user: activeUserName, char: character.name },
     worldbookSettings: state.worldbookSettings,
     postprocessSettings: state.postprocessSettings,
     ...(templateRenderer === undefined ? {} : { renderTemplate: templateRenderer }),
@@ -1713,46 +1718,38 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     { user: getCurrentUserPersona(state)?.name ?? null, char: character.name },
   )
 
-  // MVU 是独立于 response/postprocess 的额外 LLM 调用。它必须在本轮
-  // 新正文确定后重新分析；重 roll 只复用 intent/worldbook/context，不复用
-  // 旧回复的变量更新。runStageWithTrace 会把它单独计入 tokenStats.mvu。
-  const currentMvu = readMvuStateFromMessages(character.raw, session.getHistory(sessionId))
-  if (state.mvuSettings.enabled && currentMvu !== undefined) {
-    const mvuInput = {
-      userInput,
-      assistantReply: result.reply,
-      statData: currentMvu.statData,
-      character: { name: character.name },
-    }
-    const mvuResult = await runStageWithTrace('mvu', mvuInput, () => runMvuUpdate(
-      {
-        character,
-        userInput,
-        assistantReply: result?.reply ?? '',
-        statData: currentMvu.statData,
-      },
-      agentCtx,
-      state.mvuSettings,
-    ))
-    if (mvuResult !== null && mvuResult.update !== undefined) {
-      result.reply = `${result.reply.trimEnd()}\n\n${mvuResult.update}`
-    }
-  }
+  // MVU is independent from the prose path. Emit and persist the prose first;
+  // the variable call below may append its machine block asynchronously.
+  const proseReply = result.reply
 
   // ST-Prompt-Template [RENDER:*] changes only what is displayed. Keep the
   // raw reply in SessionStore/history so reroll and future context do not
   // accidentally feed display decorations back into the model.
   const displayReply = applyWorldbookRenderDirectives(
-    result.reply,
+    proseReply,
     wb?.plugin?.renderDirectives ?? [],
   )
 
-  session.appendMessage(sessionId, { role: 'assistant', content: result.reply })
+  session.appendMessage(sessionId, { role: 'assistant', content: proseReply })
   // 持久化 assistant 消息到 history.jsonl(best-effort)
-  try { await appendHistoryJsonl(sessionId, { role: 'assistant', content: result.reply }) } catch { /* swallow */ }
-  await writeCurrentTurnStats(result.reply.length)
-  const finalTokenStats = buildTurnStats(result.reply.length)
-  const finalMvuState = readMvuStateFromMessages(character.raw, session.getHistory(sessionId))?.statData
+  try { await appendHistoryJsonl(sessionId, { role: 'assistant', content: proseReply }) } catch { /* swallow */ }
+  await writeCurrentTurnStats(proseReply.length)
+  const initialTokenStats = buildTurnStats(proseReply.length)
+  const initialMvuState = readMvuStateFromMessages(character.raw, session.getHistory(sessionId), mvuMacros)?.statData
+
+  const finalResult = {
+    reply: proseReply,
+    ...(displayReply === proseReply ? {} : { displayReply }),
+    sessionId,
+    turn: session.turnCount(sessionId),
+    usedWorldbook,
+    usedContextSegmentation,
+    ...(initialMvuState === undefined ? {} : { mvuState: initialMvuState }),
+    ...(initialTokenStats ? { tokenStats: initialTokenStats } : {}),
+  }
+  // The final event deliberately precedes the independent MVU call so the
+  // conversation area can render the prose immediately.
+  sendStage({ name: 'final', status: 'done', result: finalResult })
 
   // Fire-and-forget ④. Send start now; done may arrive after res.end() (and
   // we'll silently drop it, by design — the front-end doesn't block on it).
@@ -1763,7 +1760,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     const summarizeInput = {
       messages: [
         { role: 'user' as const, content: userInput },
-        { role: 'assistant' as const, content: result.reply },
+        { role: 'assistant' as const, content: proseReply },
       ],
       character: { name: character.name, persona: character.persona },
     }
@@ -1774,23 +1771,62 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
         if (!res.writableEnded) sendStage({ name: 'summarize', status: 'done' })
         const usageTotal = usageTracker.snapshot('summarize')
         sendTrace('summarize', summarizeInput, { completed: true }, Date.now() - summarizeStarted, subtractTokenUsage(usageTotal, summarizeBefore), usageTotal)
-        if (turnStatsWritten) void writeCurrentTurnStats(result?.reply.length ?? 0)
+        if (turnStatsWritten) void writeCurrentTurnStats(result?.reply.length ?? proseReply.length)
       })
   }
 
-  const finalResult = {
-    reply: result.reply,
-    ...(displayReply === result.reply ? {} : { displayReply }),
-    sessionId,
-    turn: session.turnCount(sessionId),
-    usedWorldbook,
-    usedContextSegmentation,
-    ...(finalMvuState === undefined ? {} : { mvuState: finalMvuState }),
-    ...(finalTokenStats ? { tokenStats: finalTokenStats } : {}),
-  }
-  sendStage({ name: 'final', status: 'done', result: finalResult })
+  // MVU stays on this SSE connection so the browser can receive the state and
+  // message patch, but it no longer delays the final prose event above.
+  const currentMvu = readMvuStateFromMessages(character.raw, session.getHistory(sessionId), mvuMacros)
+  if (state.mvuSettings.enabled && currentMvu !== undefined) {
+    const mvuInput = {
+      userInput,
+      assistantReply: proseReply,
+      statData: currentMvu.statData,
+      character: { name: character.name },
+    }
+    const mvuResult = await runStageWithTrace('mvu', mvuInput, () => runMvuUpdate(
+      {
+        character,
+        userInput,
+        assistantReply: proseReply,
+        statData: currentMvu.statData,
+      },
+      agentCtx,
+      state.mvuSettings,
+    ))
 
-  // Flush on next tick so the final event reaches the client before close.
+    let persistedReply = proseReply
+    if (mvuResult !== null && mvuResult.update !== undefined) {
+      persistedReply = `${proseReply.trimEnd()}\n\n${mvuResult.update}`
+      result.reply = persistedReply
+      const history = [...session.getHistory(sessionId)]
+      const last = history[history.length - 1]
+      if (last?.role === 'assistant') {
+        history[history.length - 1] = { ...last, content: persistedReply }
+        session.setHistory(sessionId, history)
+        try { await rewriteHistoryJsonl(sessionId, history) } catch (err) {
+          process.stderr.write(`[ui-server] warn: failed to persist MVU update for ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`)
+        }
+      }
+    }
+
+    const updatedMvuState = readMvuStateFromMessages(character.raw, session.getHistory(sessionId), mvuMacros)?.statData
+    await writeCurrentTurnStats(persistedReply.length)
+    const updatedTokenStats = buildTurnStats(persistedReply.length)
+    if (!res.writableEnded) {
+      writeSseEvent(res, 'mvu-result', {
+        ...(persistedReply === proseReply ? {} : {
+          reply: persistedReply,
+          displayReply: applyWorldbookRenderDirectives(persistedReply, wb?.plugin?.renderDirectives ?? []),
+        }),
+        ...(updatedMvuState === undefined ? {} : { mvuState: updatedMvuState }),
+        tokenStats: updatedTokenStats,
+      })
+    }
+  }
+
+  // Flush on next tick so final/mvu-result events reach the client before close.
   setImmediate(() => res.end())
 }
 
@@ -1807,7 +1843,10 @@ async function handleHistory(state: AppState, req: IncomingMessage, res: ServerR
   const record = state.sessionRecords.get(sessionId)
   const mvuState = record === undefined
     ? undefined
-    : readMvuStateFromMessages(record.character.raw, state.sessions.getHistory(sessionId))?.statData
+    : readMvuStateFromMessages(record.character.raw, state.sessions.getHistory(sessionId), {
+      user: getCurrentUserPersona(state)?.name ?? '用户',
+      char: record.character.name,
+    })?.statData
   sendJson(res, 200, {
     sessionId,
     history,
@@ -1848,7 +1887,10 @@ async function handlePutSessionGreeting(state: AppState, id: string, req: Incomi
   state.sessionRecords.set(id, nextRecord)
   try { await rewriteHistoryJsonl(id, nextHistory) } catch { /* best-effort persistence */ }
   try { await saveSession(state, nextRecord) } catch { /* best-effort persistence */ }
-  const mvuState = readMvuStateFromMessages(record.character.raw, nextHistory)?.statData
+  const mvuState = readMvuStateFromMessages(record.character.raw, nextHistory, {
+    user: getCurrentUserPersona(state)?.name ?? '用户',
+    char: record.character.name,
+  })?.statData
   sendJson(res, 200, {
     sessionId: id,
     greetingIndex,

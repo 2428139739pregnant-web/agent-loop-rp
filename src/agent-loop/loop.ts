@@ -220,7 +220,11 @@ export async function runLoop(
     // response/postprocess path, uses its own model/temperature, and is
     // allowed to fail without discarding the user-visible reply.
     if (deps.mvu?.enabled === true && reply !== MOCK_REPLY) {
-      const currentMvu = readMvuStateFromMessages(deps.character.raw, deps.session.getHistory(deps.sessionId))
+      const currentMvu = readMvuStateFromMessages(
+        deps.character.raw,
+        deps.session.getHistory(deps.sessionId),
+        { user: deps.userPersona?.name ?? '用户', char: deps.character.name },
+      )
       if (currentMvu !== undefined) {
         try {
           const update = await runMvuUpdate(

@@ -14,11 +14,41 @@ type CommandDoneEvent = {
 type CompatibleSessionEvent = SessionEvent | CommandDoneEvent
 
 interface JsonPatchOperation {
-  readonly op: 'replace' | 'delta' | 'insert' | 'remove' | 'move'
+  readonly op: 'replace' | 'delta' | 'insert' | 'add' | 'remove' | 'move'
   readonly path?: string
   readonly from?: string
   readonly to?: string
   readonly value?: JsonValue
+}
+
+/** Macro sources used when a card stores {{user}} / {{char}} in stat_data. */
+export interface MvuMacroContext {
+  readonly user?: string | null
+  readonly char?: string | null
+}
+
+function substituteMvuTextMacros(text: string, macros: MvuMacroContext | undefined): string {
+  if (macros === undefined) return text
+  let out = text
+  if (macros.user !== undefined && macros.user !== null) {
+    out = out.replace(/\{\{user\}\}|<user>/giu, macros.user)
+  }
+  if (macros.char !== undefined && macros.char !== null) {
+    out = out.replace(/\{\{char\}\}|<char>|<bot>/giu, macros.char)
+  }
+  return out
+}
+
+function substituteMvuValueMacros(value: JsonValue, macros: MvuMacroContext | undefined): JsonValue {
+  if (typeof value === 'string') return substituteMvuTextMacros(value, macros)
+  if (Array.isArray(value)) return value.map(item => substituteMvuValueMacros(item, macros))
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key,
+      substituteMvuValueMacros(item, macros),
+    ])) as JsonValue
+  }
+  return value
 }
 
 function jsonRecord(value: JsonValue): Record<string, JsonValue> | undefined {
@@ -51,7 +81,7 @@ function mergeInitialRecord(target: Record<string, JsonValue>, source: Record<st
 }
 
 /** Read and merge the card-owned initial `stat_data` without activating hidden initializer lore. */
-export function readInitialMvuState(card: ImportedCharacterCard): JsonValue | undefined {
+export function readInitialMvuState(card: ImportedCharacterCard, macros?: MvuMacroContext): JsonValue | undefined {
   const contents = initializerContents(card)
   if (contents.length === 0) return undefined
   const merged: Record<string, JsonValue> = {}
@@ -64,15 +94,16 @@ export function readInitialMvuState(card: ImportedCharacterCard): JsonValue | un
     }
     mergeInitialRecord(merged, record)
   }
-  return merged
+  return substituteMvuValueMacros(merged, macros)
 }
 
 /** Fold the latest durable MVU snapshot, falling back to the card initializer. */
 export function readCurrentMvuState(
   card: ImportedCharacterCard,
   events: readonly SessionEvent[],
+  macros?: MvuMacroContext,
 ): { readonly statData: JsonValue; readonly updateCount: number; readonly lastError?: string } | undefined {
-  let statData = readInitialMvuState(card)
+  let statData = readInitialMvuState(card, macros)
   let updateCount = 0
   let lastError: string | undefined
   for (const event of events as readonly CompatibleSessionEvent[]) {
@@ -107,7 +138,11 @@ export function readCurrentMvuState(
     }
   }
   if (statData === undefined) return undefined
-  return { statData, updateCount, ...(lastError === undefined ? {} : { lastError }) }
+  return {
+    statData: substituteMvuValueMacros(statData, macros),
+    updateCount,
+    ...(lastError === undefined ? {} : { lastError }),
+  }
 }
 
 /** Fold MVU state from the lightweight agent-loop chat history.
@@ -120,8 +155,9 @@ export function readCurrentMvuState(
 export function readMvuStateFromMessages(
   card: ImportedCharacterCard,
   messages: readonly { readonly role: 'system' | 'user' | 'assistant' | 'tool'; readonly content: string }[],
+  macros?: MvuMacroContext,
 ): { readonly statData: JsonValue; readonly updateCount: number; readonly lastError?: string } | undefined {
-  let statData = readInitialMvuState(card)
+  let statData = readInitialMvuState(card, macros)
   let updateCount = 0
   let lastError: string | undefined
   for (const message of messages) {
@@ -138,7 +174,11 @@ export function readMvuStateFromMessages(
     }
   }
   if (statData === undefined) return undefined
-  return { statData, updateCount, ...(lastError === undefined ? {} : { lastError }) }
+  return {
+    statData: substituteMvuValueMacros(statData, macros),
+    updateCount,
+    ...(lastError === undefined ? {} : { lastError }),
+  }
 }
 
 function pointerSegments(pointer: string): string[] {
@@ -204,6 +244,16 @@ function insertAt(root: JsonValue, pointer: string, value: JsonValue): void {
   parent[key] = value
 }
 
+/** RFC 6902 add: insert into arrays, and create or replace object members. */
+function addAt(root: JsonValue, pointer: string, value: JsonValue): void {
+  const { parent, key } = parentAt(root, pointer)
+  if (Array.isArray(parent)) {
+    parent.splice(arrayIndex(parent, key, true), 0, value)
+    return
+  }
+  parent[key] = value
+}
+
 function replaceAt(root: JsonValue, pointer: string, value: JsonValue): void {
   const { parent, key } = parentAt(root, pointer)
   if (Array.isArray(parent)) parent[arrayIndex(parent, key, false)] = value
@@ -216,7 +266,7 @@ function replaceAt(root: JsonValue, pointer: string, value: JsonValue): void {
 function operation(value: unknown): JsonPatchOperation {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('MVU patch entries must be objects')
   const record = value as Record<string, unknown>
-  if (record.op !== 'replace' && record.op !== 'delta' && record.op !== 'insert'
+  if (record.op !== 'replace' && record.op !== 'delta' && record.op !== 'insert' && record.op !== 'add'
     && record.op !== 'remove' && record.op !== 'move') throw new Error(`Unsupported MVU operation: ${String(record.op)}`)
   if (record.path !== undefined && typeof record.path !== 'string') throw new Error('MVU operation path must be a string')
   if (record.from !== undefined && typeof record.from !== 'string') throw new Error('MVU move source must be a string')
@@ -270,6 +320,9 @@ export function applyMvuReply(
       } else if (item.op === 'insert') {
         if (path === undefined || item.value === undefined) throw new Error('MVU insert requires path and value')
         insertAt(cloned, path, item.value)
+      } else if (item.op === 'add') {
+        if (path === undefined || item.value === undefined) throw new Error('MVU add requires path and value')
+        addAt(cloned, path, item.value)
       } else if (item.op === 'replace') {
         if (path === undefined || item.value === undefined) throw new Error('MVU replace requires path and value')
         replaceAt(cloned, path, item.value)
