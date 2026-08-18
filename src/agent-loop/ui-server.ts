@@ -1752,6 +1752,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
   try { await appendHistoryJsonl(sessionId, { role: 'assistant', content: result.reply }) } catch { /* swallow */ }
   await writeCurrentTurnStats(result.reply.length)
   const finalTokenStats = buildTurnStats(result.reply.length)
+  const finalMvuState = readMvuStateFromMessages(character.raw, session.getHistory(sessionId))?.statData
 
   // Fire-and-forget ④. Send start now; done may arrive after res.end() (and
   // we'll silently drop it, by design — the front-end doesn't block on it).
@@ -1784,6 +1785,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     turn: session.turnCount(sessionId),
     usedWorldbook,
     usedContextSegmentation,
+    ...(finalMvuState === undefined ? {} : { mvuState: finalMvuState }),
     ...(finalTokenStats ? { tokenStats: finalTokenStats } : {}),
   }
   sendStage({ name: 'final', status: 'done', result: finalResult })
@@ -1803,11 +1805,15 @@ async function handleHistory(state: AppState, req: IncomingMessage, res: ServerR
   }
   const history = displayHistory(state, sessionId, state.sessions.getHistory(sessionId))
   const record = state.sessionRecords.get(sessionId)
+  const mvuState = record === undefined
+    ? undefined
+    : readMvuStateFromMessages(record.character.raw, state.sessions.getHistory(sessionId))?.statData
   sendJson(res, 200, {
     sessionId,
     history,
     turn: state.sessions.turnCount(sessionId),
     greetingIndex: record?.greetingIndex ?? 0,
+    ...(mvuState === undefined ? {} : { mvuState }),
   })
 }
 
@@ -1842,10 +1848,12 @@ async function handlePutSessionGreeting(state: AppState, id: string, req: Incomi
   state.sessionRecords.set(id, nextRecord)
   try { await rewriteHistoryJsonl(id, nextHistory) } catch { /* best-effort persistence */ }
   try { await saveSession(state, nextRecord) } catch { /* best-effort persistence */ }
+  const mvuState = readMvuStateFromMessages(record.character.raw, nextHistory)?.statData
   sendJson(res, 200, {
     sessionId: id,
     greetingIndex,
     history: displayHistory(state, id, nextHistory),
+    ...(mvuState === undefined ? {} : { mvuState }),
   })
 }
 

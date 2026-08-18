@@ -506,8 +506,27 @@
     const FRAME_SCRIPT_OPEN = '<scr' + 'ipt>'
     const FRAME_SCRIPT_CLOSE = '</scr' + 'ipt>'
 
-    function cardFrontendJqueryShim() {
+    function safeCardScriptJson(value) {
+      try {
+        return JSON.stringify(value ?? {})
+          .replace(/</gu, '\\u003c')
+          .replace(/>/gu, '\\u003e')
+          .replace(/&/gu, '\\u0026')
+          .replace(/\u2028/gu, '\\u2028')
+          .replace(/\u2029/gu, '\\u2029')
+      } catch { return '{}' }
+    }
+
+    function cardFrontendJqueryShim(mvuState) {
       return `(function(){
+        window.__agentRpVariables={stat_data:${safeCardScriptJson(mvuState)}};
+        window.getAllVariables=function(){return window.__agentRpVariables};
+        window._={get:function(object,path,fallback){
+          const parts=Array.isArray(path)?path:String(path||'').split('.');
+          let value=object;
+          for(const part of parts){if(value===null||value===undefined)return fallback;value=value[part]}
+          return value===undefined?fallback:value;
+        }};
         function wrap(items){
           const list=Array.from(items||[]);
           const api={length:list.length};
@@ -551,7 +570,26 @@
       })();`
     }
 
-    function buildCardFrontendDocument(source, frameId) {
+    function cardFrontendModulePrelude() {
+      // ES modules do not expose window properties as bare identifiers. A
+      // number of ST cards use type="module" while still calling the
+      // globals supplied by Tavern/MVU, so provide the same lexical names
+      // inside the isolated frame. Keep this list deliberately small and
+      // limited to the public compatibility surface we actually provide.
+      return `
+        const $=window.$;
+        const jQuery=window.jQuery;
+        const _=window._;
+        const getAllVariables=window.getAllVariables;
+        const waitGlobalInitialized=window.waitGlobalInitialized;
+        const eventOn=window.eventOn;
+        const Mvu=window.Mvu;
+        const errorCatched=window.errorCatched;
+        let musicCtrl;
+      `
+    }
+
+    function buildCardFrontendDocument(source, frameId, mvuState = null) {
       let body = String(source || '').trim()
       // Do not allow an imported card to create a nested browsing context or
       // navigate the host. Inline scripts remain available inside the sandbox
@@ -562,7 +600,15 @@
         .replace(/<script\b[^>]*\bsrc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)[^>]*>[\s\S]*?<\/script\s*>/giu, '')
         .replace(/<script\b[^>]*\bsrc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)[^>]*\/?\s*>/giu, '')
         .replace(/\s(?:href|src)\s*=\s*(["'])\s*javascript:[\s\S]*?\1/giu, '')
-      const shim = FRAME_SCRIPT_OPEN + cardFrontendJqueryShim() + FRAME_SCRIPT_CLOSE
+      // The reference card declares its HUD as an ES module, but the module
+      // still expects the classic ST globals above. Also turn its
+      // window.musicCtrl assignment into an assignment to the local module
+      // binding, because later calls use the bare name musicCtrl.
+      body = body.replace(/(<script\b[^>]*\btype\s*=\s*(["'])module\2[^>]*>)([\s\S]*?)(<\/script\s*>)/giu, (_match, open, _quote, script, close) => {
+        const moduleScript = String(script).replace(/\bwindow\.musicCtrl\s*=/u, 'musicCtrl = window.musicCtrl =')
+        return `${open}${cardFrontendModulePrelude()}${moduleScript}${close}`
+      })
+      const shim = FRAME_SCRIPT_OPEN + cardFrontendJqueryShim(mvuState) + FRAME_SCRIPT_CLOSE
       const resize = `${FRAME_SCRIPT_OPEN}(function(){
         const send=function(){
           const root=document.documentElement;
@@ -636,7 +682,7 @@
       return segments.length > 0 ? segments : [{ kind: 'markdown', source: value }]
     }
 
-    function CardHtmlFrame({ source }) {
+    function CardHtmlFrame({ source, mvuState }) {
       const frameRef = useRef(null)
       const frameId = useRef(`card-frame-${Math.random().toString(36).slice(2)}`)
       const [height, setHeight] = useState(420)
@@ -656,7 +702,7 @@
         title: '角色卡 HTML 美化内容',
         sandbox: 'allow-scripts',
         scrolling: 'auto',
-        srcDoc: buildCardFrontendDocument(source, frameId.current),
+        srcDoc: buildCardFrontendDocument(source, frameId.current, mvuState),
         style: { height: `${height}px` },
       })
     }
@@ -664,11 +710,11 @@
     /** 消息内容渲染:角色卡 display Regex → HTML/Markdown 分段 → 安全渲染。
      * 角色卡的 markdownOnly 脚本只影响显示，promptOnly 脚本不会污染显示；
      * 普通 Markdown 继续走 marked + 白名单净化，完整 HTML/状态栏进入 sandbox。 */
-    function MessageContent({ content, role, character, depth = 0, userName = '用户' }) {
+    function MessageContent({ content, role, character, depth = 0, userName = '用户', mvuState = null }) {
       const processed = applyDisplayRegex(content, role === 'user' ? 1 : 2, character, depth, userName)
       const segments = compileDisplaySegments(processed)
       return h('div', { className: 'msg-text msg-content-stack' }, segments.map((segment, index) => {
-        if (segment.kind === 'html') return h(CardHtmlFrame, { key: `html-${index}`, source: segment.source })
+        if (segment.kind === 'html') return h(CardHtmlFrame, { key: `html-${index}`, source: segment.source, mvuState })
         const markdownHtml = marked.parse(segment.source, { gfm: true, breaks: true })
         return h('div', { key: `md-${index}`, className: 'msg-markdown', dangerouslySetInnerHTML: { __html: sanitizeHtml(markdownHtml) } })
       }))
@@ -1718,6 +1764,7 @@
       const [currentCharacterId, setCurrentCharacterId] = useState(null)
       const [currentCharacter, setCurrentCharacter] = useState(null)
       const [currentUserName, setCurrentUserName] = useState('用户')
+      const [mvuState, setMvuState] = useState(null)
       const [characterSessions, setCharacterSessions] = useState([])
       const [currentSessionId, setCurrentSessionId] = useState(null)
       const [history, setHistory] = useState([])
@@ -1753,6 +1800,7 @@
             if (state.currentSessionId) {
               const hist = await apiGet(`/api/history?sessionId=${encodeURIComponent(state.currentSessionId)}`)
               setHistory(hist.history || [])
+              setMvuState(hist.mvuState ?? null)
               setActiveGreetingIdx(Number.isInteger(hist.greetingIndex) ? hist.greetingIndex : 0)
               const traceData = await apiGet(`/api/sessions/${encodeURIComponent(state.currentSessionId)}/traces`)
               const stats = traceData.turnStats || []
@@ -1765,11 +1813,12 @@
 
       useEffect(() => {
         if (!bootDone) return
-        if (currentSessionId === null) { setHistory([]); setLastTokenStats(null); return }
+        if (currentSessionId === null) { setHistory([]); setMvuState(null); setLastTokenStats(null); return }
         (async () => {
           try {
             const r = await apiGet(`/api/history?sessionId=${encodeURIComponent(currentSessionId)}`)
             setHistory(r.history || [])
+            setMvuState(r.mvuState ?? null)
             setActiveGreetingIdx(Number.isInteger(r.greetingIndex) ? r.greetingIndex : 0)
             const traceData = await apiGet(`/api/sessions/${encodeURIComponent(currentSessionId)}/traces`)
             const stats = traceData.turnStats || []
@@ -1813,6 +1862,7 @@
           setCurrentCharacter(r.character)
           setCurrentSessionId(null)
           setHistory([])
+          setMvuState(null)
           setLastTokenStats(null)
           setActiveGreetingIdx(0)
           const sess = await apiGet(`/api/characters/${encodeURIComponent(id)}/sessions`)
@@ -1875,6 +1925,7 @@
             greetingIndex: greetingIdx,
           })
           setCurrentSessionId(r.sessionId); setHistory([]); setLastTokenStats(null)
+          setMvuState(null)
           setActiveGreetingIdx(Number.isInteger(r.greetingIndex) ? r.greetingIndex : greetingIdx)
           await refreshCharacterSessions()
         } catch (err) { setError(String(err.message || err)) } finally { setLoading(false) }
@@ -1892,6 +1943,7 @@
           const r = await apiPut(`/api/sessions/${encodeURIComponent(currentSessionId)}/greeting`, { greetingIndex: index })
           setActiveGreetingIdx(Number.isInteger(r.greetingIndex) ? r.greetingIndex : index)
           setHistory(r.history || [])
+          setMvuState(r.mvuState ?? null)
           await refreshCharacterSessions()
         } catch (err) { setError(String(err.message || err)) } finally { setLoading(false) }
       }, [currentCharacter, currentSessionId, loading, refreshCharacterSessions])
@@ -1927,6 +1979,7 @@
                 let payload; try { payload = JSON.parse(ev.data) } catch { continue }
                 if (payload.name === 'final') {
                   setHistory((prev) => [...prev, { role: 'assistant', content: payload.result.displayReply || payload.result.reply }])
+                  setMvuState(payload.result.mvuState ?? null)
                   setLastTokenStats(payload.result.tokenStats || null)
                   setProgressStages((prev) => ({ ...prev, [payload.name]: payload.status }))
                 } else if (payload.name === 'error') {
@@ -2219,7 +2272,7 @@
                     h('span', { className: 'role' }, m.role),
                     h(MessageContent, {
                       content: m.content, role: m.role, character: currentCharacter,
-                      depth: Math.max(0, history.length - i - 1), userName: currentUserName,
+                      depth: Math.max(0, history.length - i - 1), userName: currentUserName, mvuState,
                     }),
                     currentSessionId !== null && !loading
                       ? h('span', { className: 'msg-actions' },
