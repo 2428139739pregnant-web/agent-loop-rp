@@ -1057,14 +1057,14 @@ body { overflow: hidden; background: var(--bg); }
 .chat-character-actions .mini { padding: 5px 9px; }
 .turn-token-badge { align-self: center; padding: 4px 7px; border: 1px solid rgba(214,154,98,.35); border-radius: 5px; color: var(--accent-2); font: 10px ui-monospace, monospace; white-space: nowrap; }
 
-.chat { align-items: stretch; gap: 0; padding: 22px clamp(16px, 5vw, 72px); background: radial-gradient(circle at 50% -20%, rgba(214,154,98,.055), transparent 42%); }
-.msg { width: 100%; max-width: none; margin: 0; padding: 17px clamp(4px, 1vw, 14px); border: 0; border-radius: 0; line-height: 1.72; box-shadow: none; }
+.chat { --chat-content-width: 100%; align-items: stretch; gap: 0; padding: 22px clamp(16px, 5vw, 72px); background: radial-gradient(circle at 50% -20%, rgba(214,154,98,.055), transparent 42%); }
+.msg { width: var(--chat-content-width); max-width: none; align-self: center; box-sizing: border-box; margin: 0; padding: 17px 0; border: 0; border-radius: 0; line-height: 1.72; box-shadow: none; }
 .msg + .msg { border-top: 1px solid rgba(255,255,255,.055); }
-.msg.user { align-self: stretch; margin: 0; background: rgba(35,59,88,.28); border-left: 2px solid rgba(91,145,204,.55); }
-.msg.assistant { align-self: stretch; max-width: none; background: rgba(34,38,46,.34); border-left: 2px solid rgba(214,154,98,.32); }
+.msg.user { align-self: center; margin: 0; background: rgba(35,59,88,.28); border-left: 2px solid rgba(91,145,204,.55); }
+.msg.assistant { align-self: center; max-width: none; background: rgba(34,38,46,.34); border-left: 2px solid rgba(214,154,98,.32); }
 .msg .role { color: #aeb7c4; }
 .msg.system { align-self: center; max-width: 620px; padding: 14px 18px; background: rgba(255,255,255,.025); border-color: var(--border); text-align: center; }
-.msg-text { width: 100%; max-width: 100%; }
+.msg-text { width: 100%; max-width: 100%; box-sizing: border-box; }
 .msg-content-stack { display: flex; flex-direction: column; gap: 10px; }
 .msg-markdown { white-space: normal; overflow-wrap: anywhere; }
 .msg-markdown p { margin: 0 0 1em; }
@@ -1084,12 +1084,27 @@ body { overflow: hidden; background: var(--bg); }
 .msg-card-html-frame {
   display: block;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  margin: 0;
   min-height: 180px;
   border: 1px solid rgba(214,154,98,.18);
   border-radius: 8px;
   background: rgba(12,15,20,.72);
   overflow: auto;
 }
+.msg-html-surface { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; }
+.msg-html-surface > .msg-card-html-frame { width: 100%; max-width: 100%; }
+.msg-live-card-status { width: 100%; max-width: 100%; margin-top: 0; }
+.ui-range-field { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; padding: 13px 0 4px; color: var(--text); }
+.ui-range-label { font-weight: 650; }
+.ui-range-value { color: var(--accent-2); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
+.ui-range-field input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }
+.ui-range-scale { display: flex; justify-content: space-between; gap: 8px; color: var(--text-dim); font-size: 10px; }
+.ui-width-presets { display: flex; gap: 6px; margin-top: 10px; }
+.ui-width-presets .mini.active { color: var(--accent-2); border-color: rgba(214,154,98,.75); background: rgba(214,154,98,.12); }
+.ui-settings-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
 .composer { display: flex; flex-direction: column; gap: 8px; padding: 10px clamp(16px, 5vw, 72px) 16px; background: rgba(24,27,33,.96); border-top-color: var(--border); }
 .composer-main { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
 .composer textarea { min-height: 50px; max-height: 180px; border-radius: 10px; background: #12151a; }
@@ -1157,6 +1172,6 @@ body { overflow: hidden; background: var(--bg); }
   .chat-character-strip { padding: 8px 11px; }
   .chat-character-actions .mini:first-child { display: none; }
   .chat { padding: 14px 10px; }
-  .msg, .msg.assistant, .msg.user { width: 100%; max-width: none; }
+  .msg, .msg.assistant, .msg.user { width: var(--chat-content-width); max-width: none; }
   .composer { padding: 9px 10px 11px; }
 }

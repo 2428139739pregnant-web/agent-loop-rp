@@ -3390,6 +3390,8 @@ function serializeCharacter(character: PreprocessedCharacter): {
   frontend: {
     regexScripts: PreprocessedCharacter['raw']['frontend']['regexScripts']
     tavernHelperScriptNames: PreprocessedCharacter['raw']['frontend']['tavernHelperScriptNames']
+    tavernHelperScripts: PreprocessedCharacter['raw']['frontend']['tavernHelperScripts']
+    tavernHelperVariables: PreprocessedCharacter['raw']['frontend']['tavernHelperVariables']
     tavernHelper?: PreprocessedCharacter['raw']['frontend']['tavernHelper']
   }
   lorebook: { name: string; entryCount: number; enabledCount: number } | null
@@ -3411,6 +3413,8 @@ function serializeCharacter(character: PreprocessedCharacter): {
     frontend: {
       regexScripts: character.raw.frontend?.regexScripts ?? [],
       tavernHelperScriptNames: character.raw.frontend?.tavernHelperScriptNames ?? [],
+      tavernHelperScripts: character.raw.frontend?.tavernHelperScripts ?? [],
+      tavernHelperVariables: character.raw.frontend?.tavernHelperVariables ?? {},
       ...(character.raw.frontend?.tavernHelper === undefined ? {} : { tavernHelper: character.raw.frontend.tavernHelper }),
     },
     // 只发摘要(避免把整本 lorebook 的 entries 传上 wire);
@@ -3485,6 +3489,12 @@ function parseCharacterField(value: unknown): PreprocessedCharacter | null {
     ? frontendObject.regexScripts as PreprocessedCharacter['raw']['frontend']['regexScripts'] : []
   const helperNames = Array.isArray(frontendObject.tavernHelperScriptNames)
     ? frontendObject.tavernHelperScriptNames.filter((entry): entry is string => typeof entry === 'string') : []
+  const helperScripts = Array.isArray(frontendObject.tavernHelperScripts)
+    ? frontendObject.tavernHelperScripts as PreprocessedCharacter['raw']['frontend']['tavernHelperScripts'] : []
+  const helperVariables = frontendObject.tavernHelperVariables !== null
+    && typeof frontendObject.tavernHelperVariables === 'object'
+    && !Array.isArray(frontendObject.tavernHelperVariables)
+    ? frontendObject.tavernHelperVariables as PreprocessedCharacter['raw']['frontend']['tavernHelperVariables'] : {}
   // The wire format omits the bulky `raw` payload; the demo doesn't need it,
   // so we ship an empty `data` envelope that the loader won't ever read.
   // (responseAgent only touches character.{name,persona,worldview,style}.)
@@ -3513,8 +3523,8 @@ function parseCharacterField(value: unknown): PreprocessedCharacter | null {
       frontend: {
         regexScripts: frontendScripts,
         tavernHelperScriptNames: helperNames,
-        tavernHelperScripts: [],
-        tavernHelperVariables: {},
+        tavernHelperScripts: helperScripts,
+        tavernHelperVariables: helperVariables,
       },
     } as never,
   }

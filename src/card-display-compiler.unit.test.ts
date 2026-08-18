@@ -17,6 +17,16 @@ test('keeps ordinary markdown separate and identifies inline HTML', () => {
   assert.equal(inline.diagnostics.some(diagnostic => diagnostic.code === 'inline-html'), true)
 })
 
+test('isolates an un-fenced card fragment before a fenced frontend document', () => {
+  const result = compileCharacterDisplay([
+    '<div class="card-shell"><h1>开场白</h1><p>正文</p></div>',
+    '```html',
+    '<!doctype html><html><body><div id="status">状态栏</div></body></html>',
+    '```',
+  ].join('\n'))
+  assert.deepEqual(result.segments.map(segment => segment.kind), ['html', 'html'])
+})
+
 test('removes unknown display wrappers without touching fenced code', () => {
   const result = compileCharacterDisplay('<custom-wrapper>正文</custom-wrapper>\n\n```js\n<custom-wrapper>代码</custom-wrapper>\n```')
   assert.match(result.segments[0]?.kind === 'markdown' ? result.segments[0].text : '', /正文/u)

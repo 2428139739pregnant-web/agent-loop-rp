@@ -159,7 +159,12 @@ function isFrontendDocument(info: string, source: string): boolean {
   if (completeDocument) return true
   const language = info.trim().split(/\s+/u)[0]?.toLowerCase()
   if (language !== undefined && language !== '') return language === 'html'
-  return /<!doctype\s+html\b|<html(?:\s|>)|<head(?:\s|>)|<body(?:\s|>)/iu.test(source)
+  return /<!doctype\s+html\b|<html(?:\s|>)|<(?:head|body|style|script|link|div|section|article|main|header|footer|nav|aside|details|summary|table|form|button|canvas|svg|h[1-6])(?:\s|>)/iu.test(source)
+}
+
+function isFrontendFragment(source: string): boolean {
+  const trimmed = source.trimStart()
+  return /^(?:<!doctype\s+html\b|<html(?:\s|>)|<(?:head|body|style|script|link|div|section|article|main|header|footer|nav|aside|details|summary|table|form|button|canvas|svg|h[1-6])(?:\s|>))/iu.test(trimmed)
 }
 
 function appendMarkdown(
@@ -180,7 +185,7 @@ function appendMarkdown(
   // even when it is not a full <html> document. It must use the isolated
   // renderer; treating it as ordinary inline HTML would discard its script
   // and make the reference HUD appear as broken source text.
-  if (/<(?:style|script)(?:\s|>)/iu.test(normalized.text)) {
+  if (isFrontendFragment(normalized.text) || /<(?:style|script)(?:\s|>)/iu.test(normalized.text)) {
     diagnostics.frontendDocuments += 1
     segments.push({ kind: 'html', source: normalized.text })
     return

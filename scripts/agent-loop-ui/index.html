@@ -114,6 +114,59 @@
 
     const API_KEY_MASK = '***'
 
+    // SillyTavern's `chat_width` is a user-facing layout preference rather
+    // than a character-card override. Keep the same idea here: the value
+    // controls the shared message column, while the card's own HTML/CSS is
+    // left untouched inside that column.
+    const UI_SETTINGS_KEY = 'agent-rp-ui-settings-v1'
+    const DEFAULT_UI_SETTINGS = Object.freeze({ chatWidth: 100 })
+    function clampChatWidth(value) {
+      const number = Number(value)
+      if (!Number.isFinite(number)) return DEFAULT_UI_SETTINGS.chatWidth
+      return Math.min(100, Math.max(25, Math.round(number)))
+    }
+    function readUiSettings() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(UI_SETTINGS_KEY) || '{}')
+        return { chatWidth: clampChatWidth(parsed?.chatWidth) }
+      } catch {
+        return { ...DEFAULT_UI_SETTINGS }
+      }
+    }
+    function writeUiSettings(value) {
+      try { localStorage.setItem(UI_SETTINGS_KEY, JSON.stringify({ chatWidth: clampChatWidth(value.chatWidth) })) } catch { /* private mode */ }
+    }
+
+    function UiSettingsPanel(props) {
+      const chatWidth = clampChatWidth(props.chatWidth)
+      return h('div', { className: 'panel ui-settings-panel' },
+        h('div', { className: 'panel-head' }, h('h2', null, '界面显示')),
+        h('div', { className: 'hint' }, '参考 SillyTavern 的 Chat Width：只调整对话栏，不改角色卡自身的 HTML/CSS。'),
+        h('label', { className: 'ui-range-field' },
+          h('span', { className: 'ui-range-label' }, '对话宽度'),
+          h('span', { className: 'ui-range-value' }, `${chatWidth}%`),
+          h('input', {
+            type: 'range', min: 25, max: 100, step: 1, value: chatWidth,
+            onChange: (event) => props.onChatWidthChange(event.target.value),
+            'aria-label': '对话宽度',
+          }),
+        ),
+        h('div', { className: 'ui-range-scale' },
+          h('span', null, '25%'), h('span', null, '窄'), h('span', null, '标准'), h('span', null, '100% 全宽'),
+        ),
+        h('div', { className: 'ui-width-presets' },
+          [50, 75, 100].map((value) => h('button', {
+            key: value, className: `mini${chatWidth === value ? ' active' : ''}`,
+            onClick: () => props.onChatWidthChange(value),
+          }, `${value}%`)),
+        ),
+        h('div', { className: 'ui-settings-actions' },
+          h('button', { className: 'mini', onClick: () => props.onChatWidthChange(100), disabled: chatWidth === 100 }, '恢复全宽'),
+        ),
+        h('div', { className: 'hint' }, '正文、Markdown 和 HTML 美化会使用同一个对话宽度；角色卡内部的 max-width、边距和布局保持原样。'),
+      )
+    }
+
     // ─── API config panel ─────────────────────────────────────────────────
     function ApiConfigPanel(/** @type {{onConfigChange?: () => void}} */ props) {
       const [cfg, setCfg] = useState(/** @type {ApiConfigView} */({
@@ -517,10 +570,50 @@
       } catch { return '{}' }
     }
 
-    function cardFrontendJqueryShim(mvuState) {
+    function cardFrontendJqueryShim(mvuState, tavernHelperVariables = {}) {
       return `(function(){
         window.__agentRpVariables={stat_data:${safeCardScriptJson(mvuState)}};
+        window.__agentRpTavernHelperVariables=${safeCardScriptJson(tavernHelperVariables)};
         window.getAllVariables=function(){return window.__agentRpVariables};
+        // The iframe is the card's Tavern Helper surface. Keep the bridge
+        // local to this frame; no card code may reach the host page.
+        window.__qfpSetTheme=function(theme){
+          if(typeof theme==='string'&&theme)document.documentElement.dataset.theme=theme;
+          try{window.dispatchEvent(new CustomEvent('agent-rp-theme-change',{detail:{theme}}))}catch(_){/* old browsers */}
+        };
+        const __agentRpListeners=new Map();
+        const __agentRpOn=function(type,listener){
+          const key=String(type); const list=__agentRpListeners.get(key)||[]; list.push(listener); __agentRpListeners.set(key,list);
+          const stop=function(){const current=__agentRpListeners.get(key)||[];__agentRpListeners.set(key,current.filter((value)=>value!==listener))};
+          stop.stop=stop; return stop;
+        };
+        window.eventOn=__agentRpOn;
+        window.eventOnce=function(type,listener){let stop;stop=__agentRpOn(type,(...args)=>{stop.stop();return listener(...args)});return stop};
+        window.eventEmit=function(type,...args){for(const listener of [...(__agentRpListeners.get(String(type))||[])]){try{listener(...args)}catch(error){console.error('[agent-rp Tavern Helper event]',error)}}};
+        window.Mvu={
+          events:{VARIABLE_INITIALIZED:'mag_variable_initialized',VARIABLE_UPDATE_STARTED:'mag_variable_update_started',VARIABLE_UPDATE_ENDED:'mvu-variable-update-ended'},
+          getMvuData:function(){return window.__agentRpVariables},
+          replaceMvuData:function(value){window.__agentRpVariables=value?.stat_data?value:{stat_data:value||{}};window.eventEmit('mvu-variable-update-ended',{stat_data:window.__agentRpVariables.stat_data});return Promise.resolve(window.__agentRpVariables)},
+          isDuringExtraAnalysis:function(){return false},
+        };
+        window.getVariable=function(path,fallback){return window._.get(window.__agentRpVariables,path,fallback)};
+        window.TavernHelper={
+          // Card-owned Helper variables are a separate namespace from the
+          // MVU stat_data snapshot. Do not merge them: cards commonly use
+          // both APIs and an accidental merge changes lookup precedence.
+          getAllVariables:function(){return window.__agentRpTavernHelperVariables},
+          getVariable:function(path,fallback){return window._.get(window.__agentRpTavernHelperVariables,path,fallback)},
+          replaceVariables:window.Mvu.replaceMvuData,
+          eventOn:window.eventOn,
+          eventOnce:window.eventOnce,
+          eventEmit:window.eventEmit,
+          waitGlobalInitialized:async function(){return undefined},
+        };
+        window.SillyTavern={
+          eventSource:{on:window.eventOn,once:window.eventOnce,emit:window.eventEmit},
+          getContext:function(){return this},
+          chat:[],
+        };
         window._={get:function(object,path,fallback){
           const parts=Array.isArray(path)?path:String(path||'').split('.');
           let value=object;
@@ -555,8 +648,6 @@
         // fallbacks let a static HUD finish its initial render instead of
         // failing before updateHUD() when no MVU bridge is configured.
         window.waitGlobalInitialized=async function(){return undefined};
-        window.eventOn=function(){return function(){}};
-        window.Mvu={events:{VARIABLE_UPDATE_ENDED:'VARIABLE_UPDATE_ENDED'}};
         window.$=function(value){
           if(typeof value==='function'){
             if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',value,{once:true});else value();
@@ -580,7 +671,10 @@
         const $=window.$;
         const jQuery=window.jQuery;
         const _=window._;
+        const TavernHelper=window.TavernHelper;
+        const SillyTavern=window.SillyTavern;
         const getAllVariables=window.getAllVariables;
+        const getVariable=window.getVariable;
         const waitGlobalInitialized=window.waitGlobalInitialized;
         const eventOn=window.eventOn;
         const Mvu=window.Mvu;
@@ -589,12 +683,35 @@
       `
     }
 
-    function buildCardFrontendDocument(source, frameId, mvuState = null) {
-      let body = String(source || '').trim()
+    /**
+     * Character-card Regex replacements frequently arrive as a fenced HTML
+     * fragment (for example ```\n<body>...</body>\n```). SillyTavern removes
+     * the display fence before mounting the message; doing that after the
+     * iframe wrapper has been created produces a nested <body>, visible
+     * backticks and host-dark text/background bleeding into the card.
+     */
+    function normalizeCardFrontendSource(value) {
+      let source = String(value || '').trim()
+      const fenced = source.match(/^ {0,3}(`{3,}|~{3,})[^\r\n]*[\r\n]+([\s\S]*?)[\r\n]+ {0,3}\1[ \t]*$/u)
+      if (fenced) source = String(fenced[2] || '').trim()
+
+      // A body-only document is a fragment in ST's display pipeline. Unwrap
+      // it before placing it in our own complete iframe document.
+      const body = source.match(/^<body(?:\s[^>]*)?>([\s\S]*)<\/body>\s*$/iu)
+      return body ? String(body[1] || '').trim() : source
+    }
+
+    function buildCardFrontendDocument(source, frameId, mvuState = null, tavernHelperVariables = {}, surfaceMode = 'content') {
+      let body = normalizeCardFrontendSource(source)
       // Do not allow an imported card to create a nested browsing context or
       // navigate the host. Inline scripts remain available inside the sandbox
       // because the reference cards use them for tabs, meters and toggles.
       body = body
+        // Parent-page DOM is intentionally unavailable in the isolated
+        // frame. These two ST card idioms only need the current document / a
+        // theme callback, so route them through the local Tavern bridge.
+        .replace(/(?:window\s*\.\s*)?parent\s*\.\s*document\b/giu, 'window.document')
+        .replace(/(?:window\s*\.\s*)?parent\s*\.\s*__qfpSetTheme\b/giu, 'window.__qfpSetTheme')
         .replace(/<(iframe|object|embed|base)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, '')
         .replace(/<(iframe|object|embed|base)\b[^>]*\/?>/giu, '')
         .replace(/<script\b[^>]*\bsrc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)[^>]*>[\s\S]*?<\/script\s*>/giu, '')
@@ -608,16 +725,83 @@
         const moduleScript = String(script).replace(/\bwindow\.musicCtrl\s*=/u, 'musicCtrl = window.musicCtrl =')
         return `${open}${cardFrontendModulePrelude()}${moduleScript}${close}`
       })
-      const shim = FRAME_SCRIPT_OPEN + cardFrontendJqueryShim(mvuState) + FRAME_SCRIPT_CLOSE
+      const shim = FRAME_SCRIPT_OPEN + cardFrontendJqueryShim(mvuState, tavernHelperVariables) + FRAME_SCRIPT_CLOSE
       const resize = `${FRAME_SCRIPT_OPEN}(function(){
         const send=function(){
+          // Many Tavern cards set html/body{height:100%}. The document root
+          // then reports the iframe viewport (often 900px) instead of the
+          // rendered card content. Prefer body.scrollHeight so a short
+          // title/status block does not create a large dark void.
           const root=document.documentElement;
-          const height=Math.max(180,Math.min(900,Math.ceil(Math.max(root.scrollHeight,document.body?.scrollHeight||0)+8)));
+          const body=document.body;
+          const contentHeight=body?.scrollHeight||root?.scrollHeight||0;
+          const height=Math.max(180,Math.min(900,Math.ceil(contentHeight+8)));
           parent.postMessage({type:'agent-rp-card-frame-height',id:${JSON.stringify(frameId)},height},'*');
         };
         addEventListener('load',send); addEventListener('resize',send);
         if(window.ResizeObserver)new ResizeObserver(send).observe(document.documentElement);
         setTimeout(send,80); setTimeout(send,600);
+      })();${FRAME_SCRIPT_CLOSE}`
+      // ST mounts a message's rendered content inside one message surface.
+      // Do the same here: fit only the card's primary surface to that host
+      // width. Never rewrite every body child, because backgrounds, panels,
+      // decorations and nested status widgets often have their own layout.
+      const surfaceAdapter = `${FRAME_SCRIPT_OPEN}(function(){
+        const mode=${JSON.stringify(surfaceMode)};
+        const preferred=mode==='status'
+          ? ['.hud-top','#ui-root','#app','.card-root','main']
+          : ['.arcane-gate-wrapper','.card-root','#app','main'];
+        const isNonSurface=function(el){
+          const key=((el.id||'')+' '+(typeof el.className==='string'?el.className:'')).toLowerCase();
+          return /(background|cursor|particle|corner-decor|nebula|grid|overlay|side-panel|music-panel|settings-panel|layer-detail|layer-roulette)/.test(key);
+        };
+        const visible=function(el){
+          if(!el||el.tagName==='SCRIPT'||el.tagName==='STYLE'||el.tagName==='LINK'||el.tagName==='META'||isNonSurface(el)) return false;
+          const computed=getComputedStyle(el);
+          if(computed.display==='none'||computed.visibility==='hidden'||computed.opacity==='0') return false;
+          const rect=el.getBoundingClientRect();
+          // A hidden ST/card drawer can still have a non-zero box while it
+          // is translated completely outside the iframe viewport.
+          return rect.width>0&&rect.height>0
+            &&rect.right>0&&rect.bottom>0
+            &&rect.left<window.innerWidth&&rect.top<window.innerHeight;
+        };
+        const apply=function(){
+          // A srcdoc document has the browser's default body margin unless
+          // the card explicitly resets it. ST mounts message HTML inside an
+          // already-reset message surface, so normalize this iframe host
+          // before comparing the card surface with its sibling surfaces.
+          const frameRoot=document.documentElement;
+          const frameBody=document.body;
+          if(frameRoot){
+            frameRoot.style.setProperty('margin','0','important');
+            frameRoot.style.setProperty('padding','0','important');
+            frameRoot.style.setProperty('width','100%','important');
+          }
+          if(frameBody){
+            frameBody.style.setProperty('margin','0','important');
+            frameBody.style.setProperty('padding','0','important');
+            frameBody.style.setProperty('width','100%','important');
+            frameBody.style.setProperty('min-width','0','important');
+            frameBody.style.setProperty('box-sizing','border-box','important');
+          }
+          let surface=null;
+          for(const selector of preferred){
+            try{surface=document.querySelector(selector)}catch(_){surface=null}
+            if(visible(surface)) break;
+            surface=null;
+          }
+          if(!surface) surface=[...document.body.children].find(visible);
+          if(!surface) return;
+          surface.dataset.agentRpSurface='primary';
+          surface.style.setProperty('width','100%','important');
+          surface.style.setProperty('max-width','none','important');
+          surface.style.setProperty('margin-left','0','important');
+          surface.style.setProperty('margin-right','0','important');
+          surface.style.setProperty('box-sizing','border-box','important');
+        };
+        addEventListener('load',apply);
+        setTimeout(apply,0); setTimeout(apply,120); setTimeout(apply,600);
       })();${FRAME_SCRIPT_CLOSE}`
       if (/<html(?:\s|>)/iu.test(body)) {
         if (/<head(?:\s|>)/iu.test(body)) {
@@ -625,10 +809,10 @@
         } else {
           body = `${shim}${body}`
         }
-        const withResize = body.replace(/<\/body\s*>/iu, `${resize}</body>`)
-        return withResize === body ? `${body}${resize}` : withResize
+        const withScripts = body.replace(/<\/body\s*>/iu, `${surfaceAdapter}${resize}</body>`)
+        return withScripts === body ? `${body}${surfaceAdapter}${resize}` : withScripts
       }
-      return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${shim}</head><body>${body}${resize}</body></html>`
+      return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${shim}</head><body>${body}${surfaceAdapter}${resize}</body></html>`
     }
 
     function displaySourceLines(value) {
@@ -643,9 +827,26 @@
       return lines
     }
 
+    // 角色卡前端不一定包在完整的 <html> 文档里。很多 ST 卡会通过
+    // Regex 直接生成 <div class="card">...</div> 片段；这类片段若先交给
+    // marked，<style> 会被当作 Markdown 内容拆坏，最终只剩普通文字。
+    function hasCardFrontendMarkup(source) {
+      return /<!doctype\s+html\b|<html(?:\s|>)|<(?:head|body|style|script|link|div|section|article|main|header|footer|nav|aside|details|summary|table|form|button|canvas|svg|h[1-6])(?:\s|>)/iu.test(source)
+    }
+
+    function isCardFrontendFragment(source) {
+      const trimmed = String(source || '').trimStart()
+      return /^(?:<!doctype\s+html\b|<html(?:\s|>)|<(?:head|body|style|script|link|div|section|article|main|header|footer|nav|aside|details|summary|table|form|button|canvas|svg|h[1-6])(?:\s|>))/iu.test(trimmed)
+    }
+
     function isCardFrontendDocument(info, source) {
-      return (/(?:<!doctype\s+html\b|<html(?:\s|>))\s*/iu.test(source) && /<\/html\s*>/iu.test(source))
-        || info.trim().split(/\s+/u)[0]?.toLowerCase() === 'html'
+      const completeDocument = (/(?:<!doctype\s+html\b|<html(?:\s|>))\s*/iu.test(source)
+        && /<\/html\s*>/iu.test(source))
+      if (completeDocument) return true
+      if (info.trim().split(/\s+/u)[0]?.toLowerCase() === 'html') return true
+      // ST also treats common structural HTML fragments as frontend display
+      // documents even when the author omitted the `html` fence language.
+      return hasCardFrontendMarkup(source)
     }
 
     function compileDisplaySegments(value) {
@@ -669,20 +870,20 @@
         const source = value.slice(line.end, closingLine.start)
         if (!isCardFrontendDocument(opening[2] || '', source)) continue
         const before = value.slice(cursor, line.start)
-        if (before) segments.push({ kind: 'markdown', source: before })
+        if (before) segments.push({ kind: isCardFrontendFragment(before) ? 'html' : 'markdown', source: before })
         segments.push({ kind: 'html', source })
         cursor = closingLine.end
         i = closingIndex
       }
       const rest = value.slice(cursor)
       if (rest) {
-        const hasFrontendMarkup = /<!doctype\s+html\b|<html(?:\s|>)|<style(?:\s|>)|<script(?:\s|>)/iu.test(rest)
-        segments.push({ kind: hasFrontendMarkup ? 'html' : 'markdown', source: rest })
+        const hasFrontendMarkup = hasCardFrontendMarkup(rest)
+        segments.push({ kind: hasFrontendMarkup && isCardFrontendFragment(rest) ? 'html' : 'markdown', source: rest })
       }
       return segments.length > 0 ? segments : [{ kind: 'markdown', source: value }]
     }
 
-    function CardHtmlFrame({ source, mvuState }) {
+    function CardHtmlFrame({ source, mvuState, character, surfaceKind = 'content' }) {
       const frameRef = useRef(null)
       const frameId = useRef(`card-frame-${Math.random().toString(36).slice(2)}`)
       const [height, setHeight] = useState(420)
@@ -702,7 +903,13 @@
         title: '角色卡 HTML 美化内容',
         sandbox: 'allow-scripts',
         scrolling: 'auto',
-        srcDoc: buildCardFrontendDocument(source, frameId.current, mvuState),
+        srcDoc: buildCardFrontendDocument(
+          source,
+          frameId.current,
+          mvuState,
+          character?.frontend?.tavernHelperVariables || {},
+          surfaceKind,
+        ),
         style: { height: `${height}px` },
       })
     }
@@ -714,13 +921,19 @@
       const processed = applyDisplayRegex(content, role === 'user' ? 1 : 2, character, depth, userName)
       const segments = compileDisplaySegments(processed)
       const rendered = segments.map((segment, index) => {
-        if (segment.kind === 'html') return h(CardHtmlFrame, { key: `html-${index}`, source: segment.source, mvuState })
+        if (segment.kind === 'html') {
+          return h('div', { key: `html-surface-${index}`, className: 'msg-html-surface', 'data-surface-kind': 'content' },
+            h(CardHtmlFrame, { source: segment.source, mvuState, character, surfaceKind: 'content' }),
+          )
+        }
         const markdownHtml = marked.parse(segment.source, { gfm: true, breaks: true })
         return h('div', { key: `md-${index}`, className: 'msg-markdown', dangerouslySetInnerHTML: { __html: sanitizeHtml(markdownHtml) } })
       })
       if (liveStatusSource) {
         rendered.push(h('div', { key: 'live-card-status', className: 'msg-live-card-status' },
-          h(CardHtmlFrame, { source: liveStatusSource, mvuState }),
+          h('div', { className: 'msg-html-surface', 'data-surface-kind': 'status' },
+            h(CardHtmlFrame, { source: liveStatusSource, mvuState, character, surfaceKind: 'status' }),
+          ),
         ))
       }
       return h('div', { className: 'msg-text msg-content-stack' }, rendered)
@@ -1859,6 +2072,7 @@
     const TOOL_DEFS = [
       { id: 'character', label: '角色', icon: '◉', side: 'right' },
       { id: 'sessions', label: '会话', icon: '☷', side: 'right' },
+      { id: 'ui', label: '界面', icon: '▣', side: 'left' },
       { id: 'api', label: '模型', icon: '⚙', side: 'left' },
       { id: 'persona', label: 'Persona', icon: '☺', side: 'left' },
       { id: 'worldbooks', label: '世界书', icon: '▤', side: 'left' },
@@ -1889,8 +2103,16 @@
       const [activeGreetingIdx, setActiveGreetingIdx] = useState(0)
       const [bootDone, setBootDone] = useState(false)
       const [activeTool, setActiveTool] = useState(null)
+      const [uiSettings, setUiSettings] = useState(() => readUiSettings())
       const fileRef = useRef(null)
       const chatRef = useRef(null)
+      const changeChatWidth = useCallback((value) => {
+        setUiSettings((previous) => {
+          const next = { ...previous, chatWidth: clampChatWidth(value) }
+          writeUiSettings(next)
+          return next
+        })
+      }, [])
       const liveStatusSource = useMemo(
         () => findLiveStatusSource(history, currentCharacter, currentUserName),
         [history, currentCharacter, currentUserName],
@@ -2352,6 +2574,8 @@
         ? h('div', { className: 'tool-stack' }, characterBlock, charactersBlock)
         : activeTool === 'sessions'
           ? sessionsBlock
+          : activeTool === 'ui'
+            ? h(UiSettingsPanel, { chatWidth: uiSettings.chatWidth, onChatWidthChange: changeChatWidth })
           : activeTool === 'api'
             ? h(ApiConfigPanel, { onConfigChange: refreshHealth })
             : activeTool === 'persona'
@@ -2418,7 +2642,7 @@
             characterSummary,
             error && h('div', { className: 'error-banner', style: { margin: '0 12px' } }, error),
             loading && h(AgentProgress, { stages: progressStages, traces }),
-            h('div', { className: 'chat', ref: chatRef },
+            h('div', { className: 'chat', ref: chatRef, style: { '--chat-content-width': `${clampChatWidth(uiSettings.chatWidth)}%` } },
               history.length === 0
                 ? h('div', { className: 'msg system' },
                     currentSessionId ? '会话已就绪。输入消息开始聊天 (⌘/Ctrl+Enter 发送)。' :
