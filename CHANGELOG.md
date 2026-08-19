@@ -17,6 +17,7 @@
 - iframe 运行时补齐官方全局 `injectPrompts`/`uninjectPrompts` 以及 `TavernHelper` 同名方法；调用通过 canonical RPC 写入当前聊天，`injectPrompts(..., { once })` 和返回的 `uninject()` 都能落到宿主持久化状态。
 - 修正角色卡内 Tavern Helper 脚本的注入 owner：脚本顶层调用现在使用导入脚本自身的 id，不再把 iframe id 错当成 `scriptId` 导致宿主拒绝持久化。
 - 对齐 `TavernHelper` 世界书方法的官方参数形状：角色卡绑定使用 `(characterName, { primary, additional })`，聊天书绑定使用 `(chatName, worldbookName)`，并补齐 `replaceWorldbook` 的 canonical mutation bridge。
+- 将当前已实现的聊天、世界书、注入、变量和脚本树能力同步挂到 `window.TavernHelper`，不再只有同名全局函数，减少官方脚本因调用入口不同而失配。
 - 世界书激活支持条目级 `scanDepth`、累计递归缓冲、`exclude_recursion`、`prevent_recursion` 和 `delay_until_recursion`，并把角色卡/独立世界书字段映射到执行层。
 - 按 SillyTavern 消息计数接入世界书 `sticky`、`cooldown`、`delay`；定时效果按会话持久化，重 roll 不推进计数，分支回退会清理未来状态。
 - 接入 SillyTavern 世界书包含组：贯通 `group`、`groupOverride`、`groupWeight`、`useGroupScoring`，按 sticky 优先、覆盖优先、评分和加权选择在本地收尾，避免让 LLM 决定组内互斥关系。
