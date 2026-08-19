@@ -179,7 +179,7 @@
 
 ### 可选（后置）
 
-- token 预算（budget/cap/ignoreBudget）—— response 总上下文预算与世界书运行时的全局 budget/budget_cap/ignoreBudget 收尾已实现近似 tokenizer；仍需继续补齐按书独立预算和 ST tokenizer 的精确边界
+- token 预算（budget/cap/ignoreBudget）—— response 总上下文预算、世界书全局 budget/budget_cap 和来源书 token_budget 已接入运行时；仍需继续对齐 ST tokenizer 的精确边界
 - 更复杂的 timed-effects 边界——基础 `sticky/cooldown/delay` 已实现；仍需继续对齐 ST 的所有 chat_metadata 分支编辑细节
 - 包含组（`group/groupOverride/groupWeight/useGroupScoring`）——已在 matcher 中按确定性 ST 管道执行；仍需补齐与完整 Host 递归/预算生命周期的所有边界
 - vectorized 紫灯 —— 跳过（无向量库）
@@ -193,7 +193,7 @@
 2. 默认 response 消息树已真实保留 position 2/3 的示例前后层、position 4 的 atDepth 深度插入和 post-history 顺序；position 5/6/7 仍因缺少独立 Author's Note/outlet host 而采用兼容合并
 3. 基础 sticky/cooldown/delay 定时效应、包含组和六个全局扫描开关已支持；向量匹配和部分 chat_metadata/分支编辑边界暂不支持，递归扫描仍只实现确定性 entry/content 语义
 4. Tavern Helper 的任意函数型 `filter` 不能跨持久化 iframe 快照执行；当前宿主只保存并使用已解析的布尔筛选结果
-5. response 总预算和世界书预算使用字符/4（中文按字符）近似 tokenizer；按书独立预算和模型专用 tokenizer 仍未完全复刻
+5. response 总预算和世界书预算使用字符/4（中文按字符）近似 tokenizer；模型专用 tokenizer 仍未完全复刻
 
 ## 9. 验收口径（A5 完成标准）
 

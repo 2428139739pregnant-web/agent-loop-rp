@@ -55,6 +55,10 @@ export interface WorldbookScanMessage {
 export interface WorldbookMatchCandidate {
   /** 世界书条目路径(唯一标识,agent 只回 path)。 */
   path: string
+  /** Stable source-book identity for source-local token budgets. */
+  sourceBookId?: string
+  /** Imported book/card `token_budget`; undefined means no source-local cap. */
+  sourceBookTokenBudget?: number
   /** 条目名(展示用,ST comment)。 */
   comment: string
   /** 主关键词(key,宏替换后)。 */
@@ -114,6 +118,8 @@ export interface WorldbookMatchCandidate {
   hasDecorators?: boolean
   /** ST budget bypass flag; the entry remains eligible after the cap. */
   ignoreBudget?: boolean
+  /** Source entry priority used by the imported-book budget pass. */
+  priority?: number
   order: number
   weight: number
   /** Which subsystem owns this entry's activation decision. */
@@ -138,6 +144,8 @@ export interface WorldbookMatchInput {
   injectedScanText?: readonly string[]
   /** 候选绿灯条目(已剔除蓝灯/禁用条目,key 已过宏替换)。 */
   candidates: readonly WorldbookMatchCandidate[]
+  /** Enabled non-plugin constant entries; they bypass matching but still consume World Info budget. */
+  constantCandidates?: readonly WorldbookMatchCandidate[]
   /** ST-Prompt-Template/扩展条目，仅用于 trace 与后续兼容适配，不进 agent 候选池。 */
   pluginCandidates?: readonly WorldbookMatchCandidate[]
   /**
@@ -203,12 +211,15 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
   // 绿灯候选:蓝灯普通条目由 response 常驻注入;但 special plugin entries
   // (例如 [GENERATE] blue entries) 仍必须进入兼容 lane。
   const candidates: WorldbookMatchCandidate[] = []
+  const constantCandidates: WorldbookMatchCandidate[] = []
   const pluginCandidates: WorldbookMatchCandidate[] = []
   for (const e of ctx.worldbook.list()) {
     const classification = classifyWorldbookEntry(e)
     if (e.enabled === false && classification.owner !== 'plugin') continue // ST disable → 完全跳过
     const candidate: WorldbookMatchCandidate = {
       path: e.path,
+      ...(e.sourceBookId === undefined ? {} : { sourceBookId: e.sourceBookId }),
+      ...(e.sourceBookTokenBudget === undefined ? {} : { sourceBookTokenBudget: e.sourceBookTokenBudget }),
       comment: e.comment ?? entryComment(e.path),
       keys: e.keywords.map(k => macro(k)),
       secondaryKeys: (e.secondaryKeywords ?? []).map(k => macro(k)),
@@ -247,13 +258,15 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
       ...(e.role === undefined ? {} : { role: e.role }),
       ...(e.hasDecorators === undefined ? {} : { hasDecorators: e.hasDecorators }),
       ...(e.ignoreBudget === undefined ? {} : { ignoreBudget: e.ignoreBudget }),
+      ...(e.priority === undefined ? {} : { priority: e.priority }),
       order: e.order,
       weight: e.weight,
       owner: classification.owner,
       ...(classification.pluginKinds.length === 0 ? {} : { pluginKinds: classification.pluginKinds }),
     }
     if (classification.owner === 'plugin') pluginCandidates.push(candidate)
-    else if (e.constant !== true) candidates.push(candidate)
+    else if (e.constant === true) constantCandidates.push(candidate)
+    else candidates.push(candidate)
   }
 
   const pluginActivation = new Set(
@@ -279,6 +292,7 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
     ...(ctx.worldbookGlobalScanData === undefined ? {} : { globalScanData: ctx.worldbookGlobalScanData }),
     ...(ctx.tavernHelperState === undefined ? {} : { injectedScanText: tavernInjectedScanText(ctx.tavernHelperState) }),
     candidates,
+    ...(constantCandidates.length === 0 ? {} : { constantCandidates }),
     // The persisted/indexed document includes every green entry, including
     // ST-owned regex entries. The prompt tells the LLM to select only the
     // owner=agent subset; ST-owned paths remain controlled by the local base.
@@ -793,27 +807,72 @@ function approximateWorldbookTokens(text: string): number {
 export function applyWorldbookTokenBudget(
   input: WorldbookMatchInput,
   matches: readonly WorldbookMatch[],
+  constantMatches: readonly WorldbookMatch[] = [],
 ): { matches: WorldbookMatch[]; budget: WorldbookBudgetStats } | null {
-  if (input.budgetPercent === undefined) return null
+  const allCandidates = [...input.candidates, ...(input.constantCandidates ?? [])]
+  const sourceBudgetCandidates = allCandidates.filter(candidate =>
+    candidate.sourceBookId !== undefined && candidate.sourceBookTokenBudget !== undefined)
+  if (input.budgetPercent === undefined && sourceBudgetCandidates.length === 0) return null
   const contextTokens = Math.max(1_024, Math.trunc(input.maxContextTokens ?? 32_768))
-  const budgetPercent = Math.min(100, Math.max(0, input.budgetPercent))
+  const budgetPercent = Math.min(100, Math.max(0, input.budgetPercent ?? 0))
   const rawBudget = Math.floor(contextTokens * budgetPercent / 100)
   const rawCap = Math.max(0, Math.trunc(input.budgetCap ?? 0))
   const budgetTokens = rawCap > 0 ? Math.min(rawBudget, rawCap) : rawBudget
-  const candidates = new Map(input.candidates.map(candidate => [candidate.path, candidate]))
-  const ranked = [...matches].sort((left, right) => {
+  const candidates = new Map(allCandidates.map(candidate => [candidate.path, candidate]))
+  const rank = (left: WorldbookMatch, right: WorldbookMatch): number => {
     const a = candidates.get(left.path)
     const b = candidates.get(right.path)
-    return (b?.order ?? right.order) - (a?.order ?? left.order)
+    return (b?.priority ?? b?.order ?? right.order) - (a?.priority ?? a?.order ?? left.order)
+      || (b?.order ?? right.order) - (a?.order ?? left.order)
       || (b?.weight ?? right.weight) - (a?.weight ?? left.weight)
       || left.path.localeCompare(right.path)
-  })
+  }
+  const uniqueConstantMatches = constantMatches.filter(match => !matches.some(item => item.path === match.path))
+  const allMatches = [...matches, ...uniqueConstantMatches]
+  const ranked = allMatches.sort(rank)
+  const sourceBookKept = new Set<string>(allMatches.map(match => match.path))
+  const sourceBooks: Array<{
+    sourceBookId: string
+    budgetTokens: number
+    usedTokens: number
+    droppedPaths: string[]
+  }> = []
+  const sourceBookIds = [...new Set(sourceBudgetCandidates
+    .map(candidate => candidate.sourceBookId)
+    .filter((value): value is string => value !== undefined))]
+  for (const sourceBookId of sourceBookIds) {
+    const sourceCandidates = sourceBudgetCandidates.filter(candidate => candidate.sourceBookId === sourceBookId)
+    const sourceBudget = Math.max(0, Math.min(...sourceCandidates.map(candidate =>
+      Math.trunc(candidate.sourceBookTokenBudget ?? 0))))
+    const sourceMatches = ranked.filter(match => candidates.get(match.path)?.sourceBookId === sourceBookId)
+    let usedSourceTokens = 0
+    const droppedSourcePaths: string[] = []
+    for (const match of sourceMatches) {
+      const candidate = candidates.get(match.path)
+      if (candidate?.ignoreBudget === true) continue
+      const cost = approximateWorldbookTokens(match.content)
+      if (usedSourceTokens + cost <= sourceBudget) {
+        usedSourceTokens += cost
+      } else {
+        sourceBookKept.delete(match.path)
+        droppedSourcePaths.push(match.path)
+      }
+    }
+    if (sourceMatches.length > 0) {
+      sourceBooks.push({ sourceBookId, budgetTokens: sourceBudget, usedTokens: usedSourceTokens, droppedPaths: droppedSourcePaths })
+    }
+  }
+  const globallyEligible = ranked.filter(match => sourceBookKept.has(match.path))
   let usedTokens = 0
   const kept = new Set<string>()
   const droppedPaths: string[] = []
-  for (const match of ranked) {
+  for (const match of globallyEligible) {
     const candidate = candidates.get(match.path)
     if (candidate?.ignoreBudget === true) {
+      kept.add(match.path)
+      continue
+    }
+    if (input.budgetPercent === undefined) {
       kept.add(match.path)
       continue
     }
@@ -827,7 +886,12 @@ export function applyWorldbookTokenBudget(
   }
   return {
     matches: matches.filter(match => kept.has(match.path)),
-    budget: { contextTokens, budgetPercent, budgetTokens, budgetCap: rawCap, usedTokens, droppedPaths },
+    budget: {
+      contextTokens, budgetPercent, budgetTokens, budgetCap: rawCap, usedTokens,
+      droppedPaths: [...sourceBooks.flatMap(book => book.droppedPaths), ...droppedPaths],
+      keptConstantPaths: uniqueConstantMatches.filter(match => kept.has(match.path)).map(match => match.path),
+      ...(sourceBooks.length === 0 ? {} : { sourceBooks }),
+    },
   }
 }
 
@@ -848,7 +912,8 @@ export const worldbookMatchAgent: Agent<WorldbookMatchInput, WorldbookMatchOutpu
       const matches = output.matches.filter(match =>
         !input.candidates.some(candidate => candidate.path === match.path) || winners.has(match.path))
       const normalized = matches.length === output.matches.length ? output : { ...output, matches }
-      const budgeted = applyWorldbookTokenBudget(input, normalized.matches)
+      const constantMatches = resolveMatches(input.constantCandidates ?? [], ctx, 'st').matches
+      const budgeted = applyWorldbookTokenBudget(input, normalized.matches, constantMatches)
       const withBudget = budgeted === null ? normalized : { ...normalized, matches: budgeted.matches, budget: budgeted.budget }
       return plugin === undefined ? withBudget : { ...withBudget, plugin }
     }

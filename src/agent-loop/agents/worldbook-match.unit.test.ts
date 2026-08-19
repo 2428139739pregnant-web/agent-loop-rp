@@ -301,6 +301,7 @@ test('buildWorldbookMatchInput keeps only enabled green entries (blue light excl
   const input = buildWorldbookMatchInput(makeIntent({ keywords: ['x'] }), makeCtx({ store }))
   // 蓝灯不进匹配池(response 常驻注入);disabled(ST disable)两边都不进。
   assert.deepEqual(input.candidates.map(c => c.path), ['green.md'])
+  assert.deepEqual(input.constantCandidates?.map(c => c.path), ['blue.md'])
 })
 
 test('buildWorldbookMatchInput respects scanDepth from settings and defaults to 2', () => {
@@ -369,6 +370,17 @@ test('buildWorldbookMatchInput carries inclusion-group metadata', () => {
   assert.equal(candidate?.groupOverride, true)
   assert.equal(candidate?.groupWeight, 4)
   assert.equal(candidate?.useGroupScoring, true)
+})
+
+test('buildWorldbookMatchInput carries source-book budget metadata', () => {
+  const store = new MemoryWorldbookStore([{
+    path: 'book/entry.md', keywords: ['x'], order: 2, weight: 9, content: '',
+    sourceBookId: 'book', sourceBookTokenBudget: 128, priority: 7,
+  }])
+  const candidate = buildWorldbookMatchInput(makeIntent(), makeCtx({ store })).candidates[0]
+  assert.equal(candidate?.sourceBookId, 'book')
+  assert.equal(candidate?.sourceBookTokenBudget, 128)
+  assert.equal(candidate?.priority, 7)
 })
 
 test('worldbook matcher includes only opted-in ST global scan fields', () => {
@@ -732,6 +744,54 @@ test('worldbook token budget keeps ST priority and ignoreBudget entries', () => 
   assert.deepEqual(result.budget.droppedPaths, ['low.md'])
   assert.equal(result.budget.budgetTokens, 10)
   assert.equal(result.budget.usedTokens, 1)
+})
+
+test('worldbook source-book token budgets run before the shared session budget', () => {
+  const input = {
+    intent: makeIntent(),
+    scanDepth: 2,
+    recentMessages: [],
+    maxContextTokens: 1_024,
+    candidates: [
+      makeCandidate({ path: 'book-a-low.md', sourceBookId: 'book-a', sourceBookTokenBudget: 2, priority: 1 }),
+      makeCandidate({ path: 'book-a-high.md', sourceBookId: 'book-a', sourceBookTokenBudget: 2, priority: 9 }),
+      makeCandidate({ path: 'book-b.md', sourceBookId: 'book-b', sourceBookTokenBudget: 8 }),
+    ],
+  }
+  const result = applyWorldbookTokenBudget(input, [
+    { path: 'book-a-low.md', order: 1, weight: 1, content: '12345678' },
+    { path: 'book-a-high.md', order: 2, weight: 1, content: 'high' },
+    { path: 'book-b.md', order: 3, weight: 1, content: 'book-b' },
+  ])
+  assert.ok(result)
+  assert.deepEqual(result.matches.map(match => match.path), ['book-a-high.md', 'book-b.md'])
+  assert.deepEqual(result.budget.sourceBooks, [{
+    sourceBookId: 'book-a', budgetTokens: 2, usedTokens: 1, droppedPaths: ['book-a-low.md'],
+  }, {
+    sourceBookId: 'book-b', budgetTokens: 8, usedTokens: 2, droppedPaths: [],
+  }])
+  assert.deepEqual(result.budget.droppedPaths, ['book-a-low.md'])
+})
+
+test('worldbook budget accounts for constant entries and returns their kept paths', () => {
+  const input = {
+    intent: makeIntent(),
+    scanDepth: 2,
+    recentMessages: [],
+    maxContextTokens: 1_024,
+    budgetPercent: 1,
+    candidates: [makeCandidate({ path: 'green.md', order: 1 })],
+    constantCandidates: [makeCandidate({ path: 'blue.md', order: 9, constant: true })],
+  }
+  const result = applyWorldbookTokenBudget(
+    input,
+    [{ path: 'green.md', order: 1, weight: 1, content: 'x'.repeat(40) }],
+    [{ path: 'blue.md', order: 9, weight: 1, content: 'blue' }],
+  )
+  assert.ok(result)
+  assert.deepEqual(result.matches, [])
+  assert.deepEqual(result.budget.keptConstantPaths, ['blue.md'])
+  assert.deepEqual(result.budget.droppedPaths, ['green.md'])
 })
 
 test('enhanced mode keeps ST matches and adds agent matches in one LLM call', async () => {

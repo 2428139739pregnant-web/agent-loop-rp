@@ -46,12 +46,18 @@ export class MemorySessionStore implements SessionStore {
 /** One worldbook entry with its declaration metadata. */
 export interface WorldbookEntry {
   path: string
+  /** Stable source-book identity used for per-book ST token budgets. */
+  sourceBookId?: string
+  /** Imported character/worldbook `token_budget`; undefined means no source cap. */
+  sourceBookTokenBudget?: number
   /** ST comment/memo; extension directives are commonly stored here. */
   comment?: string
   keywords: string[]
   order: number
   weight: number
   content: string
+  /** Source-book priority/weight used by its local budget pass. */
+  priority?: number
   // ─── SillyTavern 条目参数透传(可选:老 fixture / 旧存档缺省时按 ST 默认值处理)───
   /** ST 蓝灯(constant):true = 无条件每轮激活,不进 2.1 绿灯匹配池。缺省 false。 */
   constant?: boolean

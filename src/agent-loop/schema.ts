@@ -68,6 +68,13 @@ export interface WorldbookBudgetStats {
   budgetCap: number
   usedTokens: number
   droppedPaths: string[]
+  keptConstantPaths?: string[]
+  sourceBooks?: Array<{
+    sourceBookId: string
+    budgetTokens: number
+    usedTokens: number
+    droppedPaths: string[]
+  }>
 }
 
 /** A wrapping payload returned by 2.1. */

@@ -4,6 +4,8 @@
 
 ### 修复
 
+- 世界书来源预算不再在合并 Store 时丢失：角色卡/独立 World Info 的 `token_budget`、来源书身份和条目优先级会传到 matcher，先执行来源书预算再执行当前会话共享预算；独立书重启和条目开关写盘时保留书级字段，并在 trace 记录各来源书的裁剪结果。
+
 - 世界书兼容层加入 ST `world_info_budget` / `budget_cap` 运行时收尾：按 ST 优先级本地裁剪已激活的多本世界书条目，`ignoreBudget` 条目不占预算，并把使用量与被裁剪路径写入 worldbook trace；整个过程不新增 LLM 调用。
 
 - response 消息树加入 ST `openai_max_context` 风格的上下文预算：可在回复设置中配置总上下文 token 上限，模型输出预留空间后，从最旧历史按 user/assistant 对裁剪，系统层、世界书、示例、插件注入和当前用户输入保留；response trace 同时记录预算、估算 token、裁剪数量及超预算状态。

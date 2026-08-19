@@ -795,3 +795,17 @@ test('responseAgent.run appends standalone constant worldbook blocks into the do
   assert.ok(capturedSystem.includes('常驻世界书条目'))
   assert.ok(capturedSystem.indexOf('XP_CONST') > capturedSystem.indexOf('P>>A cheerful'))
 })
+
+test('constant worldbook blocks honor the matcher budget allowlist', () => {
+  const store = {
+    list: () => [
+      { path: '书/keep', keywords: [], order: 2, weight: 0, content: 'KEEP', constant: true, position: 0 },
+      { path: '书/drop', keywords: [], order: 1, weight: 0, content: 'DROP', constant: true, position: 0 },
+    ],
+  }
+  const blocks = buildConstantWorldbookBlocks(store, text => text, {
+    allowedPaths: new Set(['书/keep']),
+  })
+  assert.ok(blocks.persona.includes('KEEP'))
+  assert.ok(!blocks.persona.includes('DROP'))
+})

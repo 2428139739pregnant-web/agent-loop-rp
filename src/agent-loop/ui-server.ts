@@ -2041,10 +2041,19 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     // the same source entries visible in the structured trace input too;
     // otherwise the trace misleadingly shows only matchCount and looks as if
     // an external worldbook was never passed to the response stage.
+    const keptConstantPaths = (wb as {
+      budget?: { keptConstantPaths?: unknown }
+    }).budget?.keptConstantPaths
+    const allowedConstantPaths = Array.isArray(keptConstantPaths)
+      ? new Set(keptConstantPaths.filter((path): path is string => typeof path === 'string'))
+      : undefined
     const constantWorldbookEntries = listConstantWorldbookEntries(
       state.worldbook,
       text => text,
-      { applyProbability: false },
+      {
+        applyProbability: false,
+        ...(allowedConstantPaths === undefined ? {} : { allowedPaths: allowedConstantPaths }),
+      },
     )
     result = await runStageWithTrace('response',
       {
@@ -4410,6 +4419,9 @@ function parseWorldInfoJson(json: string): ImportedLorebook {
   const obj = JSON.parse(json) as {
     entries?: Record<string, Record<string, unknown>>
     name?: string
+    token_budget?: unknown
+    tokenBudget?: unknown
+    extensions?: unknown
     /** Current ST exports `recursive`; some integrations use the expanded name. */
     recursive?: unknown
     recursiveScanning?: unknown
@@ -4417,6 +4429,12 @@ function parseWorldInfoJson(json: string): ImportedLorebook {
   if (obj.entries === null || typeof obj.entries !== 'object' || Array.isArray(obj.entries)) {
     throw new Error('world info JSON must have an "entries" object')
   }
+  const bookExtensions = obj.extensions !== null && typeof obj.extensions === 'object'
+    && !Array.isArray(obj.extensions) ? obj.extensions as Record<string, unknown> : undefined
+  const tokenBudgetRaw = obj.token_budget ?? obj.tokenBudget ?? bookExtensions?.token_budget
+  const tokenBudget = typeof tokenBudgetRaw === 'number' && Number.isFinite(tokenBudgetRaw)
+    ? Math.max(0, Math.trunc(tokenBudgetRaw))
+    : undefined
   const entries: ImportedLorebook['entries'] extends readonly (infer E)[] ? E[] : never = []
   for (const [uid, raw] of Object.entries(obj.entries)) {
     if (raw === null || typeof raw !== 'object') continue
@@ -4542,6 +4560,7 @@ function parseWorldInfoJson(json: string): ImportedLorebook {
   }
   const book: ImportedLorebook = {
     ...(obj.name !== undefined ? { name: obj.name } : {}),
+    ...(tokenBudget === undefined ? {} : { tokenBudget }),
     recursiveScanning: obj.recursiveScanning === true || obj.recursive === true,
     entries,
   }
@@ -4590,8 +4609,15 @@ async function handleImportWorldbook(state: AppState, req: IncomingMessage, res:
   await mkdir(dir, { recursive: true })
   const meta = { id, name, createdAt: new Date().toISOString() }
   await writeFile(join(dir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf-8')
-  // entries 持久化去掉递归扫描/tokenBudget 等运行时字段,只留 array
-  await writeFile(join(dir, 'entries.json'), JSON.stringify({ entries: book.entries }, null, 2), 'utf-8')
+  // Keep the book-level ST fields alongside the entries.  They are part of
+  // the source-book budget/recursion contract and must survive a restart.
+  await writeFile(join(dir, 'entries.json'), JSON.stringify({
+    ...(book.name === undefined ? {} : { name: book.name }),
+    ...(book.scanDepth === undefined ? {} : { scanDepth: book.scanDepth }),
+    ...(book.tokenBudget === undefined ? {} : { tokenBudget: book.tokenBudget }),
+    recursiveScanning: book.recursiveScanning,
+    entries: book.entries,
+  }, null, 2), 'utf-8')
   state.importedWorldbooks.set(id, book)
   ;(state as { worldbook: WorldbookStore }).worldbook = getMergedWorldbook(state, state.currentCharacterId)
   sendJson(res, 200, {
@@ -4599,6 +4625,7 @@ async function handleImportWorldbook(state: AppState, req: IncomingMessage, res:
     name,
     entryCount: book.entries.length,
     enabledCount: book.entries.filter(e => e.enabled).length,
+    tokenBudget: book.tokenBudget ?? null,
   })
 }
 
@@ -4608,6 +4635,7 @@ function handleListImportedWorldbooks(state: AppState, res: ServerResponse): voi
     name: book.name ?? id,
     entryCount: book.entries.length,
     enabledCount: book.entries.filter(e => e.enabled).length,
+    tokenBudget: book.tokenBudget ?? null,
   }))
   sendJson(res, 200, { worldbooks: list })
 }
@@ -4641,6 +4669,8 @@ function handleGetImportedWorldbook(state: AppState, id: string, res: ServerResp
   sendJson(res, 200, {
     id,
     name: book.name ?? null,
+    tokenBudget: book.tokenBudget ?? null,
+    recursiveScanning: book.recursiveScanning,
     entries,
     totalCount: book.entries.length,
     enabledCount: book.entries.filter(e => e.enabled).length,
@@ -4663,7 +4693,13 @@ async function handlePatchImportedWorldbookEntry(
   state.importedWorldbooks.set(id, newBook)
   // 写盘
   const dir = join(ABS_WORLDBOOKS_DIR, id)
-  await writeFile(join(dir, 'entries.json'), JSON.stringify({ entries: newEntries }, null, 2), 'utf-8')
+  await writeFile(join(dir, 'entries.json'), JSON.stringify({
+    ...(newBook.name === undefined ? {} : { name: newBook.name }),
+    ...(newBook.scanDepth === undefined ? {} : { scanDepth: newBook.scanDepth }),
+    ...(newBook.tokenBudget === undefined ? {} : { tokenBudget: newBook.tokenBudget }),
+    recursiveScanning: newBook.recursiveScanning,
+    entries: newEntries,
+  }, null, 2), 'utf-8')
   // 重新合并 worldbook(独立书对当前角色是否启用取决于 characterWorldbookConfigs)
   ;(state as { worldbook: WorldbookStore }).worldbook = getMergedWorldbook(state, state.currentCharacterId)
   sendJson(res, 200, { id, sourceId, enabled: enabledRaw })
@@ -4706,15 +4742,23 @@ function safeFileName(name: string): string {
 function lorebookEntryToWorldbookEntry(
   charName: string,
   e: ImportedLorebookEntry,
-  recursion: { readonly recursiveScanning: boolean; readonly recursiveBookId: string },
+  recursion: {
+    readonly recursiveScanning: boolean
+    readonly recursiveBookId: string
+    readonly sourceBookId?: string
+    readonly sourceBookTokenBudget?: number
+  },
 ): WorldbookEntry {
   const displayName = e.name ?? `(未命名 ${e.sourceId})`
   return {
     path: `${charName}/${displayName}`,
+    ...(recursion.sourceBookId === undefined ? {} : { sourceBookId: recursion.sourceBookId }),
+    ...(recursion.sourceBookTokenBudget === undefined ? {} : { sourceBookTokenBudget: recursion.sourceBookTokenBudget }),
     ...(e.comment === undefined && e.name === undefined ? {} : { comment: e.comment ?? e.name }),
     keywords: [...e.keys, ...e.secondaryKeys],
     order: e.insertionOrder,
     weight: e.priority ?? 0,
+    ...(e.priority === undefined ? {} : { priority: e.priority }),
     content: e.content,
     constant: e.constant,
     enabled: e.enabled,
@@ -4877,6 +4921,10 @@ function getMergedWorldbook(
           {
             recursiveScanning: rec.preprocessed.lorebook?.recursiveScanning === true,
             recursiveBookId: `character:${safeFileName(rec.name)}`,
+            sourceBookId: `character:${safeFileName(rec.name)}`,
+            ...(rec.preprocessed.lorebook?.tokenBudget === undefined
+              ? {}
+              : { sourceBookTokenBudget: rec.preprocessed.lorebook.tokenBudget }),
           },
         ))
       }
@@ -4899,7 +4947,12 @@ function getMergedWorldbook(
       importedEntries.push(lorebookEntryToWorldbookEntry(
         `世界书/${name}`,
         e,
-        { recursiveScanning: book.recursiveScanning === true, recursiveBookId: `worldbook:${name}` },
+        {
+          recursiveScanning: book.recursiveScanning === true,
+          recursiveBookId: `worldbook:${name}`,
+          sourceBookId: `worldbook:${name}`,
+          ...(book.tokenBudget === undefined ? {} : { sourceBookTokenBudget: book.tokenBudget }),
+        },
       ))
     }
   }

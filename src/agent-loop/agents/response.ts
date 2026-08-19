@@ -132,6 +132,8 @@ export interface ConstantWorldbookOptions {
    * can disable the random draw and show all eligible constants. */
   readonly applyProbability?: boolean
   readonly random?: () => number
+  /** When World Info budgeting ran, only these activated constant paths survive. */
+  readonly allowedPaths?: ReadonlySet<string>
 }
 
 function passesWorldbookProbability(entry: WorldbookEntry, random: () => number): boolean {
@@ -152,6 +154,7 @@ export function listConstantWorldbookEntries(
     .filter(e => e.constant === true
       && e.enabled !== false
       && classifyWorldbookEntry(e).owner !== 'plugin'
+      && (options.allowedPaths === undefined || options.allowedPaths.has(e.path))
       && (options.applyProbability === false || passesWorldbookProbability(e, options.random ?? Math.random)))
     .sort((a, b) => b.order - a.order)
     .map(e => ({
@@ -638,7 +641,10 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
 
     // 独立世界书蓝灯条目:position 映射追加进三文档尾部(每轮注入,不受消息影响)。
     // 卡片内嵌书的蓝灯已在 preprocess 合并进文档,这里只处理 worldbooks/ 的独立书。
-    const constantBlocks = buildConstantWorldbookBlocks(ctx.worldbook, macro)
+    const constantBlocks = buildConstantWorldbookBlocks(ctx.worldbook, macro, {
+      ...(input.worldbook.budget?.keptConstantPaths === undefined
+        ? {} : { allowedPaths: new Set(input.worldbook.budget.keptConstantPaths) }),
+    })
 
     // 三个新字段(mes_example / system_prompt / post_history_instructions)都过宏替换。
     // 旧存档/旧客户端可能不带这些字段(undefined),兜底空串 → 占位文案。

@@ -58,7 +58,7 @@
     /** @typedef {{role:'user'|'assistant'|'system', content:string, swipe_id?:number, swipes?:string[], swipe_info?:Array<Object>}} HistoryMessage */
     /** @typedef {{sessionId:string, label:string, characterName:string, createdAt:string, turnCount:number}} SessionInfo */
     /** @typedef {{sourceId:string, name:string|null, keys:string[], secondaryKeys:string[], content:string, enabled:boolean, insertionOrder:number, selective:boolean, constant:boolean, caseSensitive:boolean, matchWholeWords:boolean, useRegex:boolean, position:'before_char'|'after_char', priority:number|null, selectiveLogic?:string, probability?:number, useProbability?:boolean, stPosition?:number}} WBEntry */
-    /** @typedef {{id:string, name:string, entryCount:number, enabledCount:number}} WBBook */
+    /** @typedef {{id:string, name:string, entryCount:number, enabledCount:number, tokenBudget:number|null}} WBBook */
     /** @typedef {{scanDepth:number, useLlmMatcher:boolean, budgetPercent:number, budgetCap:number}} WorldbookSettingsView */
     /** @typedef {{name:string, length:number, overridden:boolean}} PromptSummary */
     /** @typedef {{provider:'openai'|'mock', baseUrl:string, apiKey:string, model:string}} ApiConfigView */
@@ -2937,7 +2937,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           setBudgetPercent(String(r.budgetPercent ?? percent))
           setBudgetCap(String(r.budgetCap ?? cap))
         } catch (err) { props.onError(String(err.message || err)) } finally { setSavingSettings(false) }
-      }, [scanDepth, matchMode, props])
+      }, [scanDepth, matchMode, budgetPercent, budgetCap, props])
 
       const refresh = useCallback(async () => {
         try {
@@ -3180,7 +3180,8 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
               })
             : null,
           h('span', { className: 'book-toggle' }, props.expanded ? '▾' : '▸'),
-          h('span', { className: 'book-name' }, props.book.name),
+          h('span', { className: 'book-name', title: props.book.tokenBudget === null || props.book.tokenBudget === undefined
+            ? props.book.name : `来源书 token_budget: ${props.book.tokenBudget}` }, props.book.name),
           props.charEnabled === false ? h('span', { className: 'flag', title: '当前角色未启用这本世界书' }, '未启用') : null,
           h('span', { className: 'book-count' }, `${props.book.enabledCount}/${props.book.entryCount}`),
           h('button', {
