@@ -4,6 +4,8 @@
 
 ### 修复
 
+- response 消息树加入 ST `openai_max_context` 风格的上下文预算：可在回复设置中配置总上下文 token 上限，模型输出预留空间后，从最旧历史按 user/assistant 对裁剪，系统层、世界书、示例、插件注入和当前用户输入保留；response trace 同时记录预算、估算 token、裁剪数量及超预算状态。
+
 - 默认 response 模板接入 ST PromptManager 风格的消息树：角色卡 `mes_example` 按 speaker 拆为独立 system 消息并保留 `name`，加入 `[Example Chat]` 标记，聊天历史保留真实 user/assistant 角色，`atDepth` 条目按 depth/order/role 插入，post-history 指令位于历史之后；不带新标记的自定义 response 模板继续走旧兼容路径。
 - 保留角色卡、独立世界书和 Tavern Helper 条目的 atDepth `depth`/`role` 元数据，避免到 response 阶段只剩 position 而丢失插入语义。
 - 修正 Tavern Helper 函数式 `injectPrompts` 过滤器：每轮生成准备阶段按官方形状把 prompt 作为参数传入 filter，仍由 iframe 本地执行，不增加 LLM 调用。

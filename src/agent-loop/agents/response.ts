@@ -31,7 +31,9 @@ import {
   buildResponseSettingsInstruction,
   DEFAULT_RESPONSE_SETTINGS,
   normalizeResponseSettings,
+  responsePromptTokenBudget,
   responseMaxTokens,
+  type ResponsePromptBudgetStats,
   type ResponseGenerationSettings,
 } from '../response-settings.ts'
 import type { Agent, AgentContext } from './types.ts'
@@ -406,6 +408,66 @@ export function applySillyTavernDepthPrompts(
   return messages.reverse()
 }
 
+function estimateResponseMessageTokens(messages: readonly ChatMessage[]): number {
+  return messages.reduce((total, message) => {
+    const name = message.name === undefined ? '' : message.name
+    // Chat-completion tokenizers charge a small per-message envelope in
+    // addition to content. This conservative chars/4 estimate is also the
+    // fallback used by the host token tracker when a provider reports none.
+    return total + Math.max(1, Math.ceil([...`${name}\n${message.content}`].length / 4)) + 4
+  }, 0)
+}
+
+/**
+ * Apply the ST/OpenAI context-window rule to the already assembled message
+ * tree. `assemble` is rerun after every removal so depth and extension
+ * injections are recalculated against the shortened history rather than
+ * leaving stale message indexes behind.
+ */
+export function fitResponsePromptToBudget(
+  history: readonly ChatMessage[],
+  settings: ResponseGenerationSettings,
+  assemble: (history: readonly ChatMessage[]) => readonly ChatMessage[],
+): { messages: ChatMessage[]; stats: ResponsePromptBudgetStats } {
+  const contextTokens = settings.maxContextTokens ?? 32_768
+  const promptBudgetTokens = responsePromptTokenBudget(settings)
+  const originalHistoryTokens = estimateResponseMessageTokens(history)
+  let candidate = history.map(message => ({ ...message }))
+  let messages = [...assemble(candidate)]
+  let estimatedPromptTokens = estimateResponseMessageTokens(messages)
+  let droppedHistoryMessages = 0
+
+  while (estimatedPromptTokens > promptBudgetTokens && candidate.length > 1) {
+    // The last message is the current user turn. Remove the oldest complete
+    // user/assistant pair where possible; this keeps the remaining chat
+    // history role-balanced and never drops the current request.
+    let removeCount = 1
+    const first = candidate[0]
+    const second = candidate[1]
+    if (first?.role === 'user' && second?.role === 'assistant' && candidate.length - 2 >= 1) {
+      removeCount = 2
+    }
+    candidate = candidate.slice(removeCount)
+    droppedHistoryMessages += removeCount
+    messages = [...assemble(candidate)]
+    estimatedPromptTokens = estimateResponseMessageTokens(messages)
+  }
+
+  const keptHistoryTokens = estimateResponseMessageTokens(candidate)
+  return {
+    messages,
+    stats: {
+      contextTokens,
+      promptBudgetTokens,
+      estimatedPromptTokens,
+      droppedHistoryMessages,
+      droppedHistoryTokens: Math.max(0, originalHistoryTokens - keptHistoryTokens),
+      keptHistoryMessages: candidate.length,
+      overBudget: estimatedPromptTokens > promptBudgetTokens,
+    },
+  }
+}
+
 /**
  * Render worldbook matches as a markdown block, sorted by (order asc,
  * weight desc). 2.1 already sorts, this re-sorts defensively in case the
@@ -688,49 +750,44 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
         order: entry.order,
       })),
     ]
-    const historyAndCurrent = useStMessageTree
-      ? applySillyTavernDepthPrompts([
-        ...contextMessages,
-        { role: 'user', content: promptUserInput },
-      ], depthPrompts)
-      : [
-        ...contextMessages,
-        { role: 'user' as const, content: promptUserInput },
-      ]
-    const structuredMessages: ChatMessage[] = useStMessageTree
-      ? [
-        { role: 'system', content: renderedSystemPrompt.replace(ST_MESSAGE_TREE_MARKER, '').trim() },
-        ...(worldbookBeforeCharacter.trim() ? [{ role: 'system' as const, content: worldbookBeforeCharacter.trim() }] : []),
-        { role: 'system', content: `角色名：${macro(input.character.name)}\n\n${macro(input.character.persona) + constantBlocks.persona}` },
-        ...(worldbookAfterCharacter.trim() ? [{ role: 'system' as const, content: worldbookAfterCharacter.trim() }] : []),
-        { role: 'system', content: macro(input.character.style) + constantBlocks.style },
-        { role: 'system', content: macro(input.character.worldview) + constantBlocks.worldview },
-        ...(macro(userPersonaBlock).trim() ? [{ role: 'system' as const, content: `用户人设：\n${macro(userPersonaBlock).trim()}` }] : []),
-        ...(worldbookBlock.trim() ? [{ role: 'system' as const, content: `激活的世界书条目：\n${macro(worldbookBlock).trim()}` }] : []),
-        ...(worldbookBeforeExamples.trim() ? [{ role: 'system' as const, content: worldbookBeforeExamples.trim() }] : []),
-        ...(mesExample.trim().length > 0 ? [{ role: 'system' as const, content: '[Example Chat]' }] : []),
-        ...parseSillyTavernExampleMessages(mesExample, userName, charName),
-        ...(worldbookAfterExamples.trim() ? [{ role: 'system' as const, content: worldbookAfterExamples.trim() }] : []),
-        ...historyAndCurrent,
-        ...(postHistoryInstructions.trim() ? [{ role: 'system' as const, content: postHistoryInstructions.trim() }] : []),
-      ]
-      : [
-        { role: 'system', content: systemPrompt },
-        ...historyAndCurrent,
-      ]
-    const baseMessages = structuredMessages
-    const promptTemplateMessages = applyPromptTemplateInjections(
-      baseMessages,
-      input.worldbook.plugin ?? {
-        promptInjections: [],
-        renderDirectives: [],
-        skipped: [],
-      },
-    )
-    const promptMessages = applyTavernInjectedInChatPrompts(
-      promptTemplateMessages,
-      ctx.tavernHelperState,
-    )
+    const pluginOutput = input.worldbook.plugin ?? {
+      promptInjections: [],
+      renderDirectives: [],
+      skipped: [],
+    }
+    const assemblePromptMessages = (historyBase: readonly ChatMessage[]): ChatMessage[] => {
+      const historyAndCurrent = useStMessageTree
+        ? applySillyTavernDepthPrompts(historyBase, depthPrompts)
+        : historyBase.map(message => ({ ...message }))
+      const structuredMessages: ChatMessage[] = useStMessageTree
+        ? [
+          { role: 'system', content: renderedSystemPrompt.replace(ST_MESSAGE_TREE_MARKER, '').trim() },
+          ...(worldbookBeforeCharacter.trim() ? [{ role: 'system' as const, content: worldbookBeforeCharacter.trim() }] : []),
+          { role: 'system', content: `角色名：${macro(input.character.name)}\n\n${macro(input.character.persona) + constantBlocks.persona}` },
+          ...(worldbookAfterCharacter.trim() ? [{ role: 'system' as const, content: worldbookAfterCharacter.trim() }] : []),
+          { role: 'system', content: macro(input.character.style) + constantBlocks.style },
+          { role: 'system', content: macro(input.character.worldview) + constantBlocks.worldview },
+          ...(macro(userPersonaBlock).trim() ? [{ role: 'system' as const, content: `用户人设：\n${macro(userPersonaBlock).trim()}` }] : []),
+          ...(worldbookBlock.trim() ? [{ role: 'system' as const, content: `激活的世界书条目：\n${macro(worldbookBlock).trim()}` }] : []),
+          ...(worldbookBeforeExamples.trim() ? [{ role: 'system' as const, content: worldbookBeforeExamples.trim() }] : []),
+          ...(mesExample.trim().length > 0 ? [{ role: 'system' as const, content: '[Example Chat]' }] : []),
+          ...parseSillyTavernExampleMessages(mesExample, userName, charName),
+          ...(worldbookAfterExamples.trim() ? [{ role: 'system' as const, content: worldbookAfterExamples.trim() }] : []),
+          ...historyAndCurrent,
+          ...(postHistoryInstructions.trim() ? [{ role: 'system' as const, content: postHistoryInstructions.trim() }] : []),
+        ]
+        : [
+          { role: 'system', content: systemPrompt },
+          ...historyAndCurrent,
+        ]
+      const promptTemplateMessages = applyPromptTemplateInjections(structuredMessages, pluginOutput)
+      return applyTavernInjectedInChatPrompts(promptTemplateMessages, ctx.tavernHelperState)
+    }
+    const budgeted = fitResponsePromptToBudget([
+      ...contextMessages,
+      { role: 'user', content: promptUserInput },
+    ], responseSettings, assemblePromptMessages)
+    const promptMessages = budgeted.messages
 
     // 3. Call the LLM. Plain text — no response_format.
     const maxTokens = responseMaxTokens(responseSettings)
@@ -751,6 +808,7 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
       turn: ctx.session.turnCount(ctx.sessionId),
       usedWorldbook: input.worldbook.matches.length > 0,
       usedContextSegmentation: input.contextSegmentation.segments.length > 0,
+      promptBudget: budgeted.stats,
     }
   },
 }

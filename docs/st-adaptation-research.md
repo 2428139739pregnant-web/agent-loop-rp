@@ -44,7 +44,7 @@
 | `characterFilterNames/Tags/Exclude` | — | 条目按角色卡过滤（模板外字段） |
 | `triggers` | array `[]` | 生成类型触发器 |
 
-**世界书级全局设置**（`world-info.js:69-86`）：`world_info_depth=2`（扫描最近 2 条消息，默认）、`world_info_budget=25`（占上下文 25%）、`world_info_budget_cap=0`（绝对上限，0=不限）、`world_info_case_sensitive=false`、`world_info_match_whole_words=false`、`world_info_recursive=false`、`world_info_max_recursion_steps=0`、`world_info_min_activations=0`。本项目当前把 `scan_depth`/`recursive_scanning` 以及条目递归控制映射进 `ImportedLorebook`；确定性 inspector 执行递归扫描，独立世界书 JSON 还兼容顶层 `recursive` 别名。`sticky/cooldown/delay` 由宿主按会话消息计数维护，不依赖 LLM。
+**世界书级全局设置**（`world-info.js:69-86`）：`world_info_depth=2`（扫描最近 2 条消息，默认）、`world_info_budget=25`（占上下文 25%）、`world_info_budget_cap=0`（绝对上限，0=不限）、`world_info_case_sensitive=false`、`world_info_match_whole_words=false`、`world_info_recursive=false`、`world_info_max_recursion_steps=0`、`world_info_min_activations=0`。本项目当前把 `scan_depth`/`recursive_scanning` 以及条目递归控制映射进 `ImportedLorebook`；确定性 inspector 执行递归扫描，独立世界书 JSON 还兼容顶层 `recursive` 别名。`sticky/cooldown/delay` 由宿主按会话消息计数维护，不依赖 LLM。response 另有总上下文 `maxContextTokens`，在完整消息树和插件注入完成后执行历史裁剪。
 
 ## 2. 蓝灯 vs 绿灯：激活语义（`checkWorldInfo`，`world-info.js:4597` 起）
 
@@ -77,7 +77,8 @@
 ## 3. 排序与预算
 
 - 排序：全局 `sortFn` = **order 降序**（`world-info.js:87`）；概率/预算检查前再按 sticky 优先 + 原序稳定排序（`world-info.js:4881-4886`）
-- 预算：`budget = world_info_budget% × maxContext`，`budget_cap` 为绝对上限；逐条累计 token，超出即停（`ignoreBudget` 条目不受限但排后）（`world-info.js:4624-4640, 4889-4955`）
+- 世界书预算：`budget = world_info_budget% × maxContext`，`budget_cap` 为绝对上限；逐条累计 token，超出即停，`ignoreBudget` 条目不受限但排后（`world-info.js:4624-4640, 4889-4955`）。独立 lorebook inspector 已有条目/书级近似预算。
+- response 总预算：回复设置的 `maxContextTokens` 对齐 ST `openai_max_context`，包含正文输出预留；默认消息树组装完成、扩展注入完成后，保留系统/世界书/示例/插件注入和当前用户消息，从最旧历史开始按 user/assistant 对裁剪。裁剪结果写入 response trace 的 `promptBudget`；固定层本身超出时保留固定层并标记 `overBudget`。
 
 ## 4. position 枚举与注入位置（`world-info.js:855-870`）
 
@@ -178,7 +179,7 @@
 
 ### 可选（后置）
 
-- token 预算（budget/cap/ignoreBudget）—— 当前仍未完全复刻 ST PromptManager 的 tokenizer、budget_cap 和逐条截断；后续应在消息树之上实现确定性的历史裁剪，并在 trace 中报告被裁剪消息
+- token 预算（budget/cap/ignoreBudget）—— response 总上下文预算已实现近似 tokenizer 和历史裁剪；世界书运行时仍需继续补齐多书共享 budget、`budget_cap` 与 ST tokenizer 的精确边界
 - 更复杂的 timed-effects 边界——基础 `sticky/cooldown/delay` 已实现；仍需继续对齐 ST 的所有 chat_metadata 分支编辑细节
 - 包含组（`group/groupOverride/groupWeight/useGroupScoring`）——已在 matcher 中按确定性 ST 管道执行；仍需补齐与完整 Host 递归/预算生命周期的所有边界
 - vectorized 紫灯 —— 跳过（无向量库）
@@ -192,7 +193,7 @@
 2. 默认 response 消息树已真实保留 position 2/3 的示例前后层、position 4 的 atDepth 深度插入和 post-history 顺序；position 5/6/7 仍因缺少独立 Author's Note/outlet host 而采用兼容合并
 3. 基础 sticky/cooldown/delay 定时效应、包含组和六个全局扫描开关已支持；向量匹配和部分 chat_metadata/分支编辑边界暂不支持，递归扫描仍只实现确定性 entry/content 语义
 4. Tavern Helper 的任意函数型 `filter` 不能跨持久化 iframe 快照执行；当前宿主只保存并使用已解析的布尔筛选结果
-5. token 预算尚未完全复刻 ST PromptManager 的 `maxContext`/`budget_cap`/`ignoreBudget` 组合；当前保留 response `max_tokens` 和字符数近似统计
+5. response 总预算和历史裁剪使用字符/4 近似 tokenizer；世界书多书预算、`budget_cap` 和模型专用 tokenizer 仍未完全复刻
 
 ## 9. 验收口径（A5 完成标准）
 

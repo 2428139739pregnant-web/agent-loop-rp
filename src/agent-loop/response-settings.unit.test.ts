@@ -2,9 +2,11 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   buildResponseSettingsInstruction,
+  DEFAULT_MAX_CONTEXT_TOKENS,
   DEFAULT_RESPONSE_PERSPECTIVES,
   DEFAULT_RESPONSE_SETTINGS,
   normalizeResponseSettings,
+  responsePromptTokenBudget,
   responseMaxTokens,
 } from './response-settings.ts'
 
@@ -49,4 +51,16 @@ test('custom response ranges are bounded and ordered', () => {
   assert.equal(settings.perspective, 'card')
   assert.equal(settings.minChars, 20_000)
   assert.equal(settings.maxChars, 20_000)
+})
+
+test('response settings expose an ST-style context window and reserve output space', () => {
+  assert.equal(DEFAULT_RESPONSE_SETTINGS.maxContextTokens, DEFAULT_MAX_CONTEXT_TOKENS)
+  const settings = normalizeResponseSettings({
+    maxContextTokens: 8_192,
+    lengthPreset: 'custom',
+    minChars: 20,
+    maxChars: 200,
+  })
+  assert.equal(settings.maxContextTokens, 8_192)
+  assert.equal(responsePromptTokenBudget(settings), 7_752)
 })

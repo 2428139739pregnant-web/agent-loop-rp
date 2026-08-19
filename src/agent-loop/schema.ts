@@ -1,6 +1,7 @@
 /** Schemastery schemas for agent-loop data contracts. */
 
 import z from '@deepseek-ai/schemastery'
+import type { ResponsePromptBudgetStats } from './response-settings.ts'
 
 /** Structured intent extracted from one user turn. */
 export interface IntentOutput {
@@ -86,6 +87,8 @@ export interface ReplyResult {
   turn: number
   usedWorldbook: boolean
   usedContextSegmentation: boolean
+  /** PromptManager-style context trim diagnostics for trace/UI inspection. */
+  promptBudget?: ResponsePromptBudgetStats
 }
 
 export const IntentOutputSchema: z<IntentOutput> = z.object({

@@ -63,7 +63,7 @@
     /** @typedef {{name:string, length:number, overridden:boolean}} PromptSummary */
     /** @typedef {{provider:'openai'|'mock', baseUrl:string, apiKey:string, model:string}} ApiConfigView */
     /** @typedef {{id:string, name:string, instruction:string}} ResponsePerspectiveOptionView */
-    /** @typedef {{perspective:string, perspectives:ResponsePerspectiveOptionView[], lengthPreset:'card'|'short'|'medium'|'long'|'custom', minChars:number, maxChars:number}} ResponseSettingsView */
+    /** @typedef {{perspective:string, perspectives:ResponsePerspectiveOptionView[], lengthPreset:'card'|'short'|'medium'|'long'|'custom', minChars:number, maxChars:number, maxContextTokens:number}} ResponseSettingsView */
     /**
      * @typedef {Object} AgentTrace
      * @property {string} name
@@ -326,7 +326,7 @@
       const [error, setError] = useState(null)
       const [hasSavedKey, setHasSavedKey] = useState(false)
       const [responseSettings, setResponseSettings] = useState(/** @type {ResponseSettingsView} */({
-        perspective: 'card', perspectives: DEFAULT_RESPONSE_PERSPECTIVES, lengthPreset: 'card', minChars: 500, maxChars: 900,
+        perspective: 'card', perspectives: DEFAULT_RESPONSE_PERSPECTIVES, lengthPreset: 'card', minChars: 500, maxChars: 900, maxContextTokens: 32768,
       }))
       const [responseSaving, setResponseSaving] = useState(false)
       const responseSettingsLoaded = useRef(false)
@@ -641,6 +641,12 @@
               ),
             ),
           ),
+          h('div', { className: 'row', style: { marginTop: '6px' } },
+            h('label', { className: 'compact-field', style: { flex: 1 } }, '上下文上限（token）',
+              h('input', { type: 'number', min: 1024, max: 2000000, step: 1024, value: responseSettings.maxContextTokens || 32768, onChange: (e) => updateResponse('maxContextTokens', Number(e.target.value)) }),
+            ),
+          ),
+          h('div', { className: 'hint' }, '参考 ST 的 openai_max_context：总窗口包含正文输出；超出时保留系统/世界书/示例/当前输入，从最旧历史开始裁剪。'),
           responseSettings.lengthPreset === 'custom'
             ? h('div', { className: 'row', style: { marginTop: '6px' } },
                 h('label', { className: 'compact-field', style: { flex: 1 } }, '最少字数', h('input', { type: 'number', min: 20, max: 20000, step: 10, value: responseSettings.minChars, onChange: (e) => updateResponse('minChars', Number(e.target.value)) })),

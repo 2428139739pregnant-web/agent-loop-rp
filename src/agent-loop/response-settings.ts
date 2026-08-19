@@ -23,7 +23,23 @@ export interface ResponseGenerationSettings {
   /** Inclusive target range in Chinese characters; ignored when preset=card. */
   readonly minChars: number
   readonly maxChars: number
+  /** ST `openai_max_context` equivalent, including the output reservation. */
+  readonly maxContextTokens?: number
 }
+
+/** Diagnostics for the deterministic PromptManager-style history trim. */
+export interface ResponsePromptBudgetStats {
+  contextTokens: number
+  promptBudgetTokens: number
+  estimatedPromptTokens: number
+  droppedHistoryMessages: number
+  droppedHistoryTokens: number
+  keptHistoryMessages: number
+  overBudget: boolean
+}
+
+/** Default context window used when the provider/model does not advertise one. */
+export const DEFAULT_MAX_CONTEXT_TOKENS = 32_768
 
 export const RESPONSE_LENGTH_RANGES: Readonly<Record<Exclude<ResponseLengthPreset, 'card' | 'custom'>, { minChars: number; maxChars: number }>> = {
   short: { minChars: 200, maxChars: 500 },
@@ -65,6 +81,7 @@ export const DEFAULT_RESPONSE_SETTINGS: ResponseGenerationSettings = {
   lengthPreset: 'card',
   minChars: RESPONSE_LENGTH_RANGES.medium.minChars,
   maxChars: RESPONSE_LENGTH_RANGES.medium.maxChars,
+  maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
 }
 
 const LENGTH_PRESETS: readonly ResponseLengthPreset[] = ['card', 'short', 'medium', 'long', 'custom']
@@ -128,7 +145,13 @@ export function normalizeResponseSettings(
   const minChars = boundedInteger(source.minChars, fallback.minChars, 20, 20_000)
   const rawMaxChars = boundedInteger(source.maxChars, fallback.maxChars, 20, 20_000)
   const maxChars = Math.max(minChars, rawMaxChars)
-  return { perspective, perspectives, lengthPreset, minChars, maxChars }
+  const maxContextTokens = boundedInteger(
+    source.maxContextTokens,
+    fallback.maxContextTokens ?? DEFAULT_MAX_CONTEXT_TOKENS,
+    1_024,
+    2_000_000,
+  )
+  return { perspective, perspectives, lengthPreset, minChars, maxChars, maxContextTokens }
 }
 
 /** Build the compact instruction equivalent to ST's enabled POV/length blocks. */
@@ -151,4 +174,15 @@ export function responseMaxTokens(settings: ResponseGenerationSettings): number 
   // Chinese prose is commonly close to one token per character, while HTML,
   // punctuation and markdown can cost more. Leave a small formatting margin.
   return Math.min(12_000, Math.max(256, Math.ceil(settings.maxChars * 22 / 10)))
+}
+
+/**
+ * Return the prompt-side budget from ST's context-window setting. The window
+ * includes the completion, so reserve the configured response cap when one
+ * exists and a conservative 2k otherwise.
+ */
+export function responsePromptTokenBudget(settings: ResponseGenerationSettings): number {
+  const context = settings.maxContextTokens ?? DEFAULT_MAX_CONTEXT_TOKENS
+  const outputReserve = responseMaxTokens(settings) ?? 2_048
+  return Math.max(512, context - outputReserve)
 }

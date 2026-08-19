@@ -5,6 +5,7 @@ import {
   buildContextBlock,
   buildContextMessages,
   applySillyTavernDepthPrompts,
+  fitResponsePromptToBudget,
   buildWorldbookBlock,
   constantWorldbookDoc,
   parseSillyTavernExampleMessages,
@@ -184,6 +185,34 @@ test('applySillyTavernDepthPrompts inserts atDepth prompts from the newest messa
     { content: 'depth-1', depth: 1, role: 'system', order: 2 },
   ])
   assert.deepEqual(messages.map(message => message.content), ['u1', 'a1', 'depth-1', 'current', 'depth-0'])
+})
+
+test('fitResponsePromptToBudget trims oldest history pairs but keeps fixed layers and current input', () => {
+  const history: ChatMessage[] = [
+    { role: 'user', content: 'OLD_USER '.repeat(260) },
+    { role: 'assistant', content: 'OLD_ASSISTANT '.repeat(260) },
+    { role: 'user', content: 'KEEP_USER' },
+  ]
+  const fitted = fitResponsePromptToBudget(
+    history,
+    {
+      perspective: 'card',
+      perspectives: DEFAULT_RESPONSE_PERSPECTIVES,
+      lengthPreset: 'custom',
+      minChars: 20,
+      maxChars: 20,
+      maxContextTokens: 1_024,
+    },
+    (candidate) => [
+      { role: 'system', content: 'FIXED_SYSTEM' },
+      ...candidate,
+    ],
+  )
+  assert.ok(fitted.stats.droppedHistoryMessages >= 2)
+  assert.ok(fitted.messages.some(message => message.content === 'FIXED_SYSTEM'))
+  assert.ok(fitted.messages.some(message => message.content === 'KEEP_USER'))
+  assert.ok(!fitted.messages.some(message => message.content.includes('OLD_USER')))
+  assert.ok(!fitted.messages.some(message => message.content.includes('OLD_ASSISTANT')))
 })
 
 // ─── responseAgent.run (integration) ───────────────────────────────────────
@@ -418,6 +447,45 @@ test('responseAgent uses an ST-style message tree when the response template opt
   assert.ok(captured.some(message => message.content === 'old assistant'))
   assert.equal(captured.findLast(message => message.content === 'current')?.role, 'user')
   assert.equal(captured.at(-1)?.content, 'POST_HISTORY')
+})
+
+test('responseAgent reports and applies the context budget after all injections are assembled', async () => {
+  let captured: ChatMessage[] = []
+  const provider: LLMProvider = {
+    name: 'spy',
+    async chat(messages) {
+      captured = messages
+      return { content: 'r' }
+    },
+  }
+  const ctx = makeCtx({
+    provider,
+    promptBody: `${ST_MESSAGE_TREE_MARKER}\nCONTROL`,
+    history: [
+      { role: 'user', content: 'OLD_USER '.repeat(260) },
+      { role: 'assistant', content: 'OLD_ASSISTANT '.repeat(260) },
+      { role: 'user', content: 'current' },
+    ],
+  })
+  const result = await responseAgent.run({
+    intent: makeIntent(),
+    worldbook: { matches: [] },
+    contextSegmentation: { segments: [{ id: 1, mode: 'full' }] },
+    userInput: 'current',
+    character: makeCharacter(),
+    responseSettings: {
+      perspective: 'card',
+      perspectives: DEFAULT_RESPONSE_PERSPECTIVES,
+      lengthPreset: 'custom',
+      minChars: 20,
+      maxChars: 20,
+      maxContextTokens: 1_024,
+    },
+  }, ctx)
+  assert.ok((result.promptBudget?.droppedHistoryMessages ?? 0) >= 2)
+  assert.ok(captured.some(message => message.content === 'current'))
+  assert.ok(!captured.some(message => message.content.includes('OLD_USER')))
+  assert.ok(!captured.some(message => message.content.includes('OLD_ASSISTANT')))
 })
 
 test('responseAgent.run sets usedWorldbook when matches non-empty', async () => {
