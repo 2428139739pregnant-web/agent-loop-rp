@@ -179,6 +179,9 @@ export interface ImportedLorebookEntry {
    * 本项目用它做 constant 条目 → 三文档 的简化映射(见 docs/st-adaptation-research.md §8)。
    */
   readonly stPosition?: number
+  /** ST at-depth insertion metadata; absent means the ST default depth/role. */
+  readonly depth?: number
+  readonly role?: 'system' | 'user' | 'assistant'
   /**
    * SillyTavern 激活概率 %(默认 100)。本项目语义:绿灯条目由 2.1 LLM agent
    * 选中后,由代码按 `Math.random()*100 <= probability` 掷骰收尾(ST 同款公式,

@@ -198,13 +198,14 @@ test('function-valued injection filters are evaluated at generation preparation'
   const frame = createFrame()
   frame.window.__agentRpCurrentScriptId = 'script-filter'
   let allowed = false
+  let seenPrompt = null
   frame.window.injectPrompts([{
     id: 'filter-prompt',
     position: 'in_chat',
     depth: 0,
     role: 'system',
     content: 'FILTERED',
-    filter: async () => allowed,
+    filter: async prompt => { seenPrompt = prompt; return allowed },
   }])
 
   frame.window.dispatchEvent({
@@ -215,6 +216,9 @@ test('function-valued injection filters are evaluated at generation preparation'
   await new Promise(resolve => setImmediate(resolve))
   let result = messagesOf(frame, 'agent-rp-card-injection-filter-result').at(-1)
   assert.deepEqual(plain(result?.filters), [{ scriptId: 'script-filter', promptId: 'filter-prompt', enabled: false }])
+  assert.deepEqual(plain(seenPrompt), {
+    id: 'filter-prompt', position: 'in_chat', depth: 0, role: 'system', content: 'FILTERED',
+  })
 
   allowed = true
   frame.window.dispatchEvent({

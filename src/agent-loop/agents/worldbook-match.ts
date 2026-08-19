@@ -234,6 +234,7 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
         ? { recursiveContent: macro(ctx.worldbook.getContent(e.path) ?? '') }
         : {}),
       ...(e.position === undefined ? {} : { position: e.position }),
+      ...(e.depth === undefined ? {} : { depth: e.depth }),
       ...(e.role === undefined ? {} : { role: e.role }),
       ...(e.hasDecorators === undefined ? {} : { hasDecorators: e.hasDecorators }),
       order: e.order,

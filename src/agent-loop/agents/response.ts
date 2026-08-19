@@ -73,6 +73,8 @@ const NO_META = '(无)'
 const NO_EXAMPLE_DIALOGUE = '(无示例对话)'
 const NO_CARD_SYSTEM_PROMPT = '(卡片未提供 system_prompt)'
 const NO_POST_HISTORY = '(无回复后指令)'
+/** Marker opt-in for the ST PromptManager-style message tree. */
+export const ST_MESSAGE_TREE_MARKER = '<!-- agent-rp:st-message-tree -->'
 
 function regexCharacter(card: PreprocessedCharacter): {
   readonly name: string
@@ -299,6 +301,111 @@ export function buildContextMessages(
   return messages
 }
 
+/** A prompt inserted into the reversed ST chat-history surface. */
+export interface STDepthPrompt {
+  readonly content: string
+  readonly depth: number
+  readonly role: 'system' | 'user' | 'assistant'
+  readonly order: number
+}
+
+/**
+ * Parse a Character Card `mes_example` using SillyTavern's line-oriented
+ * `<START>`/`name:` convention. ST sends each example line as a separate
+ * system-role message with the speaker name stripped from the content; the
+ * optional `name` is retained for providers that support it.
+ */
+export function parseSillyTavernExampleMessages(
+  raw: string,
+  userName: string | null | undefined,
+  charName: string,
+): ChatMessage[] {
+  const normalized = raw.replace(/\r/gu, '')
+  const blocks = /^\s*<START>\s*$/imu.test(normalized)
+    ? normalized.split(/^\s*<START>\s*$/gimu)
+    : [normalized]
+  const labels = [...new Set([
+    userName?.trim() || '{{user}}',
+    charName.trim() || '{{char}}',
+    '{{user}}',
+    '{{char}}',
+  ].filter(Boolean))]
+  const result: ChatMessage[] = []
+  for (const block of blocks) {
+    const lines = block.split('\n')
+    let current: { label: string; lines: string[] } | undefined
+    let sawSpeaker = false
+    const flush = (): void => {
+      if (current === undefined) return
+      const content = current.lines.join('\n').trim()
+      if (content.length > 0) result.push({ role: 'system', content, name: current.label })
+      current = undefined
+    }
+    for (const line of lines) {
+      const label = labels.find(candidate => line.startsWith(`${candidate}:`))
+      if (label !== undefined) {
+        flush()
+        sawSpeaker = true
+        current = { label, lines: [line.slice(label.length + 1).replace(/^\s+/u, '')] }
+      } else if (current !== undefined) {
+        current.lines.push(line)
+      }
+    }
+    flush()
+    // A malformed/non-labelled example should remain visible instead of
+    // silently disappearing. ST's parser normally gets labelled blocks, but
+    // cards in the wild sometimes provide a prose-only example.
+    if (!sawSpeaker && block.trim().length > 0) {
+      result.push({ role: 'system', content: block.trim() })
+    }
+  }
+  return result
+}
+
+/**
+ * Apply ST's at-depth insertion rule to an oldest-to-newest message array.
+ * Prompts are grouped by depth, order (descending), then system/user/
+ * assistant role, inserted into the reversed history, and reversed back.
+ */
+export function applySillyTavernDepthPrompts(
+  baseMessages: readonly ChatMessage[],
+  prompts: readonly STDepthPrompt[],
+): ChatMessage[] {
+  const byDepth = new Map<number, STDepthPrompt[]>()
+  for (const prompt of prompts) {
+    if (prompt.content.trim().length === 0) continue
+    const depth = Math.max(0, Math.trunc(prompt.depth))
+    const bucket = byDepth.get(depth) ?? []
+    bucket.push(prompt)
+    byDepth.set(depth, bucket)
+  }
+  if (byDepth.size === 0) return baseMessages.map(message => ({ ...message }))
+  const messages = baseMessages.map(message => ({ ...message })).reverse()
+  let totalInsertedMessages = 0
+  const roleOrder: readonly STDepthPrompt['role'][] = ['system', 'user', 'assistant']
+  for (const depth of [...byDepth.keys()].sort((left, right) => left - right)) {
+    const depthPrompts = byDepth.get(depth) ?? []
+    const orders = [...new Set(depthPrompts.map(prompt => prompt.order))].sort((left, right) => right - left)
+    const roleMessages: ChatMessage[] = []
+    for (const order of orders) {
+      const orderPrompts = depthPrompts.filter(prompt => prompt.order === order)
+      for (const role of roleOrder) {
+        const content = orderPrompts
+          .filter(prompt => prompt.role === role)
+          .map(prompt => prompt.content.trim())
+          .filter(Boolean)
+          .join('\n')
+        if (content.length > 0) roleMessages.push({ role, content })
+      }
+    }
+    if (roleMessages.length === 0) continue
+    const index = Math.min(depth + totalInsertedMessages, messages.length)
+    messages.splice(index, 0, ...roleMessages)
+    totalInsertedMessages += roleMessages.length
+  }
+  return messages.reverse()
+}
+
 /**
  * Render worldbook matches as a markdown block, sorted by (order asc,
  * weight desc). 2.1 already sorts, this re-sorts defensively in case the
@@ -403,6 +510,7 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     )
     // 1. Load + render the system prompt.
     const template = renderEjs(ctx, await ctx.prompts.load('response'))
+    const useStMessageTree = template.includes(ST_MESSAGE_TREE_MARKER)
     const history = ctx.session.getHistory(ctx.sessionId)
     const currentMvu = ctx.statData === undefined
       ? readMvuStateFromMessages(input.character.raw, history)
@@ -474,30 +582,48 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     // 旧存档/旧客户端可能不带这些字段(undefined),兜底空串 → 占位文案。
     const mesExample = macro(input.character.mesExample ?? '')
     const cardSystemPrompt = macro(input.character.systemPrompt ?? '')
-    const postHistoryInstructions = macro(input.character.postHistoryInstructions ?? '')
-      + formatWorldbookFragments(
-        worldbookPlacement.beforeAuthorNote,
-        input.character,
-        userName ?? undefined,
-        '世界书 Before Author Note',
-      )
-      + formatWorldbookFragments(
-        worldbookPlacement.afterAuthorNote,
-        input.character,
-        userName ?? undefined,
-        '世界书 After Author Note',
-      )
-    const exampleDialogue = formatWorldbookFragments(
+    const worldbookBeforeCharacter = formatWorldbookFragments(
+      worldbookPlacement.beforeCharacter,
+      input.character,
+      userName ?? undefined,
+      '世界书 Before Character Definition',
+    )
+    const worldbookAfterCharacter = formatWorldbookFragments(
+      worldbookPlacement.afterCharacter,
+      input.character,
+      userName ?? undefined,
+      '世界书 After Character Definition',
+    )
+    const worldbookBeforeExamples = formatWorldbookFragments(
       worldbookPlacement.beforeExamples,
       input.character,
       userName ?? undefined,
       '世界书 Before Example Messages',
-    ) + (mesExample.length > 0 ? mesExample : NO_EXAMPLE_DIALOGUE) + formatWorldbookFragments(
+    )
+    const worldbookAfterExamples = formatWorldbookFragments(
       worldbookPlacement.afterExamples,
       input.character,
       userName ?? undefined,
       '世界书 After Example Messages',
     )
+    const worldbookBeforeAuthorNote = formatWorldbookFragments(
+      worldbookPlacement.beforeAuthorNote,
+      input.character,
+      userName ?? undefined,
+      '世界书 Before Author Note',
+    )
+    const worldbookAfterAuthorNote = formatWorldbookFragments(
+      worldbookPlacement.afterAuthorNote,
+      input.character,
+      userName ?? undefined,
+      '世界书 After Author Note',
+    )
+    const postHistoryInstructions = macro(input.character.postHistoryInstructions ?? '')
+      + worldbookBeforeAuthorNote
+      + worldbookAfterAuthorNote
+    const exampleDialogue = worldbookBeforeExamples
+      + (mesExample.length > 0 ? mesExample : NO_EXAMPLE_DIALOGUE)
+      + worldbookAfterExamples
     const atDepthWorldbook = (input.character.atDepthLorebookEntries ?? []).map(entry =>
       `### ${entry.name ?? `世界书 #${entry.insertionOrder}`} (atDepth=${entry.stPosition ?? 4})\n${macro(entry.content)}`,
     )
@@ -508,18 +634,8 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     const responseSettingsInstruction = buildResponseSettingsInstruction(responseSettings)
     const renderedSystemPrompt = renderTemplate(template, {
       character_name: macro(input.character.name),
-      persona: macro(input.character.persona) + constantBlocks.persona + formatWorldbookFragments(
-        worldbookPlacement.beforeCharacter,
-        input.character,
-        userName ?? undefined,
-        '世界书 Before Character Definition',
-      ),
-      worldview: macro(input.character.worldview) + constantBlocks.worldview + formatWorldbookFragments(
-        worldbookPlacement.afterCharacter,
-        input.character,
-        userName ?? undefined,
-        '世界书 After Character Definition',
-      ),
+      persona: macro(input.character.persona) + constantBlocks.persona + worldbookBeforeCharacter,
+      worldview: macro(input.character.worldview) + constantBlocks.worldview + worldbookAfterCharacter,
       style: macro(input.character.style) + constantBlocks.style,
       at_depth_worldbook: atDepthWorldbook.concat(dynamicAtDepth).join('\n\n') || '(无 atDepth 条目)',
       mvu_state: statData === undefined ? '(未启用 MVU)' : JSON.stringify(statData, null, 2),
@@ -531,6 +647,12 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
       meta_commands: metaCommandsBlock,
       involved_characters: involvedBlock,
       keywords: input.intent.keywords.join(', '),
+      intent_context: [
+        `用户叙述：${input.intent.userNarration}`,
+        `元指令：${metaCommandsBlock}`,
+        `涉及角色：${involvedBlock}`,
+        `关键词：${input.intent.keywords.join(', ') || NO_META}`,
+      ].join('\n'),
       worldbook_block: macro(worldbookBlock) || NO_WORLDBOOK,
       context_block: contextBlock || NO_HISTORY,
       response_settings: responseSettingsInstruction,
@@ -552,11 +674,51 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     // 2. Apply ST-Prompt-Template prompt injections to the exact message array
     //    that this project sends. This is deterministic and happens before the
     //    one existing response call; it never creates a second LLM stage.
-    const baseMessages: ChatMessage[] = [
-      { role: 'system', content: systemPrompt },
-      ...contextMessages,
-      { role: 'user', content: promptUserInput },
+    const depthPrompts: STDepthPrompt[] = [
+      ...(input.character.atDepthLorebookEntries ?? []).map(entry => ({
+        content: `### ${entry.name ?? `世界书 #${entry.insertionOrder}`}\n${macro(entry.content)}`,
+        depth: typeof entry.depth === 'number' ? entry.depth : 4,
+        role: entry.role ?? 'system',
+        order: entry.insertionOrder,
+      })),
+      ...worldbookPlacement.atDepth.map(entry => ({
+        content: `### ${entry.path} (atDepth=${entry.depth ?? 4}, order=${entry.order})\n${macro(entry.content)}`,
+        depth: entry.depth ?? 4,
+        role: entry.role ?? 'system',
+        order: entry.order,
+      })),
     ]
+    const historyAndCurrent = useStMessageTree
+      ? applySillyTavernDepthPrompts([
+        ...contextMessages,
+        { role: 'user', content: promptUserInput },
+      ], depthPrompts)
+      : [
+        ...contextMessages,
+        { role: 'user' as const, content: promptUserInput },
+      ]
+    const structuredMessages: ChatMessage[] = useStMessageTree
+      ? [
+        { role: 'system', content: renderedSystemPrompt.replace(ST_MESSAGE_TREE_MARKER, '').trim() },
+        ...(worldbookBeforeCharacter.trim() ? [{ role: 'system' as const, content: worldbookBeforeCharacter.trim() }] : []),
+        { role: 'system', content: `角色名：${macro(input.character.name)}\n\n${macro(input.character.persona) + constantBlocks.persona}` },
+        ...(worldbookAfterCharacter.trim() ? [{ role: 'system' as const, content: worldbookAfterCharacter.trim() }] : []),
+        { role: 'system', content: macro(input.character.style) + constantBlocks.style },
+        { role: 'system', content: macro(input.character.worldview) + constantBlocks.worldview },
+        ...(macro(userPersonaBlock).trim() ? [{ role: 'system' as const, content: `用户人设：\n${macro(userPersonaBlock).trim()}` }] : []),
+        ...(worldbookBlock.trim() ? [{ role: 'system' as const, content: `激活的世界书条目：\n${macro(worldbookBlock).trim()}` }] : []),
+        ...(worldbookBeforeExamples.trim() ? [{ role: 'system' as const, content: worldbookBeforeExamples.trim() }] : []),
+        ...(mesExample.trim().length > 0 ? [{ role: 'system' as const, content: '[Example Chat]' }] : []),
+        ...parseSillyTavernExampleMessages(mesExample, userName, charName),
+        ...(worldbookAfterExamples.trim() ? [{ role: 'system' as const, content: worldbookAfterExamples.trim() }] : []),
+        ...historyAndCurrent,
+        ...(postHistoryInstructions.trim() ? [{ role: 'system' as const, content: postHistoryInstructions.trim() }] : []),
+      ]
+      : [
+        { role: 'system', content: systemPrompt },
+        ...historyAndCurrent,
+      ]
+    const baseMessages = structuredMessages
     const promptTemplateMessages = applyPromptTemplateInjections(
       baseMessages,
       input.worldbook.plugin ?? {

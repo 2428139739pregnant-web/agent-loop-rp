@@ -4,11 +4,14 @@ import {
   buildConstantWorldbookBlocks,
   buildContextBlock,
   buildContextMessages,
+  applySillyTavernDepthPrompts,
   buildWorldbookBlock,
   constantWorldbookDoc,
+  parseSillyTavernExampleMessages,
   renderTemplate,
   responseAgent,
   splitWorldbookMatches,
+  ST_MESSAGE_TREE_MARKER,
   type ResponseInput,
 } from './response.ts'
 import { DEFAULT_RESPONSE_PERSPECTIVES } from '../response-settings.ts'
@@ -156,6 +159,31 @@ test('buildContextMessages preserves ST user/assistant roles and omits dropped t
     ['user', 'u1'],
     ['assistant', 'A1'],
   ])
+})
+
+test('parseSillyTavernExampleMessages follows ST START and speaker parsing', () => {
+  const messages = parseSillyTavernExampleMessages(
+    '<START>\n小明: 你好\n\n莉娜: 欢迎。\n<START>\n小明: 第二段',
+    '小明',
+    '莉娜',
+  )
+  assert.deepEqual(messages, [
+    { role: 'system', content: '你好', name: '小明' },
+    { role: 'system', content: '欢迎。', name: '莉娜' },
+    { role: 'system', content: '第二段', name: '小明' },
+  ])
+})
+
+test('applySillyTavernDepthPrompts inserts atDepth prompts from the newest message boundary', () => {
+  const messages = applySillyTavernDepthPrompts([
+    { role: 'user', content: 'u1' },
+    { role: 'assistant', content: 'a1' },
+    { role: 'user', content: 'current' },
+  ], [
+    { content: 'depth-0', depth: 0, role: 'system', order: 1 },
+    { content: 'depth-1', depth: 1, role: 'system', order: 2 },
+  ])
+  assert.deepEqual(messages.map(message => message.content), ['u1', 'a1', 'depth-1', 'current', 'depth-0'])
 })
 
 // ─── responseAgent.run (integration) ───────────────────────────────────────
@@ -350,6 +378,46 @@ test('responseAgent sends selected context as a real chatHistory message layer',
     ['user', 'current'],
   ])
   assert.equal(captured.filter(message => message.content === 'current').length, 1)
+})
+
+test('responseAgent uses an ST-style message tree when the response template opts in', async () => {
+  let captured: ChatMessage[] = []
+  const provider: LLMProvider = {
+    name: 'spy',
+    async chat(messages) {
+      captured = messages
+      return { content: 'r' }
+    },
+  }
+  const ctx = makeCtx({
+    provider,
+    promptBody: `${ST_MESSAGE_TREE_MARKER}\nCONTROL {{card_system_prompt}}`,
+    history: [
+      { role: 'user', content: 'old user' },
+      { role: 'assistant', content: 'old assistant' },
+      { role: 'user', content: 'current' },
+    ],
+  })
+  // makeCtx installs its own loader; replace the body is enough for this test.
+  await responseAgent.run({
+    intent: makeIntent({ metaCommands: ['加快节奏'] }),
+    worldbook: { matches: [{ path: 'depth', order: 1, weight: 0, content: 'DEPTH', position: 4, depth: 1 }] },
+    contextSegmentation: { segments: [{ id: 1, mode: 'full' }] },
+    userInput: 'current',
+    character: makeCharacter({
+      systemPrompt: 'CARD_SYSTEM',
+      mesExample: '<START>\n{{user}}: 你好\n{{char}}: 欢迎。',
+      postHistoryInstructions: 'POST_HISTORY',
+    }),
+  }, ctx)
+  assert.equal(captured[0]?.role, 'system')
+  assert.match(captured[0]?.content ?? '', /CONTROL CARD_SYSTEM/u)
+  assert.ok(captured.some(message => message.content === '[Example Chat]'))
+  assert.ok(captured.some(message => message.name === 'Lina' && message.content === '欢迎。'))
+  assert.ok(captured.some(message => message.content.includes('DEPTH')))
+  assert.ok(captured.some(message => message.content === 'old assistant'))
+  assert.equal(captured.findLast(message => message.content === 'current')?.role, 'user')
+  assert.equal(captured.at(-1)?.content, 'POST_HISTORY')
 })
 
 test('responseAgent.run sets usedWorldbook when matches non-empty', async () => {

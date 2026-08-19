@@ -96,7 +96,7 @@
 
 ### 4.1 当前 response 的位置分桶
 
-本项目 response 阶段不会把激活结果重新压成一个段落，而是先由 `splitWorldbookMatches` 分为 `beforeCharacter`、`afterCharacter`、`beforeExamples`、`afterExamples`、`beforeAuthorNote`、`afterAuthorNote`、`atDepth`、`outlet` 和 `unplaced` 九个桶；桶内按 `order` 升序、`weight` 降序（再按 path）稳定排序。当前模板锚点如下：
+本项目 response 阶段先由 `splitWorldbookMatches` 分为 `beforeCharacter`、`afterCharacter`、`beforeExamples`、`afterExamples`、`beforeAuthorNote`、`afterAuthorNote`、`atDepth`、`outlet` 和 `unplaced` 九个桶；桶内按 `order` 升序、`weight` 降序（再按 path）稳定排序。默认 `response.md` 带有 `agent-rp:st-message-tree` 标记，随后按 ST PromptManager 风格组装真实消息层；旧版自定义 response 模板没有该标记时仍保留扁平模板兼容路径。当前模板锚点如下：
 
 | ST position | 本项目桶 | response 锚点 |
 | ---: | --- | --- |
@@ -104,12 +104,12 @@
 | 1 | `afterCharacter` | worldview 段 |
 | 2 | `beforeExamples` | `mes_example` 前 |
 | 3 | `afterExamples` | `mes_example` 后 |
-| 4 | `atDepth` | `at_depth_worldbook` 段 |
+| 4 | `atDepth` | 按 `depth`、`order`、`role` 插入聊天历史消息数组 |
 | 5 | `beforeAuthorNote` | `post_history_instructions` 段 |
 | 6 | `afterAuthorNote` | `post_history_instructions` 段 |
 | 7 | `outlet` | 与 `unplaced` 合并进旧 `worldbook_block` |
 
-没有受支持 position 的条目进入 `unplaced`。这些是 response template 的稳定锚点，不是 ST 的真实消息数组：当前没有独立 Author's Note/outlet host 对象，`atDepth` 是标记段而非真实消息树深度插入。独立世界书的 constant 条目走另一条简化映射：`0 → persona`、`1 → worldview`、`2–7 → style`。
+没有受支持 position 的条目进入 `unplaced`。默认消息树中，角色卡 `mes_example` 会解析成带 `name` 的独立 system 消息，并在示例前加入 `[Example Chat]` 标记；`post_history_instructions` 位于聊天历史之后。当前没有独立 Author's Note/outlet host 对象，position 5/6 仍合并到 post-history，position 7 与 unplaced 合并为激活世界书段。独立世界书的 constant 条目走另一条简化映射：`0 → persona`、`1 → worldview`、`2–7 → style`。
 
 ## 5. 角色卡 V2/V3 字段与消费方式
 
@@ -165,10 +165,10 @@
 | ST-Prompt-Template 特殊条目 | `worldbook-plugin.ts` 在本地生成结构化计划：`@INJECT pos/target/regex` 和 `[GENERATE:BEFORE/AFTER/idx/REGEX]` 修改正文 agent 的既有消息数组；`[RENDER:BEFORE/AFTER]` 只生成 display-only 结果；常用 `@@generate_*`/`@@render_*` 作为别名。该 lane 不调用 LLM，未覆盖的变量初始化/复杂 decorator 保留并记录 skipped |
 | World Info parser mapping | 角色卡条目从 `extensions.selectiveLogic/probability/useProbability/position/scan_depth/exclude_recursion/prevent_recursion/delay_until_recursion`（并兼容直接字段）归一化；独立 World Info 从 `entries` 字典读取，兼容顶层 `recursive`/`recursiveScanning`，将 `selectiveLogic` 数字/枚举名、禁用、概率和 position 映射到统一模型。未知字段不进入执行模型 |
 | recursive scanning | `src/import/lorebook.ts` 的 deterministic inspector 已执行 `recursiveScanning`、entry `scanDepth`、累计递归 buffer、`excludeRecursion`、`preventRecursion` 和 `delayUntilRecursion`；递归控制不再写成 inert。它不是跨轮 timed-effects 状态机 |
-| position / response buckets | `response.ts` 先将匹配结果分为 `beforeCharacter`、`afterCharacter`、`beforeExamples`、`afterExamples`、`beforeAuthorNote`、`afterAuthorNote`、`atDepth`、`outlet`、`unplaced`。这些桶分别接到 persona/worldview、`mes_example` 前后、post-history、at-depth 标记块和旧 `worldbook_block`；`outlet` 与 `unplaced` 在最终模板中合并 |
+| position / response buckets | `response.ts` 先将匹配结果分为 `beforeCharacter`、`afterCharacter`、`beforeExamples`、`afterExamples`、`beforeAuthorNote`、`afterAuthorNote`、`atDepth`、`outlet`、`unplaced`。默认 ST 消息树把这些桶分别接到角色定义、`mes_example` 前后、聊天历史深度插入、post-history 和激活世界书消息层；旧自定义模板仍使用兼容锚点 |
 | order 排序 | 匹配条目桶内按 `order` 升序、`weight` 降序和 path 稳定排序；独立 constant 文档块保留 ST 风格按 `order` 降序 |
-| mes_example | preprocess 提取 `<START>` 分组后的 `mes_example`，response 在示例对话锚点中渲染；position 2/3 条目包在其前后 |
-| system_prompt / post_history_instructions | preprocess 提取；response 组装时 system_prompt 前置、post_history 追加在历史之后（宏替换） |
+| mes_example | preprocess 提取 `<START>` 分组后的 `mes_example`，response 按 ST 的 speaker 行解析成独立 system 消息并保留 `name`，示例前加入 `[Example Chat]`；position 2/3 条目包在其前后 |
+| system_prompt / post_history_instructions | preprocess 提取；默认消息树中 system_prompt 进入控制 system 消息，post_history 追加在历史之后（宏替换） |
 | {{user}}/{{char}} 宏 | 全链路替换：卡文本、世界书 content 与 key、开场白。与 A3 的 persona 联动（userPersona.name） |
 | probability / scanDepth / caseSensitive / matchWholeWords / useRegex / selectiveLogic | 参数进入确定性 ST lane 或统一 `ImportedLorebookEntry`/`WorldbookEntry`；概率在代码层收尾，regex 走隔离 deterministic lane，不能让 agent 重解释原生 regex 条目 |
 | 世界书级 scan_depth | 世界书匹配设置默认扫描最近 2 条消息；角色卡/独立书的 parser 另保留书级递归开关和已支持的 entry-level override |
@@ -178,7 +178,7 @@
 
 ### 可选（后置）
 
-- token 预算（budget/cap/ignoreBudget）—— 本项目上下文压力小，可先只做条目数上限
+- token 预算（budget/cap/ignoreBudget）—— 当前仍未完全复刻 ST PromptManager 的 tokenizer、budget_cap 和逐条截断；后续应在消息树之上实现确定性的历史裁剪，并在 trace 中报告被裁剪消息
 - 更复杂的 timed-effects 边界——基础 `sticky/cooldown/delay` 已实现；仍需继续对齐 ST 的所有 chat_metadata 分支编辑细节
 - 包含组（`group/groupOverride/groupWeight/useGroupScoring`）——已在 matcher 中按确定性 ST 管道执行；仍需补齐与完整 Host 递归/预算生命周期的所有边界
 - vectorized 紫灯 —— 跳过（无向量库）
@@ -189,10 +189,10 @@
 ### 与 ST 的明确差异（要写进代码注释）
 
 1. 普通绿灯匹配由世界书模式决定：strict 只走 ST，enhanced 为 ST + agent，native 只走 agent；Resolver 纯代码合并，probability 掷骰与宏替换在代码层收尾
-2. position 2/3/5/6/7 并入文档尾部，不精确复刻 ST 的插入点
+2. 默认 response 消息树已真实保留 position 2/3 的示例前后层、position 4 的 atDepth 深度插入和 post-history 顺序；position 5/6/7 仍因缺少独立 Author's Note/outlet host 而采用兼容合并
 3. 基础 sticky/cooldown/delay 定时效应、包含组和六个全局扫描开关已支持；向量匹配和部分 chat_metadata/分支编辑边界暂不支持，递归扫描仍只实现确定性 entry/content 语义
 4. Tavern Helper 的任意函数型 `filter` 不能跨持久化 iframe 快照执行；当前宿主只保存并使用已解析的布尔筛选结果
-5. token 计数用字符数近似（无 tokenizer 依赖）
+5. token 预算尚未完全复刻 ST PromptManager 的 `maxContext`/`budget_cap`/`ignoreBudget` 组合；当前保留 response `max_tokens` 和字符数近似统计
 
 ## 9. 验收口径（A5 完成标准）
 

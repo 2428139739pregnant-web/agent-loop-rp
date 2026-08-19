@@ -75,6 +75,8 @@ export interface WorldbookEntry {
   useProbability?: boolean
   /** ST position 枚举原值(0=before_char,1=after_char,2-7 其他)。蓝灯常驻注入的文档映射用。 */
   position?: number
+  /** ST at-depth insertion depth, when the source entry supplies one. */
+  depth?: number
   /** Optional message role supplied by Tavern Helper's position descriptor. */
   role?: 'system' | 'user' | 'assistant'
   /** ST entry-level scan depth override. */

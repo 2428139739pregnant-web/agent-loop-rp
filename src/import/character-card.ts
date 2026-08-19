@@ -354,6 +354,9 @@ function parseLorebookEntry(value: JsonValue, index: number, version: CharacterC
   // ST position 枚举原值:extensions.position ?? (position==='before_char' ? 0 : 1)
   // (换算与 ST world-info.js:5517 一致)。
   const stPosition = lenientNumber(extensions.position) ?? (position === 'before_char' ? 0 : 1)
+  const depth = lenientNumber(extensions.depth ?? entry.depth)
+  const roleRaw = extensions.role ?? entry.role
+  const role = roleRaw === 'user' || roleRaw === 'assistant' || roleRaw === 'system' ? roleRaw : undefined
   return {
     sourceId: sourceIdValue === undefined || sourceIdValue === null ? String(index) : String(sourceIdValue),
     ...(name === undefined ? {} : { name }),
@@ -387,6 +390,8 @@ function parseLorebookEntry(value: JsonValue, index: number, version: CharacterC
     ...(matchCreatorNotes === undefined ? {} : { matchCreatorNotes }),
     position,
     stPosition,
+    ...(depth === undefined ? {} : { depth }),
+    ...(role === undefined ? {} : { role }),
     ...(probability === undefined ? {} : { probability }),
     ...(useProbability === undefined ? {} : { useProbability }),
     ...(priority === undefined ? {} : { priority }),

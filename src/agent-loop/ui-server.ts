@@ -4467,6 +4467,11 @@ function parseWorldInfoJson(json: string): ImportedLorebook {
       : stPositionRaw === 'before_char' ? 0
       : stPositionRaw === 'after_char' ? 1
       : undefined
+    const depthRaw = ext?.depth ?? r.depth
+    const depth = typeof depthRaw === 'number' && Number.isFinite(depthRaw)
+      ? Math.max(0, Math.trunc(depthRaw)) : undefined
+    const roleRaw = ext?.role ?? r.role
+    const role = roleRaw === 'user' || roleRaw === 'assistant' || roleRaw === 'system' ? roleRaw : undefined
     // name 优先用 comment(酒馆里 comment 是名字),其次用第一个 key
     const name = comment ?? (keys.length > 0 ? keys[0] : `未命名 ${uid}`)
     const entry: import('../import/types.ts').ImportedLorebookEntry = {
@@ -4485,6 +4490,8 @@ function parseWorldInfoJson(json: string): ImportedLorebook {
       secondaryLogic,
       position,
       ...(stPosition !== undefined ? { stPosition } : {}),
+      ...(depth === undefined ? {} : { depth }),
+      ...(role === undefined ? {} : { role }),
       ...(excludeRecursion === undefined ? {} : { excludeRecursion }),
       ...(preventRecursion === undefined ? {} : { preventRecursion }),
       ...(delayUntilRecursion === undefined ? {} : { delayUntilRecursion }),
@@ -4697,6 +4704,8 @@ function lorebookEntryToWorldbookEntry(
     probability: e.probability ?? 100,
     useProbability: e.useProbability ?? true,
     position: e.stPosition ?? (e.position === 'before_char' ? 0 : 1),
+    ...(e.depth === undefined ? {} : { depth: e.depth }),
+    ...(e.role === undefined ? {} : { role: e.role }),
     ...(e.scanDepth === undefined ? {} : { scanDepth: e.scanDepth }),
     recursiveScanning: recursion.recursiveScanning,
     recursiveBookId: recursion.recursiveBookId,
@@ -4773,6 +4782,8 @@ function tavernHelperWorldbookEntryToWorldbookEntry(bookName: string, entry: Tav
     useProbability: true,
     position,
     role: entry.position.role,
+    ...(typeof entry.position.depth === 'number' && Number.isFinite(entry.position.depth)
+      ? { depth: Math.max(0, Math.trunc(entry.position.depth)) } : {}),
     ...(entry.strategy.scan_depth === 'same_as_global' ? {} : { scanDepth: entry.strategy.scan_depth }),
     ...(entry.effect.sticky === null ? {} : { sticky: entry.effect.sticky }),
     ...(entry.effect.cooldown === null ? {} : { cooldown: entry.effect.cooldown }),

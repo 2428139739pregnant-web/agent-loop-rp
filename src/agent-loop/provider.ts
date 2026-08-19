@@ -12,6 +12,8 @@ export interface SwipeInfo {
 export interface ChatMessage {
   role: ChatRole
   content: string
+  /** Optional OpenAI-compatible message name, used by ST example/group messages. */
+  name?: string
   /** SillyTavern-compatible assistant alternatives. User/system messages do not use swipes. */
   swipe_id?: number
   swipes?: string[]

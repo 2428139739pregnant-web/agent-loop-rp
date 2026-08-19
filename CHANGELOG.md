@@ -4,6 +4,10 @@
 
 ### 修复
 
+- 默认 response 模板接入 ST PromptManager 风格的消息树：角色卡 `mes_example` 按 speaker 拆为独立 system 消息并保留 `name`，加入 `[Example Chat]` 标记，聊天历史保留真实 user/assistant 角色，`atDepth` 条目按 depth/order/role 插入，post-history 指令位于历史之后；不带新标记的自定义 response 模板继续走旧兼容路径。
+- 保留角色卡、独立世界书和 Tavern Helper 条目的 atDepth `depth`/`role` 元数据，避免到 response 阶段只剩 position 而丢失插入语义。
+- 修正 Tavern Helper 函数式 `injectPrompts` 过滤器：每轮生成准备阶段按官方形状把 prompt 作为参数传入 filter，仍由 iframe 本地执行，不增加 LLM 调用。
+
 - 对齐 ST-Prompt-Template 的世界书查询：EJS `getwi()`/`getWorldInfo()` 现在读取当前会话实际可见的角色卡、外部世界书和酒馆助手世界书，不再因为 renderer 未绑定书目而静默返回空内容。
 - 实现 `[InitialVariables]` 与 `@@initial_variables`：按 JSON 优先、YAML 回退解析对象，按条目顺序深度合并，并暴露给 EJS 的 `initial` 变量作用域；保留原有 `<initvar>`/`[initvar]` 兼容。
 - 保留 Tavern Helper 原始脚本树和父文件夹开关；禁用父文件夹时子脚本不会执行，同时补齐 `getScriptTrees`、`replaceScriptTrees`、`updateScriptTreesWith` 兼容 API。

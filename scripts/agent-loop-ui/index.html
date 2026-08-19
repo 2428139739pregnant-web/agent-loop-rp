@@ -1612,10 +1612,11 @@
     normalized.id=normalized.id.trim();
     if(typeof normalized.filter==='function'){
       const scriptId=__currentScriptId();
-      __injectionFilters.set(scriptId+'\u0000'+normalized.id,{scriptId,promptId:normalized.id,filter:normalized.filter});
+      const filter=normalized.filter;
       // Function-valued filters are evaluated at the same generation
       // boundary as Tavern Helper. They never cross the JSON/RPC bridge.
       delete normalized.filter;
+      __injectionFilters.set(scriptId+'\u0000'+normalized.id,{scriptId,promptId:normalized.id,filter,prompt:__clone(normalized)});
     }
     return normalized;
   };
@@ -1627,7 +1628,7 @@
     const filters=[];
     for(const item of __injectionFilters.values()){
       let enabled=false;
-      try{enabled=Boolean(await item.filter());}catch{enabled=false;}
+      try{enabled=Boolean(await item.filter(item.prompt));}catch{enabled=false;}
       filters.push({scriptId:item.scriptId,promptId:item.promptId,enabled});
     }
     __post('agent-rp-card-injection-filter-result',{hasFilters:__injectionFilters.size>0,filters});
