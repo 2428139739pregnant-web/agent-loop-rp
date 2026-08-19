@@ -114,7 +114,9 @@ export {
   buildConstantWorldbookBlocks,
   listConstantWorldbookEntries,
   constantWorldbookDoc,
+  type ConstantWorldbookBlocks,
 } from './agents/response.ts'
+export { tavernHelperWorldbookMetadata, tavernHelperWorldbookPosition } from './worldbook-position.ts'
 export { runMvuUpdate, type MvuRuntimeSettings, type MvuUpdateInput, type MvuUpdateResult } from './agents/mvu-update.ts'
 export {
   DEFAULT_RESPONSE_PERSPECTIVES,

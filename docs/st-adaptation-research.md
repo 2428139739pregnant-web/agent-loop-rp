@@ -110,7 +110,7 @@
 | 6 | `afterAuthorNote` | `post_history_instructions` 段 |
 | 7 | `outlet` | 与 `unplaced` 合并进旧 `worldbook_block` |
 
-没有受支持 position 的条目进入 `unplaced`。默认消息树中，角色卡 `mes_example` 会解析成带 `name` 的独立 system 消息，并在示例前加入 `[Example Chat]` 标记；`post_history_instructions` 位于聊天历史之后。当前没有独立 Author's Note/outlet host 对象，position 5/6 仍合并到 post-history，position 7 与 unplaced 合并为激活世界书段。独立世界书的 constant 条目走另一条简化映射：`0 → persona`、`1 → worldview`、`2–7 → style`。
+没有受支持 position 的条目进入 `unplaced`。默认消息树中，角色卡 `mes_example` 会解析成带 `name` 的独立 system 消息，并在示例前加入 `[Example Chat]` 标记；`post_history_instructions` 位于聊天历史之后。角色卡和独立世界书的 constant 条目现在都按 ST 的八个 position 生成计划：`0/1 → persona/worldview`、`2/3 → 示例前后`、`4 → atDepth`、`5/6 → Author's Note 前后（当前以 post-history 锚点承载）`、`7 → outlet/激活世界书段`。旧自定义扁平模板仍保留 `2–7 → style` 的兼容回退。
 
 ## 5. 角色卡 V2/V3 字段与消费方式
 
@@ -161,7 +161,7 @@
 
 | ST 机制 | 本项目落地 |
 | --- | --- |
-| 蓝灯 constant 无条件激活 | `constant && enabled` 条目不进入 2.1 agent 候选池；角色卡内嵌蓝灯在 preprocess 合并进三文档，独立书蓝灯由 response 每轮注入。独立书按 ST position 做 `0 → persona`、`1 → worldview`、`2–7 → style` 简化映射；实际代码仍会按 `probability/useProbability` 处理可掷骰条目 |
+| 蓝灯 constant 无条件激活 | `constant && enabled` 条目不进入 2.1 agent 候选池；角色卡和独立书蓝灯都进入当前 Store，由 response 按 ST position 每轮注入，并参与统一预算。旧自定义扁平模板仍回退到三文档；实际代码仍会按 `probability/useProbability` 处理可掷骰条目 |
 | 绿灯 keyed 激活 | 支持三种模式：`ST strict` 由确定性 ST 关键词/次关键词匹配；`ST enhanced` 先保留 ST 基线，再由 ② worldbook-match agent 只追加普通绿灯的语义候选；`Agent native` 由 agent 判断普通绿灯。ST baseline 与 agent 结果交给纯代码 WorldbookResolver 去重、排序并标记 source，不新增额外 LLM 调用。蓝灯、原生 ST regex key、控制型 EJS、`@INJECT`、`[GENERATE]`、`[RENDER]`、decorator 条目先排除出 agent 候选池；EJS-only 普通条目仍按普通绿灯激活，命中后再渲染 |
 | ST-Prompt-Template 特殊条目 | `worldbook-plugin.ts` 在本地生成结构化计划：`@INJECT pos/target/regex` 和 `[GENERATE:BEFORE/AFTER/idx/REGEX]` 修改正文 agent 的既有消息数组；`[RENDER:BEFORE/AFTER]` 只生成 display-only 结果；常用 `@@generate_*`/`@@render_*` 作为别名。该 lane 不调用 LLM，未覆盖的变量初始化/复杂 decorator 保留并记录 skipped |
 | World Info parser mapping | 角色卡条目从 `extensions.selectiveLogic/probability/useProbability/position/scan_depth/exclude_recursion/prevent_recursion/delay_until_recursion`（并兼容直接字段）归一化；独立 World Info 从 `entries` 字典读取，兼容顶层 `recursive`/`recursiveScanning`，将 `selectiveLogic` 数字/枚举名、禁用、概率和 position 映射到统一模型。未知字段不进入执行模型 |

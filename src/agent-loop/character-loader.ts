@@ -12,23 +12,22 @@ import type { ImportedCharacterCard, ImportedLorebook, ImportedLorebookEntry } f
 /**
  * 角色卡导入后的一次性预处理产物。
  * 3 文档结构: 人设 / 世界观 / 文风。
- * 后续输出回复 agent 只需要读这 3 份 .md,不用直接看原始卡。
- *
- * 三文档已经**包含蓝灯(constant && !disable)世界书条目**:按 ST position
- * 映射进对应文档(before_char(0)→persona、after_char(1)→worldview、其他 position
- * 并入 style 尾部),同文档内按 order(ST insertionOrder)**降序**拼接。
- * 走关键词匹配的"绿灯"条目另存在 {@link dynamicLorebookEntries}。
+ * 输出回复 agent 读取这 3 份卡片定义，并从 constantLorebookEntries 按
+ * ST position 组装常驻世界书消息层。走关键词匹配的"绿灯"条目另存在
+ * {@link dynamicLorebookEntries}。
  */
 export interface PreprocessedCharacter {
   /** 角色名(从 card.name 取) */
   readonly name: string
   /** 原始卡片,完整保留不丢字段 */
   readonly raw: ImportedCharacterCard
-  /** 拆分后的 3 文档(已合并蓝灯世界书条目) */
+  /** 拆分后的 3 份角色卡文档(新格式不预先合并蓝灯)。 */
   readonly persona: string
   readonly worldview: string
   readonly style: string
-  /** 常驻世界书的 atDepth 条目；当前 Harness 以独立 system block 保留其位置语义。 */
+  /** 新格式中所有启用的蓝灯条目，交给统一 ST position 链路。 */
+  readonly constantLorebookEntries?: readonly ImportedLorebookEntry[]
+  /** 旧存档兼容：常驻世界书的 atDepth 条目。 */
   readonly atDepthLorebookEntries?: readonly ImportedLorebookEntry[]
   /**
    * 主开场白(对应角色卡 V2/V3 的 `first_mes` 字段,酒馆里"打开会话"立刻看到的那条)。
@@ -67,7 +66,7 @@ export interface PreprocessedCharacter {
   readonly lorebook?: ImportedLorebook | undefined
   /**
    * 仅"绿灯"类世界书条目(非 constant):走 2.1 LLM 语义匹配 → agent 3 决定是否使用。
-   * 蓝灯条目已按 position 合并进三文档,不再列入此处,避免重复注入;
+    * 蓝灯条目保存在 constantLorebookEntries 中,不再列入此处,避免重复注入;
    * 禁用条目(enabled === false,即 ST disable)两边都不进,完全跳过(ST 语义)。
    */
   readonly dynamicLorebookEntries: readonly ImportedLorebookEntry[]
@@ -76,23 +75,20 @@ export interface PreprocessedCharacter {
 }
 
 /**
- * 世界书条目按"蓝灯常驻注入文档 vs 绿灯动态匹配"分类的结果。
+ * 世界书条目按"蓝灯常驻元数据 vs 绿灯动态匹配"分类的结果。
  *
- * 蓝灯(constant: true 且 enabled)按 ST position 简化映射进三文档
- * (与 ST 的差异:ST 有 before/after/ANTop/ANBottom/atDepth/EMTop/EMBottom/outlet
- * 8 个插入点,本项目只有三文档,position 2-7 一律并入 style 尾部;
- * 见 docs/st-adaptation-research.md §8 "position" 行):
- *   - position 0 / before_char → persona(角色定义之前≈人设文档)
- *   - position 1 / after_char  → worldview(角色定义之后≈世界观文档)
- *   - 其他 position(2-7)      → style 文档尾部
+ * 蓝灯(constant: true 且 enabled)保留 ST position；实际 0–7 插入由
+ * response 的统一消息树处理。这里的 split 桶仅保留旧 API/诊断兼容。
  * 绿灯(非 constant)→ dynamic,交给 2.1 worldbook-match agent。
  */
 export interface CharacterLorebookSplit {
-  /** 常驻注入 persona 的蓝灯条目(position 0 / before_char) */
+  /** All enabled constant entries, retaining their full ST position metadata. */
+  readonly constant: readonly ImportedLorebookEntry[]
+  /** 旧三文档消费者使用的 persona 桶(position 0 / before_char)。 */
   readonly persona: readonly ImportedLorebookEntry[]
-  /** 常驻注入 worldview 的蓝灯条目(position 1 / after_char) */
+  /** 旧三文档消费者使用的 worldview 桶(position 1 / after_char)。 */
   readonly worldview: readonly ImportedLorebookEntry[]
-  /** 常驻注入 style 尾部的蓝灯条目(position 2-7) */
+  /** 旧三文档消费者使用的 style 回退桶(position 2-7)。 */
   readonly style: readonly ImportedLorebookEntry[]
   /** position=4 (atDepth) entries kept separate from the style document. */
   readonly atDepth: readonly ImportedLorebookEntry[]
@@ -107,8 +103,8 @@ export interface CharacterLorebookSplit {
  * (后两者不再混入文风文档,由 response 按酒馆位置单独注入:
  * system_prompt 前置、post_history_instructions 追加在历史之后)。
  *
- * 如果角色卡原始字段为空,会在结尾追加"必须从世界书蓝灯条目推断"的占位提示,
- * 而不是只显示"暂未提供"——蓝灯条目已经在三文档里,LLM 不会真的没东西可用。
+   * 如果角色卡原始字段为空,会在结尾追加"必须从世界书蓝灯条目推断"的占位提示,
+   * 而不是只显示"暂未提供"——蓝灯条目会在 response 消息树中随后注入。
  */
 function splitIntoThreeDocuments(card: ImportedCharacterCard): {
   persona: string
@@ -180,8 +176,8 @@ export function entryStPosition(entry: ImportedLorebookEntry): number {
  *
  * 判定规则:
  * 1. `constant !== true`(绿灯)→ dynamic
- * 2. 蓝灯 → 按 position 映射:0/before_char → persona;1/after_char → worldview;
- *    其他 position(2-7)→ style(ST 差异:8 插入点简化为三文档,见 {@link CharacterLorebookSplit})
+ * 2. 蓝灯 → 按 position 保留元数据；response 阶段映射到 ST 八个插入点。
+ *    legacy split 桶仅为旧调用方保留，不决定新 response 的实际插入。
  *
  * 禁用条目(enabled === false,ST disable)由 {@link classifyLorebookEntries}
  * 在分类前整体剔除——既不进文档也不进动态池(ST: disable → 直接跳过)。
@@ -189,7 +185,7 @@ export function entryStPosition(entry: ImportedLorebookEntry): number {
 export function classifyLorebookEntry(entry: ImportedLorebookEntry): 'persona' | 'worldview' | 'style' | 'dynamic' {
   // 规则 1:非蓝灯 → 一定走动态(绿灯,2.1 LLM 语义匹配)
   if (entry.constant !== true) return 'dynamic'
-  // 规则 2:蓝灯 → position 映射进三文档
+  // 规则 2:蓝灯 → 保留 position；新 response 消费完整八位置计划。
   const st = entryStPosition(entry)
   if (st === 0) return 'persona'
   if (st === 1) return 'worldview'
@@ -198,6 +194,7 @@ export function classifyLorebookEntry(entry: ImportedLorebookEntry): 'persona' |
 
 /** 把整本 lorebook 拆成"蓝灯常驻(position 映射)vs 绿灯动态"。 */
 export function classifyLorebookEntries(book: ImportedLorebook): CharacterLorebookSplit {
+  const constant: ImportedLorebookEntry[] = []
   const persona: ImportedLorebookEntry[] = []
   const worldview: ImportedLorebookEntry[] = []
   const style: ImportedLorebookEntry[] = []
@@ -207,6 +204,7 @@ export function classifyLorebookEntries(book: ImportedLorebook): CharacterLorebo
     // ST disable → 完全跳过(既不常驻注入,也不进匹配池)。
     if (e.enabled === false) continue
     const bucket = classifyLorebookEntry(e)
+    if (e.constant) constant.push(e)
     if (bucket === 'persona') persona.push(e)
     else if (bucket === 'worldview') worldview.push(e)
     else if (bucket === 'style') {
@@ -221,25 +219,13 @@ export function classifyLorebookEntries(book: ImportedLorebook): CharacterLorebo
   const byOrderDesc = (a: ImportedLorebookEntry, b: ImportedLorebookEntry) => b.insertionOrder - a.insertionOrder
   const byOrderAsc = (a: ImportedLorebookEntry, b: ImportedLorebookEntry) => a.insertionOrder - b.insertionOrder
   return {
+    constant: [...constant].sort(byOrderDesc),
     persona: [...persona].sort(byOrderDesc),
     worldview: [...worldview].sort(byOrderDesc),
     style: [...style].sort(byOrderDesc),
     atDepth: [...atDepth].sort(byOrderDesc),
     dynamic: [...dynamic].sort(byOrderAsc),
   }
-}
-
-/** 一条蓝灯条目的渲染标题(显示来源,让用户能在三文档里看到这是从世界书来的)。 */
-function entryRenderTitle(e: ImportedLorebookEntry): string {
-  const tag = e.name ?? `未命名 #${e.insertionOrder}`
-  return `世界书 #${e.insertionOrder} · ${tag}`
-}
-
-/** 把蓝灯分类的 entry 内容追加到对应三文档字段(调用方已按 order 降序排好)。 */
-function appendBaseLorebook(field: string, entries: readonly ImportedLorebookEntry[]): string {
-  if (entries.length === 0) return field
-  const blocks = entries.map(e => `### ${entryRenderTitle(e)}\n${e.content.trim()}`)
-  return `${field}\n\n---\n\n## 常驻世界书条目(蓝灯,每轮注入;按 order 降序)\n\n${blocks.join('\n\n')}`
 }
 
 /**
@@ -281,17 +267,21 @@ export function preprocessCharacterCard(card: ImportedCharacterCard): Preprocess
     persona, worldview, style, firstMes, alternateGreetings,
     mesExample, systemPrompt, postHistoryInstructions,
   } = splitIntoThreeDocuments(card)
-  // 把蓝灯条目(position 映射)合并到对应三文档;绿灯条目走 dynamic 路径
+  // 蓝灯条目保留完整 position 元数据；绿灯条目走 dynamic 路径。
   const split: CharacterLorebookSplit = card.lorebook !== undefined
     ? classifyLorebookEntries(card.lorebook)
-    : { persona: [], worldview: [], style: [], atDepth: [], dynamic: [] }
+    : { constant: [], persona: [], worldview: [], style: [], atDepth: [], dynamic: [] }
+  const constantLorebookEntries = split.constant
   return {
     name: card.name,
     raw: card,
-    persona: appendBaseLorebook(persona, split.persona),
-    worldview: appendBaseLorebook(worldview, split.worldview),
-    style: appendBaseLorebook(style, split.style),
-    atDepthLorebookEntries: split.atDepth,
+    persona,
+    worldview,
+    style,
+    constantLorebookEntries,
+    // New cards route every constant through the merged WorldbookStore. Keep
+    // the legacy field empty so response cannot inject position=4 twice.
+    atDepthLorebookEntries: [],
     firstMes,
     alternateGreetings,
     mesExample,

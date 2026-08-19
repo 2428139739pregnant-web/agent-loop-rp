@@ -85,7 +85,7 @@ Activated World Info entries retain the ST position value and are split into exp
 | `6` | `afterAuthorNote` | post-history-instructions block |
 | `7` | `outlet` | merged into the legacy `worldbook_block` |
 
-Entries without a supported position go to `unplaced` and also use the legacy `worldbook_block`. The buckets preserve placement distinctions and order (`order` ascending for matched entries, with weight/path tie-breakers), but they are template anchors rather than a byte-for-byte ST prompt stack: there is no dedicated Author's Note/outlet host object, and `atDepth` is rendered as a labeled response block rather than inserted into a real ST message tree. Independent constant entries use a separate compatibility mapping: `0 → persona`, `1 → worldview`, and `2–7 → style`.
+Entries without a supported position go to `unplaced` and also use the legacy `worldbook_block`. The default ST message tree now keeps card-embedded and independent constant entries at their eight positions: `0/1` map to character-definition layers, `2/3` to example boundaries, `4` to real depth prompts, `5/6` to the post-history Author's Note anchor, and `7` to the outlet/worldbook layer. A custom flat template still gets the legacy `2–7 → style` fallback.
 
 ## Security and degradation
 

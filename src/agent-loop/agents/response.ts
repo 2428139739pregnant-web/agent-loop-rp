@@ -124,6 +124,8 @@ export interface ConstantWorldbookTraceEntry {
   readonly path: string
   readonly order: number
   readonly position: number | undefined
+  readonly depth?: number
+  readonly role?: 'system' | 'user' | 'assistant'
   readonly content: string
 }
 
@@ -134,6 +136,8 @@ export interface ConstantWorldbookOptions {
   readonly random?: () => number
   /** When World Info budgeting ran, only these activated constant paths survive. */
   readonly allowedPaths?: ReadonlySet<string>
+  /** Keep the old three-document flattening for custom/non-ST templates. */
+  readonly legacyDocumentFallback?: boolean
 }
 
 function passesWorldbookProbability(entry: WorldbookEntry, random: () => number): boolean {
@@ -161,36 +165,97 @@ export function listConstantWorldbookEntries(
       path: e.path,
       order: e.order,
       position: e.position,
+      ...(e.depth === undefined ? {} : { depth: e.depth }),
+      ...(e.role === undefined ? {} : { role: e.role }),
       content: macro(e.content),
     }))
 }
 
+type ConstantWorldbookPlacement =
+  | 'persona'
+  | 'worldview'
+  | 'beforeExamples'
+  | 'afterExamples'
+  | 'atDepth'
+  | 'beforeAuthorNote'
+  | 'afterAuthorNote'
+  | 'outlet'
+
+/** Map the eight ST World Info insertion positions without flattening them. */
+function constantWorldbookPlacement(position: number | undefined): ConstantWorldbookPlacement {
+  const st = typeof position === 'number' && Number.isFinite(position) ? Math.trunc(position) : 0
+  switch (st) {
+    case 0: return 'persona'
+    case 1: return 'worldview'
+    case 2: return 'beforeExamples'
+    case 3: return 'afterExamples'
+    case 4: return 'atDepth'
+    case 5: return 'beforeAuthorNote'
+    case 6: return 'afterAuthorNote'
+    case 7: return 'outlet'
+    default: return 'outlet'
+  }
+}
+
+export interface ConstantWorldbookBlocks {
+  persona: string
+  worldview: string
+  style: string
+  beforeExamples: string
+  afterExamples: string
+  beforeAuthorNote: string
+  afterAuthorNote: string
+  atDepth: readonly ConstantWorldbookTraceEntry[]
+  outlet: string
+}
+
 /**
- * 从 ctx.worldbook 提取**独立世界书**的蓝灯条目(constant && enabled),
- * 按 position 映射分到三文档,组内按 order **降序**拼接(ST world-info.js:87)。
- * 蓝灯语义 = 无条件每轮注入,不受消息内容/关键词影响(ST checkWorldInfo 第 3 步)。
- * 与 ST 的差异:ST 对 probability<100 的蓝灯也会掷骰,本项目蓝灯严格无条件。
+ * 从 ctx.worldbook 提取**独立世界书**的蓝灯条目(constant && enabled)，
+ * 按 ST 的八个 position 生成消息/文档插入计划；旧自定义模板可通过
+ * legacyDocumentFallback 显式回退到原先的三文档展平方式。
  */
 export function buildConstantWorldbookBlocks(
   worldbook: { list(): readonly WorldbookEntry[] },
   macro: (text: string) => string,
   options: ConstantWorldbookOptions = {},
-): { persona: string; worldview: string; style: string } {
-  const buckets: Record<'persona' | 'worldview' | 'style', string[]> = {
-    persona: [], worldview: [], style: [],
+): ConstantWorldbookBlocks {
+  const buckets: Record<Exclude<ConstantWorldbookPlacement, 'atDepth'>, string[]> = {
+    persona: [], worldview: [], beforeExamples: [], afterExamples: [],
+    beforeAuthorNote: [], afterAuthorNote: [], outlet: [],
   }
+  const atDepth: ConstantWorldbookTraceEntry[] = []
   const constants = listConstantWorldbookEntries(worldbook, macro, options)
   for (const e of constants) {
-    buckets[constantWorldbookDoc(e.position)].push(
+    const placement = constantWorldbookPlacement(e.position)
+    if (placement === 'atDepth') {
+      atDepth.push(e)
+      continue
+    }
+    buckets[placement].push(
       `### ${e.path} (常驻条目,order=${e.order})\n${e.content}`,
     )
   }
   const render = (blocks: string[]): string =>
     blocks.length === 0 ? '' : `\n\n---\n\n## 常驻世界书条目(独立世界书蓝灯,每轮注入;按 order 降序)\n\n${blocks.join('\n\n')}`
+  const exactStyle = render(buckets.outlet)
+  const legacyStyle = render([
+    ...buckets.beforeExamples,
+    ...buckets.afterExamples,
+    ...buckets.beforeAuthorNote,
+    ...buckets.afterAuthorNote,
+    ...buckets.outlet,
+    ...atDepth.map(e => `### ${e.path} (常驻条目,order=${e.order})\n${e.content}`),
+  ])
   return {
     persona: render(buckets.persona),
     worldview: render(buckets.worldview),
-    style: render(buckets.style),
+    style: options.legacyDocumentFallback === false ? '' : legacyStyle,
+    beforeExamples: render(buckets.beforeExamples),
+    afterExamples: render(buckets.afterExamples),
+    beforeAuthorNote: render(buckets.beforeAuthorNote),
+    afterAuthorNote: render(buckets.afterAuthorNote),
+    atDepth: atDepth.sort((a, b) => b.order - a.order || a.path.localeCompare(b.path)),
+    outlet: exactStyle,
   }
 }
 
@@ -627,9 +692,14 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
       content: renderEjs(ctx, match.content),
     }))
     const worldbookPlacement = splitWorldbookMatches(resolvedWorldbookMatches)
+    const constantBlocks = buildConstantWorldbookBlocks(ctx.worldbook, macro, {
+      ...(input.worldbook.budget?.keptConstantPaths === undefined
+        ? {} : { allowedPaths: new Set(input.worldbook.budget.keptConstantPaths) }),
+      legacyDocumentFallback: !useStMessageTree,
+    })
     const worldbookBlock = buildWorldbookBlock({
       matches: worldbookPlacement.unplaced.concat(worldbookPlacement.outlet),
-    }, input.character, userName ?? undefined)
+    }, input.character, userName ?? undefined) + (useStMessageTree ? constantBlocks.outlet : '')
 
     // 用户人设段:有 persona 且带描述时注入;只有名字时也注入名字段(角色至少
     // 该知道怎么称呼用户);完全没配置时留占位,提示模型用"用户"泛称。
@@ -638,13 +708,6 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
         ? `名字:${input.userPersona.name}\n${input.userPersona.description}`
         : `名字:${input.userPersona.name}\n(未提供详细人设,以"用户"身份参与剧情)`)
       : '(未配置用户人设,以"用户"泛称)'
-
-    // 独立世界书蓝灯条目:position 映射追加进三文档尾部(每轮注入,不受消息影响)。
-    // 卡片内嵌书的蓝灯已在 preprocess 合并进文档,这里只处理 worldbooks/ 的独立书。
-    const constantBlocks = buildConstantWorldbookBlocks(ctx.worldbook, macro, {
-      ...(input.worldbook.budget?.keptConstantPaths === undefined
-        ? {} : { allowedPaths: new Set(input.worldbook.budget.keptConstantPaths) }),
-    })
 
     // 三个新字段(mes_example / system_prompt / post_history_instructions)都过宏替换。
     // 旧存档/旧客户端可能不带这些字段(undefined),兜底空串 → 占位文案。
@@ -686,12 +749,16 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
       userName ?? undefined,
       '世界书 After Author Note',
     )
-    const postHistoryInstructions = macro(input.character.postHistoryInstructions ?? '')
+    const postHistoryInstructions = constantBlocks.beforeAuthorNote
       + worldbookBeforeAuthorNote
+      + macro(input.character.postHistoryInstructions ?? '')
       + worldbookAfterAuthorNote
+      + constantBlocks.afterAuthorNote
     const exampleDialogue = worldbookBeforeExamples
+      + constantBlocks.beforeExamples
       + (mesExample.length > 0 ? mesExample : NO_EXAMPLE_DIALOGUE)
       + worldbookAfterExamples
+      + constantBlocks.afterExamples
     const atDepthWorldbook = (input.character.atDepthLorebookEntries ?? []).map(entry =>
       `### ${entry.name ?? `世界书 #${entry.insertionOrder}`} (atDepth=${entry.stPosition ?? 4})\n${macro(entry.content)}`,
     )
@@ -705,7 +772,10 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
       persona: macro(input.character.persona) + constantBlocks.persona + worldbookBeforeCharacter,
       worldview: macro(input.character.worldview) + constantBlocks.worldview + worldbookAfterCharacter,
       style: macro(input.character.style) + constantBlocks.style,
-      at_depth_worldbook: atDepthWorldbook.concat(dynamicAtDepth).join('\n\n') || '(无 atDepth 条目)',
+      at_depth_worldbook: atDepthWorldbook
+        .concat(constantBlocks.atDepth.map(entry => `### ${entry.path} (atDepth=${entry.depth ?? 4}, order=${entry.order})\n${entry.content}`))
+        .concat(dynamicAtDepth)
+        .join('\n\n') || '(无 atDepth 条目)',
       mvu_state: statData === undefined ? '(未启用 MVU)' : JSON.stringify(statData, null, 2),
       user_persona: macro(userPersonaBlock),
       card_system_prompt: cardSystemPrompt.length > 0 ? cardSystemPrompt : NO_CARD_SYSTEM_PROMPT,
@@ -743,6 +813,12 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     //    that this project sends. This is deterministic and happens before the
     //    one existing response call; it never creates a second LLM stage.
     const depthPrompts: STDepthPrompt[] = [
+      ...constantBlocks.atDepth.map(entry => ({
+        content: `### ${entry.path} (atDepth=${entry.depth ?? 4}, order=${entry.order})\n${entry.content}`,
+        depth: entry.depth ?? 4,
+        role: entry.role ?? 'system',
+        order: entry.order,
+      })),
       ...(input.character.atDepthLorebookEntries ?? []).map(entry => ({
         content: `### ${entry.name ?? `世界书 #${entry.insertionOrder}`}\n${macro(entry.content)}`,
         depth: typeof entry.depth === 'number' ? entry.depth : 4,
@@ -775,10 +851,12 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
           { role: 'system', content: macro(input.character.worldview) + constantBlocks.worldview },
           ...(macro(userPersonaBlock).trim() ? [{ role: 'system' as const, content: `用户人设：\n${macro(userPersonaBlock).trim()}` }] : []),
           ...(worldbookBlock.trim() ? [{ role: 'system' as const, content: `激活的世界书条目：\n${macro(worldbookBlock).trim()}` }] : []),
-          ...(worldbookBeforeExamples.trim() ? [{ role: 'system' as const, content: worldbookBeforeExamples.trim() }] : []),
+          ...(worldbookBeforeExamples.trim() || constantBlocks.beforeExamples.trim()
+            ? [{ role: 'system' as const, content: `${worldbookBeforeExamples}${constantBlocks.beforeExamples}`.trim() }] : []),
           ...(mesExample.trim().length > 0 ? [{ role: 'system' as const, content: '[Example Chat]' }] : []),
           ...parseSillyTavernExampleMessages(mesExample, userName, charName),
-          ...(worldbookAfterExamples.trim() ? [{ role: 'system' as const, content: worldbookAfterExamples.trim() }] : []),
+          ...(worldbookAfterExamples.trim() || constantBlocks.afterExamples.trim()
+            ? [{ role: 'system' as const, content: `${worldbookAfterExamples}${constantBlocks.afterExamples}`.trim() }] : []),
           ...historyAndCurrent,
           ...(postHistoryInstructions.trim() ? [{ role: 'system' as const, content: postHistoryInstructions.trim() }] : []),
         ]

@@ -4,6 +4,9 @@
 
 ### 修复
 
+- 旧角色存档首次启动时会自动迁移到新的卡片世界书结构，并将迁移后的 `preprocessed.json` 持久化，避免每次启动重复迁移。
+- Tavern Helper 世界书的 `before_author_note/after_author_note` 现在映射到 ST 的 5/6 位置；独立世界书蓝灯按 0–7 位置进入示例区、atDepth、Author's Note 和 outlet，旧自定义模板保留三文档回退。
+- 角色卡内嵌蓝灯不再预先揉进三文档：新格式会与外部书进入同一 Store，统一参与来源预算和 ST 位置组装；同时补齐 Tavern Helper 的递归控制字段映射。
 - 世界书来源预算不再在合并 Store 时丢失：角色卡/独立 World Info 的 `token_budget`、来源书身份和条目优先级会传到 matcher，先执行来源书预算再执行当前会话共享预算；独立书重启和条目开关写盘时保留书级字段，并在 trace 记录各来源书的裁剪结果。
 
 - 世界书兼容层加入 ST `world_info_budget` / `budget_cap` 运行时收尾：按 ST 优先级本地裁剪已激活的多本世界书条目，`ignoreBudget` 条目不占预算，并把使用量与被裁剪路径写入 worldbook trace；整个过程不新增 LLM 调用。

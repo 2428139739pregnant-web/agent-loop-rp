@@ -197,7 +197,7 @@ test('classifyLorebookEntries drops disabled entries entirely (ST disable)', () 
   assert.ok(split.dynamic[0]?.content.includes('keep-green'))
 })
 
-test('constant blocks land in the position-mapped doc, sorted by order DESC (ST semantics)', () => {
+test('constant entries keep their ST position metadata for the shared response pipeline', () => {
   const p = loadCharacterCardFromJson(fullCardJson({
     bookEntries: [
       bookEntry({ id: 1, content: 'P_ORDER_5', constant: true, position: 'before_char', order: 5 }),
@@ -207,14 +207,13 @@ test('constant blocks land in the position-mapped doc, sorted by order DESC (ST 
       bookEntry({ id: 5, content: 'GREEN_BODY', constant: false, keys: ['钥匙'] }),
     ],
   }))
-  // before_char → persona 文档,order 降序(9 在 5 前)
-  assert.ok(p.persona.includes('P_ORDER_9'))
-  assert.ok(p.persona.includes('P_ORDER_5'))
-  assert.ok(p.persona.indexOf('P_ORDER_9') < p.persona.indexOf('P_ORDER_5'))
-  // after_char → worldview 文档
-  assert.ok(p.worldview.includes('W_ORDER_3'))
-  // position 6(EMBottom)→ style 文档尾部(与 ST 的差异:8 插入点简化为三文档)
-  assert.ok(p.style.includes('S_ORDER_7'))
+  assert.deepEqual(p.constantLorebookEntries?.map(entry => [entry.content, entry.stPosition ?? 0]), [
+    ['P_ORDER_9', 0], ['S_ORDER_7', 6], ['P_ORDER_5', 0], ['W_ORDER_3', 1],
+  ])
+  // 新格式角色卡三文档只保留卡片自身定义，蓝灯由 Store/response 统一插入。
+  assert.ok(!p.persona.includes('P_ORDER_9'))
+  assert.ok(!p.worldview.includes('W_ORDER_3'))
+  assert.ok(!p.style.includes('S_ORDER_7'))
   // 绿灯不进文档,走 dynamic
   assert.ok(!p.persona.includes('GREEN_BODY'))
   assert.ok(!p.worldview.includes('GREEN_BODY'))

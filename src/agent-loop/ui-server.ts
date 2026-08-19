@@ -95,6 +95,7 @@ import {
   type TavernWorldbookEntry,
 } from '../tavern-helper.ts'
 import { buildWorldbookKeyIndex, renderWorldbookKeyOnlyMd } from './worldbook-key-index.ts'
+import { tavernHelperWorldbookMetadata } from './worldbook-position.ts'
 import {
   normalizeTimedEffectState,
   pruneTimedEffectState,
@@ -3992,14 +3993,17 @@ async function loadCharacterFromDisk(id: CharacterId): Promise<CharacterRecord |
     return null
   }
   let preprocessed: PreprocessedCharacter
+  let migrated = false
   try {
     const raw = await readFile(join(dir, 'preprocessed.json'), 'utf-8')
     const parsed = JSON.parse(raw) as Partial<PreprocessedCharacter>
-    // 信任条件:新格式存档必须带 dynamicLorebookEntries **且**三个新字段
-    // (mesExample / systemPrompt / postHistoryInstructions)。缺任一 = 老存档:
+    // 信任条件:新格式存档必须带 dynamicLorebookEntries、constantLorebookEntries
+    // **且**三个新字段 (mesExample / systemPrompt / postHistoryInstructions)。缺任一 = 老存档:
     // 用存的 raw 重新跑 preprocessCharacterCard 迁移(效果等同重新 import,
-    // 保留 createdAt)。迁移后蓝灯条目按 ST position 重新分桶进三文档。
-    if (parsed.dynamicLorebookEntries !== undefined && parsed.mesExample !== undefined) {
+    // 保留 createdAt)。迁移后蓝灯条目进入统一 Store，并按 ST position 注入。
+    if (parsed.dynamicLorebookEntries !== undefined
+      && parsed.constantLorebookEntries !== undefined
+      && parsed.mesExample !== undefined) {
       preprocessed = parsed as PreprocessedCharacter
     } else {
       // 自动迁移:老存档没有 dynamicLorebookEntries / 新字段 / position 分桶文档。
@@ -4009,10 +4013,20 @@ async function loadCharacterFromDisk(id: CharacterId): Promise<CharacterRecord |
         return null
       }
       preprocessed = preprocessCharacterCard(rawCard as never)
+      migrated = true
     }
   } catch (err) {
     process.stderr.write(`[ui-server] skip character ${id}: preprocessed.json unreadable (${err instanceof Error ? err.message : String(err)})\n`)
     return null
+  }
+  if (migrated) {
+    // 持久化迁移结果，避免每次启动都重复导入旧卡并把旧的蓝灯分桶留在内存里。
+    // 这里只更新生成的预处理文件，不改原始卡图和 meta 时间戳。
+    try {
+      await writeFile(join(dir, 'preprocessed.json'), JSON.stringify(preprocessed, null, 2), 'utf-8')
+    } catch (err) {
+      process.stderr.write(`[ui-server] warn: character ${id} migrated in memory but preprocessed.json could not be saved (${err instanceof Error ? err.message : String(err)})\n`)
+    }
   }
   // lorebook.json 缺失不算错(可能是无内嵌世界书的卡);meta.json 说有但文件没就警告。
   try {
@@ -4247,6 +4261,7 @@ function serializeCharacter(character: PreprocessedCharacter): {
   mesExample: string
   systemPrompt: string
   postHistoryInstructions: string
+  constantLorebookEntries: readonly ImportedLorebookEntry[]
   atDepthLorebookEntries: readonly ImportedLorebookEntry[]
   frontend: {
     regexScripts: PreprocessedCharacter['raw']['frontend']['regexScripts']
@@ -4271,6 +4286,7 @@ function serializeCharacter(character: PreprocessedCharacter): {
     mesExample: character.mesExample ?? '',
     systemPrompt: character.systemPrompt ?? '',
     postHistoryInstructions: character.postHistoryInstructions ?? '',
+    constantLorebookEntries: character.constantLorebookEntries ?? [],
     atDepthLorebookEntries: character.atDepthLorebookEntries ?? [],
     frontend: {
       regexScripts: character.raw.frontend?.regexScripts ?? [],
@@ -4346,6 +4362,11 @@ function parseCharacterField(value: unknown): PreprocessedCharacter | null {
     ? rawAtDepth.filter((entry): entry is ImportedLorebookEntry =>
       entry !== null && typeof entry === 'object' && !Array.isArray(entry))
     : []
+  const rawConstant = obj.constantLorebookEntries
+  const constantLorebookEntries: ImportedLorebookEntry[] | undefined = Array.isArray(rawConstant)
+    ? rawConstant.filter((entry): entry is ImportedLorebookEntry =>
+      entry !== null && typeof entry === 'object' && !Array.isArray(entry))
+    : undefined
   const rawFrontend = obj.frontend
   const frontendObject = rawFrontend !== null && typeof rawFrontend === 'object' && !Array.isArray(rawFrontend)
     ? rawFrontend as Record<string, unknown> : {}
@@ -4376,6 +4397,7 @@ function parseCharacterField(value: unknown): PreprocessedCharacter | null {
     mesExample: readStringField(obj, 'mesExample') ?? '',
     systemPrompt: readStringField(obj, 'systemPrompt') ?? '',
     postHistoryInstructions: readStringField(obj, 'postHistoryInstructions') ?? '',
+    ...(constantLorebookEntries === undefined ? {} : { constantLorebookEntries }),
     atDepthLorebookEntries,
     lorebook,
     // wire 上不传 dynamicLorebookEntries(由服务端 state.characters 提供);
@@ -4807,14 +4829,7 @@ function tavernHelperWorldbookEntryToWorldbookEntry(bookName: string, entry: Tav
   const selectiveLogic = logic === 'and_all' ? 'and-all'
     : logic === 'not_all' ? 'not-all'
       : logic === 'not_any' ? 'not-any' : 'and-any'
-  const positionType = entry.position.type
-  const position = positionType === 'before_character_definition' ? 0
-    : positionType === 'after_character_definition' ? 1
-      : positionType === 'before_example_messages' ? 2
-        : positionType === 'after_example_messages' ? 3
-          : positionType === 'before_author_note' ? 2
-            : positionType === 'after_author_note' ? 3
-              : positionType === 'outlet' ? 7 : 4
+  const positionMetadata = tavernHelperWorldbookMetadata(entry)
   const path = `酒馆助手/${bookName}/${entry.uid}`
   const extra = entry.extra ?? {}
   const group = typeof extra.group === 'string' && extra.group.trim().length > 0 ? extra.group.trim() : undefined
@@ -4847,10 +4862,7 @@ function tavernHelperWorldbookEntryToWorldbookEntry(bookName: string, entry: Tav
     useRegex: false,
     probability: entry.probability,
     useProbability: true,
-    position,
-    role: entry.position.role,
-    ...(typeof entry.position.depth === 'number' && Number.isFinite(entry.position.depth)
-      ? { depth: Math.max(0, Math.trunc(entry.position.depth)) } : {}),
+    ...positionMetadata,
     ...(entry.strategy.scan_depth === 'same_as_global' ? {} : { scanDepth: entry.strategy.scan_depth }),
     ...(entry.effect.sticky === null ? {} : { sticky: entry.effect.sticky }),
     ...(entry.effect.cooldown === null ? {} : { cooldown: entry.effect.cooldown }),
@@ -4890,11 +4902,9 @@ function tavernHelperActiveWorldbookNames(state: TavernHelperState): string[] {
  * 合并成一个 `MemoryWorldbookStore`。
  * 每次 import / PATCH / 切角色 后调用,让 `state.worldbook` 反映最新集合。
  *
- * 注意:角色卡内嵌世界书的**蓝灯条目**(constant && enabled,ST 语义)已在
- * preprocess 阶段按 position 合并进 `character.persona/worldview/style`,
- * **不会**再进 worldbook store,避免重复注入;store 里的卡条目只有绿灯(动态)。
- * 独立世界书的蓝灯条目会进 store(带 constant 标记):2.1 组装绿灯候选时会剔除,
- * ③ response 按 constant+position 每轮常驻注入 —— 独立书蓝灯不走匹配池但每轮都在。
+ * 注意:新格式角色卡内嵌世界书的蓝灯和绿灯都会进入当前 Store；蓝灯在 2.1
+ * 候选组装时剔除，③ response 按 constant+position 每轮常驻注入。旧存档没有
+ * `constantLorebookEntries` 时，已拼入三文档的蓝灯不会再次进入 Store。
  *
  * @param characterId - 该角色"启用"的独立世界书集合,决定哪些 imported 书被合并;
  *                     传 `null` 时只合并 fixture + 角色卡 dynamic(用于启动/无角色场景)
@@ -4908,12 +4918,27 @@ function getMergedWorldbook(
   // 读 —— 后者已经是"fixture+card+imported 合并结果",自引用会把旧条目每
   // rebuild 一次就累加一遍(重复膨胀)。
   const fixtureEntries = [...state.fixtureWorldbook.list()]
-  // 角色卡内嵌世界书只跟角色走:只合并 characterId 对应角色的 dynamic 条目,
-  // 其他角色的书不进当前池子。
+  // 角色卡内嵌世界书只跟角色走:只合并 characterId 对应角色的条目；新格式
+  // 的 constant 和 dynamic 都进入同一 Store，交给统一 ST position/预算链路。
+  // 老存档没有 constantLorebookEntries，因此仍只保留已经预处理进文档的内容。
   const cardEntries: WorldbookEntry[] = []
   if (characterId !== null) {
     const rec = state.characters.get(characterId)
     if (rec !== undefined) {
+      for (const e of rec.preprocessed.constantLorebookEntries ?? []) {
+        cardEntries.push(lorebookEntryToWorldbookEntry(
+          rec.name,
+          e,
+          {
+            recursiveScanning: rec.preprocessed.lorebook?.recursiveScanning === true,
+            recursiveBookId: `character:${safeFileName(rec.name)}`,
+            sourceBookId: `character:${safeFileName(rec.name)}`,
+            ...(rec.preprocessed.lorebook?.tokenBudget === undefined
+              ? {}
+              : { sourceBookTokenBudget: rec.preprocessed.lorebook.tokenBudget }),
+          },
+        ))
+      }
       for (const e of rec.preprocessed.dynamicLorebookEntries) {
         cardEntries.push(lorebookEntryToWorldbookEntry(
           rec.name,

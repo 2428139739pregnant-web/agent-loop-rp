@@ -251,6 +251,7 @@ interface CtxOpts {
   readonly history?: readonly ChatMessage[]
   readonly promptBody?: string
   readonly turnCount?: number
+  readonly worldbook?: AgentContext['worldbook']
 }
 
 function makeCtx(opts: CtxOpts): AgentContext {
@@ -274,7 +275,7 @@ function makeCtx(opts: CtxOpts): AgentContext {
       turnCount: () => opts.turnCount ?? 0,
       summaryPath: () => '',
     },
-    worldbook: { match: () => [], getContent: () => undefined, list: () => [] },
+    worldbook: opts.worldbook ?? { match: () => [], getContent: () => undefined, list: () => [] },
     sessionId: 'test',
   }
 }
@@ -447,6 +448,48 @@ test('responseAgent uses an ST-style message tree when the response template opt
   assert.ok(captured.some(message => message.content === 'old assistant'))
   assert.equal(captured.findLast(message => message.content === 'current')?.role, 'user')
   assert.equal(captured.at(-1)?.content, 'POST_HISTORY')
+})
+
+test('responseAgent places standalone constant entries in their ST message-tree positions', async () => {
+  let captured: ChatMessage[] = []
+  const provider: LLMProvider = {
+    name: 'spy',
+    async chat(messages) {
+      captured = messages
+      return { content: 'r' }
+    },
+  }
+  const ctx = makeCtx({
+    provider,
+    promptBody: `${ST_MESSAGE_TREE_MARKER}\nCONTROL`,
+    worldbook: {
+    match: () => [],
+    getContent: () => undefined,
+    list: () => [
+      { path: 'book/em-top', keywords: [], order: 2, weight: 0, content: 'EM_TOP', constant: true, position: 2 },
+      { path: 'book/em-bottom', keywords: [], order: 3, weight: 0, content: 'EM_BOTTOM', constant: true, position: 3 },
+      { path: 'book/depth', keywords: [], order: 4, weight: 0, content: 'DEPTH', constant: true, position: 4, depth: 6, role: 'user' as const },
+      { path: 'book/an-before', keywords: [], order: 5, weight: 0, content: 'AN_BEFORE', constant: true, position: 5 },
+      { path: 'book/an-after', keywords: [], order: 6, weight: 0, content: 'AN_AFTER', constant: true, position: 6 },
+      { path: 'book/outlet', keywords: [], order: 7, weight: 0, content: 'OUTLET', constant: true, position: 7 },
+    ],
+    },
+  })
+  await responseAgent.run({
+    intent: makeIntent(),
+    worldbook: { matches: [] },
+    contextSegmentation: { segments: [] },
+    userInput: 'current',
+    character: makeCharacter({ postHistoryInstructions: 'POST_HISTORY' }),
+  }, ctx)
+  const positions = (needle: string): number => captured.findIndex(message => message.content.includes(needle))
+  assert.ok(positions('EM_TOP') < positions('[Example Chat]') || positions('[Example Chat]') === -1)
+  assert.ok(positions('EM_BOTTOM') > positions('EM_TOP'))
+  const postHistoryMessage = captured.find(message => message.content.includes('POST_HISTORY'))?.content ?? ''
+  assert.ok(postHistoryMessage.indexOf('AN_BEFORE') < postHistoryMessage.indexOf('POST_HISTORY'))
+  assert.ok(postHistoryMessage.indexOf('AN_AFTER') > postHistoryMessage.indexOf('POST_HISTORY'))
+  assert.equal(captured.find(message => message.content.includes('DEPTH'))?.role, 'user')
+  assert.equal(captured.filter(message => message.content.includes('OUTLET')).length, 1)
 })
 
 test('responseAgent reports and applies the context budget after all injections are assembled', async () => {
@@ -736,6 +779,27 @@ test('buildConstantWorldbookBlocks keeps enabled constants only, sorted order DE
   assert.ok(blocks.style.includes('BLUE_S2'))
   assert.ok(!blocks.persona.includes('GREEN'), '绿灯不常驻')
   assert.ok(!blocks.persona.includes('OFF') && !blocks.worldview.includes('OFF'), '禁用条目跳过')
+})
+
+test('buildConstantWorldbookBlocks preserves ST positions for the message tree', () => {
+  const store = {
+    list: () => [
+      { path: 'book/em-top', keywords: [], order: 2, weight: 0, content: 'EM_TOP', constant: true, position: 2 },
+      { path: 'book/em-bottom', keywords: [], order: 3, weight: 0, content: 'EM_BOTTOM', constant: true, position: 3 },
+      { path: 'book/depth', keywords: [], order: 4, weight: 0, content: 'DEPTH', constant: true, position: 4, depth: 6, role: 'user' as const },
+      { path: 'book/an-before', keywords: [], order: 5, weight: 0, content: 'AN_BEFORE', constant: true, position: 5 },
+      { path: 'book/an-after', keywords: [], order: 6, weight: 0, content: 'AN_AFTER', constant: true, position: 6 },
+      { path: 'book/outlet', keywords: [], order: 7, weight: 0, content: 'OUTLET', constant: true, position: 7 },
+    ],
+  }
+  const blocks = buildConstantWorldbookBlocks(store, text => text, { legacyDocumentFallback: false })
+  assert.ok(blocks.beforeExamples.includes('EM_TOP'))
+  assert.ok(blocks.afterExamples.includes('EM_BOTTOM'))
+  assert.deepEqual(blocks.atDepth.map(entry => [entry.content, entry.depth, entry.role]), [['DEPTH', 6, 'user']])
+  assert.ok(blocks.beforeAuthorNote.includes('AN_BEFORE'))
+  assert.ok(blocks.afterAuthorNote.includes('AN_AFTER'))
+  assert.ok(blocks.outlet.includes('OUTLET'))
+  assert.equal(blocks.style, '')
 })
 
 test('constant worldbook entries honor ST probability after activation', () => {
