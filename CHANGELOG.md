@@ -4,6 +4,7 @@
 
 ### 修复
 
+- Tavern Helper iframe 事件桥对齐酒馆助手的可等待生命周期：`eventEmit` 现在等待异步监听器和注入/变量 RPC，补齐 `eventMakeFirst`、`eventMakeLast`、移除/清理监听 API 与完整 `tavern_events` 常量；生成前事件会等待所有卡片帧确认后再进入 `/api/run`，避免提示词注入竞态。
 - 世界书全局扫描设置补齐 ST 的 `min_activations`/深度上限、`recursive`、`max_recursion_steps`、`include_names` 和 `use_group_scoring`；全部由确定性 matcher 执行，不增加 LLM 调用，并在 UI/API 中可持久化配置。
 - 旧角色存档首次启动时会自动迁移到新的卡片世界书结构，并将迁移后的 `preprocessed.json` 持久化，避免每次启动重复迁移。
 - Tavern Helper 世界书的 `before_author_note/after_author_note` 现在映射到 ST 的 5/6 位置；独立世界书蓝灯按 0–7 位置进入示例区、atDepth、Author's Note 和 outlet，旧自定义模板保留三文档回退。

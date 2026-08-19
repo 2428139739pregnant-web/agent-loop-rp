@@ -236,6 +236,7 @@ PNG 中同时存在 `ccv3` 和旧 `chara` 元数据时，优先使用 `ccv3`。�
 
 - `@INJECT`。
 - Tavern Helper `injectPrompts` 的生成链路：`should_scan` 会参与本轮 World Info 扫描，`position: 'in_chat'` 会按 ST 的 `depth`、`order` 和 `role` 规则加入发送给 response agent 的消息数组，`position: 'none'` 只参与扫描；成功生成后按官方 `once` 语义消费本轮快照。
+- Tavern Helper 事件桥支持 `eventOn`/`eventOnce`、`eventMakeFirst`/`eventMakeLast`、监听清理和可等待 `eventEmit`；生成前宿主会等待卡片帧处理完异步事件及其提示词/变量 RPC，再开始 response 请求，避免 `GENERATION_AFTER_COMMANDS` 注入丢失。
 - 角色卡 iframe 同时暴露官方全局 `injectPrompts`/`uninjectPrompts` 与 `TavernHelper.injectPrompts`/`TavernHelper.uninjectPrompts`，通过宿主 RPC 写入当前聊天；函数型 `filter` 不能跨 JSON 边界持久化，当前对同步 `false` 做安全快照，其余情况按启用处理。
 - `[GENERATE:BEFORE/AFTER]` 和常见 `@@generate_*` 别名。
 - `[RENDER:BEFORE/AFTER]` 和常见 `@@render_*` 别名。

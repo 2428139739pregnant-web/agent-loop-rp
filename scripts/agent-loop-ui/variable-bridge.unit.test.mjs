@@ -194,6 +194,50 @@ test('host lifecycle events cross the iframe bridge with SillyTavern names and a
   assert.equal(frame.window.tavern_events.GENERATION_AFTER_COMMANDS, 'GENERATION_AFTER_COMMANDS')
 })
 
+test('event lifecycle waits for async listeners and exposes ST ordering controls', async () => {
+  const frame = createFrame()
+  const seen = []
+  frame.window.eventMakeLast('ordered', () => seen.push('last'))
+  frame.window.eventMakeFirst('ordered', async () => {
+    seen.push('first-start')
+    await Promise.resolve()
+    seen.push('first-end')
+  })
+  frame.window.eventOnce('ordered', () => seen.push('once'))
+
+  frame.window.dispatchEvent({
+    type: 'message',
+    source: frame.parent,
+    data: {
+      type: 'agent-rp-card-host-event',
+      id: 'frame-test',
+      eventName: 'ordered',
+      eventRequestId: 'request-1',
+      args: [],
+    },
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  await new Promise(resolve => setImmediate(resolve))
+
+  assert.deepEqual(seen, ['first-start', 'first-end', 'last', 'once'])
+  assert.deepEqual(plain(messagesOf(frame, 'agent-rp-card-host-event-done').at(-1)), {
+    type: 'agent-rp-card-host-event-done',
+    id: 'frame-test',
+    eventRequestId: 'request-1',
+    ok: true,
+  })
+
+  const removed = () => seen.push('removed')
+  const stop = frame.window.eventOn('ordered', removed)
+  frame.window.eventRemoveListener('ordered', removed)
+  stop.stop()
+  await frame.window.eventEmit('ordered')
+  assert.equal(seen.includes('removed'), false)
+  frame.window.eventClearEvent('ordered')
+  assert.equal(frame.window.tavern_events.WORLDINFO_SCAN_DONE, 'worldinfo_scan_done')
+  assert.equal(frame.window.iframe_events.GENERATION_STARTED, 'js_generation_started')
+})
+
 test('function-valued injection filters are evaluated at generation preparation', async () => {
   const frame = createFrame()
   frame.window.__agentRpCurrentScriptId = 'script-filter'

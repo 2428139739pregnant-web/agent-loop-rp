@@ -1152,8 +1152,23 @@
         replaceVariables: replaceMvuData,
         eventOn,
         eventOnce,
+        eventMakeFirst: activate(window.eventMakeFirst),
+        eventMakeLast: activate(window.eventMakeLast),
+        eventRemoveListener: window.eventRemoveListener,
+        eventClearEvent: window.eventClearEvent,
+        eventClearListener: window.eventClearListener,
+        eventClearAll: window.eventClearAll,
         eventEmit,
         waitGlobalInitialized: async () => undefined,
+      }
+      const eventSource = {
+        on: eventOn,
+        once: eventOnce,
+        makeFirst: activate(window.eventMakeFirst),
+        makeLast: activate(window.eventMakeLast),
+        removeListener: window.eventRemoveListener,
+        emit: eventEmit,
+        emitAndWait: eventEmit,
       }
       return {
         runtime,
@@ -1163,7 +1178,7 @@
         jQuery: query,
         _: window._,
         TavernHelper: tavernHelper,
-        SillyTavern: { eventSource: { on: eventOn, once: eventOnce, emit: eventEmit }, getContext: function () { return this }, chat: [] },
+        SillyTavern: { eventSource, eventTypes: window.tavern_events, getContext: function () { return this }, chat: [], characters: [], characterId: 0, name2: '', extensionSettings: {}, getCurrentChatId: () => window.__agentRpCardFrameId },
         getAllVariables,
         getVariable,
         waitGlobalInitialized: async () => undefined,
@@ -1233,11 +1248,35 @@
         stop = window.eventOn(type, (...args) => { stop.stop(); return listener(...args) })
         return stop
       }
-      window.eventEmit = (type, ...args) => {
+      window.eventMakeFirst = (type, listener) => {
+        const key = String(type)
+        const list = window.__agentRpCardListeners.get(key) || []
+        const entry = { listener, runtime: activeCardRuntime() }
+        list.unshift(entry)
+        window.__agentRpCardListeners.set(key, list)
+        const stop = () => window.__agentRpCardListeners.set(key, (window.__agentRpCardListeners.get(key) || []).filter((item) => item !== entry))
+        stop.stop = stop
+        return stop
+      }
+      window.eventMakeLast = (type, listener) => window.eventOn(type, listener)
+      window.eventRemoveListener = (type, listener) => {
+        const key = String(type)
+        window.__agentRpCardListeners.set(key, (window.__agentRpCardListeners.get(key) || []).filter((item) => item.listener !== listener))
+      }
+      window.eventClearEvent = (type) => window.__agentRpCardListeners.delete(String(type))
+      window.eventClearListener = (listener) => {
+        for (const [key, list] of window.__agentRpCardListeners) {
+          const next = list.filter((item) => item.listener !== listener)
+          if (next.length === 0) window.__agentRpCardListeners.delete(key)
+          else window.__agentRpCardListeners.set(key, next)
+        }
+      }
+      window.eventClearAll = () => window.__agentRpCardListeners.clear()
+      window.eventEmit = async (type, ...args) => {
         for (const entry of [...(window.__agentRpCardListeners.get(String(type)) || [])]) {
           try {
             if (entry.runtime?.root) window.__agentRpActiveCardRoot = entry.runtime.root
-            entry.listener(...args)
+            await entry.listener(...args)
           } catch (error) { console.error('[agent-rp Tavern Helper event]', error) }
         }
       }
@@ -1260,10 +1299,16 @@
         replaceVariables: window.Mvu.replaceMvuData,
         eventOn: window.eventOn,
         eventOnce: window.eventOnce,
+        eventMakeFirst: window.eventMakeFirst,
+        eventMakeLast: window.eventMakeLast,
+        eventRemoveListener: window.eventRemoveListener,
+        eventClearEvent: window.eventClearEvent,
+        eventClearListener: window.eventClearListener,
+        eventClearAll: window.eventClearAll,
         eventEmit: window.eventEmit,
         waitGlobalInitialized: async () => undefined,
       }
-      window.SillyTavern = { eventSource: { on: window.eventOn, once: window.eventOnce, emit: window.eventEmit }, getContext: function () { return this }, chat: [] }
+      window.SillyTavern = { eventSource: { on: window.eventOn, once: window.eventOnce, makeFirst: window.eventMakeFirst, makeLast: window.eventMakeLast, removeListener: window.eventRemoveListener, emit: window.eventEmit, emitAndWait: window.eventEmit }, eventTypes: window.tavern_events, getContext: function () { return this }, chat: [] }
       window.waitGlobalInitialized = async () => undefined
       window.errorCatched = (fn) => function (...args) { try { return fn.apply(this, args) } catch (error) { console.error('[agent-rp card script]', error) } }
       window.$ = (value) => {
@@ -1395,12 +1440,16 @@
     let target=object; for(let i=0;i<parts.length-1;i++){if(!target[parts[i]]||typeof target[parts[i]]!=='object')target[parts[i]]={};target=target[parts[i]];}
     target[parts[parts.length-1]]=value; return object;
   };
-  const __emit=(type,...args)=>{for(const item of [...(__listeners.get(String(type))||[])]){try{item.fn(...args);}catch(error){console.error('[agent-rp card event]',error);}if(item.once)__listeners.get(String(type))?.delete(item);}};
-  const __on=(type,fn,once=false)=>{const key=String(type);const item={fn,once};const set=__listeners.get(key)||new Set();set.add(item);__listeners.set(key,set);return ()=>set.delete(item);};
+  const __removeListener=(type,item)=>{const key=String(type);const list=__listeners.get(key)||[];const next=list.filter(candidate=>candidate!==item);if(next.length===0)__listeners.delete(key);else __listeners.set(key,next);};
+  const __on=(type,fn,once=false,position='last')=>{if(typeof fn!=='function')throw new TypeError('event listener must be a function');const key=String(type);const item={fn,once};const list=__listeners.get(key)||[];if(position==='first')list.unshift(item);else list.push(item);__listeners.set(key,list);const stop=()=>__removeListener(key,item);stop.stop=stop;return stop;};
+  const __emit=async(type,...args)=>{const key=String(type);for(const item of [...(__listeners.get(key)||[])]){if(item.once)__removeListener(key,item);try{await item.fn(...args);}catch(error){console.error('[agent-rp card event]',error);}}};
+  const __clearEvent=type=>__listeners.delete(String(type));
+  const __clearListener=fn=>{for(const [key,list] of __listeners){const next=list.filter(item=>item.fn!==fn);if(next.length===0)__listeners.delete(key);else __listeners.set(key,next);}};
   const __post=(type,payload={})=>{try{window.parent.postMessage({type,id:__frameId,...payload},'*');}catch{} };
-  const __rpcPending=new Map();let __rpcSeq=0;
+  const __rpcPending=new Map();const __rpcInFlight=new Set();let __rpcSeq=0;
+  const __waitForRpc=async()=>{while(__rpcInFlight.size>0)await Promise.allSettled([...__rpcInFlight]);};
   const __injectionFilters=new Map();
-  const __rpc=(method,payload={})=>new Promise((resolve,reject)=>{const requestId=__frameId+'-rpc-'+(++__rpcSeq);const timer=setTimeout(()=>{__rpcPending.delete(requestId);reject(new Error('Tavern Helper host RPC timed out: '+method));},15000);__rpcPending.set(requestId,{resolve,reject,timer});__post('agent-rp-card-rpc',{requestId,method,payload:__clone(payload)});});
+  const __rpc=(method,payload={})=>{const request=new Promise((resolve,reject)=>{const requestId=__frameId+'-rpc-'+(++__rpcSeq);const timer=setTimeout(()=>{__rpcPending.delete(requestId);reject(new Error('Tavern Helper host RPC timed out: '+method));},15000);__rpcPending.set(requestId,{resolve,reject,timer});__post('agent-rp-card-rpc',{requestId,method,payload:__clone(payload)});});__rpcInFlight.add(request);request.then(()=>__rpcInFlight.delete(request),()=>__rpcInFlight.delete(request));return request;};
   const __serializeError=error=>({name:String(error?.name||'Error'),message:String(error?.message||error||''),stack:String(error?.stack||'').slice(0,4000)});
   window.addEventListener('error',event=>{try{__post('agent-rp-card-script-error',{error:__serializeError(event.error||event.message),source:String(event.filename||''),line:Number(event.lineno||0),column:Number(event.colno||0)});}catch{} });
   window.addEventListener('unhandledrejection',event=>{try{__post('agent-rp-card-script-error',{error:__serializeError(event.reason),source:'unhandledrejection'});}catch{} });
@@ -1585,6 +1634,12 @@
     updateScriptTreesWith:__updateScriptTreesWith,
     eventOn:(type,fn)=>__on(type,fn,false),
     eventOnce:(type,fn)=>__on(type,fn,true),
+    eventMakeFirst:(type,fn)=>__on(type,fn,false,'first'),
+    eventMakeLast:(type,fn)=>__on(type,fn,false,'last'),
+    eventRemoveListener:(type,fn)=>{for(const item of [...(__listeners.get(String(type))||[])])if(item.fn===fn)__removeListener(type,item);},
+    eventClearEvent:__clearEvent,
+    eventClearListener:__clearListener,
+    eventClearAll:()=>__listeners.clear(),
     eventEmit:__emit,
   });
   window.__agentRpCardFrameId=__frameId;
@@ -1602,8 +1657,12 @@
   window.updateScriptTreesWith=__updateScriptTreesWith;
   window.eventOn=(type,fn)=>__on(type,fn,false);
   window.eventOnce=(type,fn)=>__on(type,fn,true);
+  window.eventMakeFirst=(type,fn)=>__on(type,fn,false,'first');
+  window.eventMakeLast=(type,fn)=>__on(type,fn,false,'last');
   window.eventEmit=(type,...args)=>__emit(type,...args);
-  window.eventRemoveListener=(type,fn)=>{for(const item of [...(__listeners.get(String(type))||[])])if(item.fn===fn)__listeners.get(String(type))?.delete(item);};
+  window.eventRemoveListener=(type,fn)=>{for(const item of [...(__listeners.get(String(type))||[])])if(item.fn===fn)__removeListener(type,item);};
+  window.eventClearEvent=__clearEvent;
+  window.eventClearListener=__clearListener;
   window.eventClearAll=()=>__listeners.clear();
   window.waitGlobalInitialized=async()=>undefined;
   window.errorCatched=fn=>function(...args){try{return fn.apply(this,args);}catch(error){console.error('[agent-rp card script]',error);}};
@@ -1695,14 +1754,28 @@
   window.registerMessageResolver=()=>undefined;
   window.registerVariableSchema=(schema)=>{window.__agentRpVariableSchema=schema;return schema;};
   window.appendInexistentScriptButtons=()=>undefined;
-  window.tavern_events={CHAT_CHANGED:'chat_id_changed',CHAT_LOADED:'chatLoaded',CHAT_COMPLETION_SETTINGS_READY:'chat_completion_settings_ready',GENERATION_AFTER_COMMANDS:'GENERATION_AFTER_COMMANDS',GENERATION_STARTED:'generation_started',GENERATION_STOPPED:'generation_stopped',GENERATION_ENDED:'generation_ended',MESSAGE_DELETED:'message_deleted',MESSAGE_RECEIVED:'message_received',MESSAGE_SENT:'message_sent',MESSAGE_EDITED:'message_edited',MESSAGE_UPDATED:'message_updated',MESSAGE_SWIPED:'message_swiped',CHARACTER_MESSAGE_RENDERED:'character_message_rendered',WORLDINFO_UPDATED:'worldinfo_updated',WORLDINFO_SETTINGS_UPDATED:'worldinfo_settings_updated',WORLD_INFO_ACTIVATED:'world_info_activated'};
+  window.iframe_events={MESSAGE_IFRAME_RENDER_STARTED:'message_iframe_render_started',MESSAGE_IFRAME_RENDER_ENDED:'message_iframe_render_ended',GENERATION_STARTED:'js_generation_started',STREAM_TOKEN_RECEIVED_FULLY:'js_stream_token_received_fully',STREAM_TOKEN_RECEIVED_INCREMENTALLY:'js_stream_token_received_incrementally',GENERATION_ENDED:'js_generation_ended'};
+  window.tavern_events={
+    APP_READY:'app_ready',EXTRAS_CONNECTED:'extras_connected',MESSAGE_SWIPED:'message_swiped',MESSAGE_SENT:'message_sent',MESSAGE_RECEIVED:'message_received',MESSAGE_EDITED:'message_edited',MESSAGE_DELETED:'message_deleted',MESSAGE_UPDATED:'message_updated',MORE_MESSAGES_LOADED:'more_messages_loaded',IMPERSONATE_READY:'impersonate_ready',CHAT_CHANGED:'chat_id_changed',CHAT_LOADED:'chatLoaded',
+    GENERATION_AFTER_COMMANDS:'GENERATION_AFTER_COMMANDS',GENERATION_STARTED:'generation_started',GENERATION_STOPPED:'generation_stopped',GENERATION_ENDED:'generation_ended',GENERATE_BEFORE_COMBINE_PROMPTS:'generate_before_combine_prompts',GENERATE_AFTER_COMBINE_PROMPTS:'generate_after_combine_prompts',GENERATE_AFTER_DATA:'generate_after_data',
+    WORLDINFO_SETTINGS_UPDATED:'worldinfo_settings_updated',WORLDINFO_UPDATED:'worldinfo_updated',WORLD_INFO_ACTIVATED:'world_info_activated',WORLDINFO_FORCE_ACTIVATE:'worldinfo_force_activate',WORLDINFO_ENTRIES_LOADED:'worldinfo_entries_loaded',WORLDINFO_SCAN_DONE:'worldinfo_scan_done',
+    CHARACTER_EDITOR_OPENED:'character_editor_opened',CHARACTER_EDITED:'character_edited',CHARACTER_PAGE_LOADED:'character_page_loaded',CHARACTER_FIRST_MESSAGE_SELECTED:'character_first_message_selected',CHARACTER_MESSAGE_RENDERED:'character_message_rendered',USER_MESSAGE_RENDERED:'user_message_rendered',
+    CHAT_DELETED:'chat_deleted',CHAT_CREATED:'chat_created',MESSAGE_SWIPE_DELETED:'message_swipe_deleted',MESSAGE_FILE_EMBEDDED:'message_file_embedded',MESSAGE_REASONING_EDITED:'message_reasoning_edited',MESSAGE_REASONING_DELETED:'message_reasoning_deleted',
+    TEXT_COMPLETION_SETTINGS_READY:'text_completion_settings_ready',CHAT_COMPLETION_SETTINGS_READY:'chat_completion_settings_ready',CHAT_COMPLETION_PROMPT_READY:'chat_completion_prompt_ready',EXTENSIONS_FIRST_LOAD:'extensions_first_load',EXTENSION_SETTINGS_LOADED:'extension_settings_loaded',SETTINGS_LOADED:'settings_loaded',SETTINGS_UPDATED:'settings_updated',
+    STREAM_TOKEN_RECEIVED:'stream_token_received',SMOOTH_STREAM_TOKEN_RECEIVED:'stream_token_received',STREAM_REASONING_DONE:'stream_reasoning_done',TOOL_CALLS_PERFORMED:'tool_calls_performed',TOOL_CALLS_RENDERED:'tool_calls_rendered',PRESET_CHANGED:'preset_changed',PRESET_DELETED:'preset_deleted',PRESET_RENAMED:'preset_renamed',MAIN_API_CHANGED:'main_api_changed',ONLINE_STATUS_CHANGED:'online_status_changed',FILE_ATTACHMENT_DELETED:'file_attachment_deleted',MEDIA_ATTACHMENT_DELETED:'media_attachment_deleted',FORCE_SET_BACKGROUND:'force_set_background',OPEN_CHARACTER_LIBRARY:'open_character_library',CONNECTION_PROFILE_LOADED:'connection_profile_loaded',CONNECTION_PROFILE_CREATED:'connection_profile_created',CONNECTION_PROFILE_DELETED:'connection_profile_deleted',CONNECTION_PROFILE_UPDATED:'connection_profile_updated',
+    VARIABLE_UPDATED:'variable_updated',SD_PROMPT_PROCESSING:'sd_prompt_processing',IMAGE_SWIPED:'image_swiped',CHATCOMPLETION_SOURCE_CHANGED:'chatcompletion_source_changed',CHATCOMPLETION_MODEL_CHANGED:'chatcompletion_model_changed',OAI_PRESET_CHANGED_BEFORE:'oai_preset_changed_before',OAI_PRESET_CHANGED_AFTER:'oai_preset_changed_after',OAI_PRESET_EXPORT_READY:'oai_preset_export_ready',OAI_PRESET_IMPORT_READY:'oai_preset_import_ready',CONNECTION_PROFILE_CREATED:'connection_profile_created',CONNECTION_PROFILE_UPDATED:'connection_profile_updated',
+    CHARACTER_DELETED:'characterDeleted',CHARACTER_DUPLICATED:'character_duplicated',CHARACTER_RENAMED:'character_renamed',CHARACTER_RENAMED_IN_PAST_CHAT:'character_renamed_in_past_chat',SECRET_WRITTEN:'secret_written',SECRET_DELETED:'secret_deleted',SECRET_ROTATED:'secret_rotated',SECRET_EDITED:'secret_edited',CHARACTER_MANAGEMENT_DROPDOWN:'charManagementDropdown',MOVABLE_PANELS_RESET:'movable_panels_reset',SETTINGS_LOADED_BEFORE:'settings_loaded_before',SETTINGS_LOADED_AFTER:'settings_loaded_after',
+    CHATCOMPLETION_SOURCE_CHANGED:'chatcompletion_source_changed',CHATCOMPLETION_MODEL_CHANGED:'chatcompletion_model_changed',
+  };
   window.toastr={success:()=>{},info:()=>{},warning:(message)=>console.warn('[agent-rp card]',message),error:(message)=>console.error('[agent-rp card]',message)};
   if(!window.EjsTemplate)window.EjsTemplate={render:(template)=>String(template??''),compile:(template)=>()=>String(template??'')};
 if(!window.showdown)window.showdown={Converter:class{constructor(options={}){this.options=options;}makeHtml(value){return String(value??'').replace(/&/gu,'&amp;').replace(/</gu,'&lt;').replace(/>/gu,'&gt;').replace(/\\*\\*(.+?)\\*\\*/gu,'<strong>$1</strong>').replace(/\\*(.+?)\\*/gu,'<em>$1</em>').replace(/\\n/gu,'<br>');}}};
   const __events={VARIABLE_INITIALIZED:'mag_variable_initialized',VARIABLE_UPDATE_STARTED:'mag_variable_update_started',VARIABLE_UPDATE_ENDED:'mag_variable_update_ended'};
   window.Mvu=Object.assign({},__parent?.Mvu||{}, {events:__events,getMvuData:option=>__scopeValue(option),getVariable:window.getVariable,replaceMvuData:(value,option)=>__replaceVariables(value,option),isDuringExtraAnalysis:()=>false});
-  window.TavernHelper=Object.assign({},__parent?.TavernHelper||{}, {getAllVariables:()=>__getVariables({type:'chat'}),getVariable:(path,fallback)=>__get(__getVariables({type:'chat'}),path,fallback),getVariables:__getVariables,replaceVariables:__replaceVariables,updateVariablesWith:__updateVariablesWith,insertOrAssignVariables:__insertOrAssignVariables,insertVariables:__insertVariables,deleteVariable:__deleteVariable,getScriptTrees:__getScriptTrees,replaceScriptTrees:__replaceScriptTrees,updateScriptTreesWith:__updateScriptTreesWith,injectPrompts:__injectPrompts,uninjectPrompts:__uninjectPrompts,getChatMessages:window.getChatMessages,setChatMessages:window.setChatMessages,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,rebindGlobalWorldbooks:window.rebindGlobalWorldbooks,getCharWorldbookNames:(_characterName='current')=>window.getCharWorldbookNames(),rebindCharWorldbooks:(_characterName='current',books={})=>window.rebindCharWorldbooks(books?.primary??null,Array.isArray(books?.additional)?books.additional:[]),getChatWorldbookName:(_chatName='current')=>window.getChatWorldbookName(),rebindChatWorldbook:(_chatName='current',name=null)=>window.rebindChatWorldbook(name),getWorldbook:window.getWorldbook,replaceWorldbook:window.replaceWorldbook,updateWorldbookWith:window.updateWorldbookWith,getTavernHelperVersion:window.getTavernHelperVersion,getLastMessageId:window.getLastMessageId,eventOn:window.eventOn,eventOnce:window.eventOnce,eventEmit:window.eventEmit,waitGlobalInitialized:window.waitGlobalInitialized});
-  window.SillyTavern=Object.assign({},__parent?.SillyTavern||{}, {eventSource:{on:window.eventOn,once:window.eventOnce,emit:window.eventEmit},getContext:()=>({eventSource:window.SillyTavern.eventSource,chat:window.SillyTavern.chat}),chat:[],characters:[],characterId:0,name2:'',extensionSettings:{},chatCompletionSettings:{},getCurrentChatId:()=>window.__agentRpCardFrameId,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),saveChat:async()=>undefined,saveSettingsDebounced:()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined});
+  window.TavernHelper=Object.assign({},__parent?.TavernHelper||{}, {getAllVariables:()=>__getVariables({type:'chat'}),getVariable:(path,fallback)=>__get(__getVariables({type:'chat'}),path,fallback),getVariables:__getVariables,replaceVariables:__replaceVariables,updateVariablesWith:__updateVariablesWith,insertOrAssignVariables:__insertOrAssignVariables,insertVariables:__insertVariables,deleteVariable:__deleteVariable,getScriptTrees:__getScriptTrees,replaceScriptTrees:__replaceScriptTrees,updateScriptTreesWith:__updateScriptTreesWith,injectPrompts:__injectPrompts,uninjectPrompts:__uninjectPrompts,getChatMessages:window.getChatMessages,setChatMessages:window.setChatMessages,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,rebindGlobalWorldbooks:window.rebindGlobalWorldbooks,getCharWorldbookNames:(_characterName='current')=>window.getCharWorldbookNames(),rebindCharWorldbooks:(_characterName='current',books={})=>window.rebindCharWorldbooks(books?.primary??null,Array.isArray(books?.additional)?books.additional:[]),getChatWorldbookName:(_chatName='current')=>window.getChatWorldbookName(),rebindChatWorldbook:(_chatName='current',name=null)=>window.rebindChatWorldbook(name),getWorldbook:window.getWorldbook,replaceWorldbook:window.replaceWorldbook,updateWorldbookWith:window.updateWorldbookWith,getTavernHelperVersion:window.getTavernHelperVersion,getLastMessageId:window.getLastMessageId,eventOn:window.eventOn,eventOnce:window.eventOnce,eventMakeFirst:window.eventMakeFirst,eventMakeLast:window.eventMakeLast,eventRemoveListener:window.eventRemoveListener,eventClearEvent:window.eventClearEvent,eventClearListener:window.eventClearListener,eventClearAll:window.eventClearAll,eventEmit:window.eventEmit,waitGlobalInitialized:window.waitGlobalInitialized});
+  const __stEventSource={on:window.eventOn,once:window.eventOnce,makeFirst:window.eventMakeFirst,makeLast:window.eventMakeLast,removeListener:window.eventRemoveListener,emit:window.eventEmit,emitAndWait:window.eventEmit};
+  const __stContext={chat:[],characters:[],name1:'',name2:'',characterId:0,groupId:null,chatId:__chatId,eventSource:__stEventSource,eventTypes:window.tavern_events,extensionPrompts:{},chatMetadata:{},maxContext:0,getCurrentChatId:()=>__chatId,getChatMessages:window.getChatMessages,getWorldbook:window.getWorldbook,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),saveChat:async()=>undefined,saveSettingsDebounced:async()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined};
+  window.SillyTavern=Object.assign({},__parent?.SillyTavern||{}, {eventSource:__stEventSource,eventTypes:window.tavern_events,getContext:()=>__stContext,chat:__stContext.chat,characters:__stContext.characters,characterId:0,name2:'',extensionSettings:{},chatCompletionSettings:{},getCurrentChatId:()=>__chatId,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),saveChat:async()=>undefined,saveSettingsDebounced:async()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined});
   const __wrap=items=>{const list=Array.from(items||[]),api={length:list.length};list.forEach((el,i)=>api[i]=el);api.toArray=()=>list.slice();api.get=index=>index===undefined?list.slice():list[index];api.each=fn=>{list.forEach((el,i)=>fn.call(el,i,el));return api;};api.clone=()=>__wrap(list.map(el=>el.cloneNode?.(true)).filter(Boolean));api.appendTo=target=>{const destination=typeof target==='string'?__query(target):target?.length!==undefined?target:__wrap([target]);destination?.each?.((_i,el)=>list.forEach(item=>el.append(item)));return api;};api.find=sel=>__wrap(list.flatMap(el=>[...el.querySelectorAll(sel)]));api.parent=()=>__wrap(list.map(el=>el.parentElement).filter(Boolean));api.siblings=()=>__wrap(list.flatMap(el=>el.parentElement?[...el.parentElement.children].filter(x=>x!==el):[]));api.addClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.add(x)));api.removeClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.remove(x)));api.toggleClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.toggle(x)));api.hasClass=v=>!!list[0]?.classList.contains(String(v||''));api.html=v=>v===undefined?(list[0]?.innerHTML||''):api.each((_i,el)=>el.innerHTML=String(v));api.text=v=>v===undefined?(list[0]?.textContent||''):api.each((_i,el)=>el.textContent=String(v));api.val=v=>v===undefined?(list[0]?.value||''):api.each((_i,el)=>el.value=String(v));api.attr=(k,v)=>v===undefined?list[0]?.getAttribute(k):api.each((_i,el)=>el.setAttribute(k,String(v)));api.data=(k,v)=>v===undefined?list[0]?.dataset?.[k]:api.each((_i,el)=>el.dataset[k]=String(v));api.empty=()=>api.each((_i,el)=>el.replaceChildren());api.append=v=>api.each((_i,el)=>typeof v==='string'?el.insertAdjacentHTML('beforeend',v):v?.nodeType&&el.append(v));api.css=(k,v)=>v===undefined?(list[0]?getComputedStyle(list[0])[k]:undefined):api.each((_i,el)=>el.style[k]=String(v));api.show=()=>api.each((_i,el)=>el.style.display='');api.hide=()=>api.each((_i,el)=>el.style.display='none');api.on=(type,fn)=>api.each((_i,el)=>el.addEventListener(type,fn));api.off=(type,fn)=>api.each((_i,el)=>el.removeEventListener(type,fn));api.trigger=type=>api.each((_i,el)=>el.dispatchEvent(new Event(type,{bubbles:true})));api.sortable=()=>api;return api;};
   const __query=value=>{if(typeof value==='function'){if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',value,{once:true});else queueMicrotask(value);return __wrap([]);}if(value?.nodeType)return __wrap([value]);if(Array.isArray(value))return __wrap(value);try{return __wrap(document.querySelectorAll(String(value||'')));}catch{return __wrap([]);}};
   if(!window.$){window.$=__query;window.jQuery=__query;}
@@ -1715,7 +1788,12 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
     }
     if(event.data.type==='agent-rp-card-host-event'){
       const eventName=String(event.data.eventName||'');
-      if(eventName)__emit(eventName,...(Array.isArray(event.data.args)?event.data.args:[]));
+      if(eventName){
+        const emitted=__emit(eventName,...(Array.isArray(event.data.args)?event.data.args:[]));
+        if(event.data.eventRequestId){
+          Promise.resolve(emitted).then(()=>__waitForRpc()).then(()=>__post('agent-rp-card-host-event-done',{eventRequestId:String(event.data.eventRequestId),ok:true})).catch(error=>__post('agent-rp-card-host-event-done',{eventRequestId:String(event.data.eventRequestId),ok:false,error:String(error?.message||error)}));
+        }
+      }
       return;
     }
     if(event.data.type==='agent-rp-card-prepare-generation'){
@@ -1792,7 +1870,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       return '<!doctype html>\n' + doc.documentElement.outerHTML
     }
 
-    function postCardHostEvent(frame, eventName, args = []) {
+    function postCardHostEvent(frame, eventName, args = [], eventRequestId = null) {
       if (!frame?.contentWindow || !frame.id || !eventName) return
       try {
         frame.contentWindow.postMessage({
@@ -1800,16 +1878,43 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           id: frame.id,
           eventName: String(eventName),
           args: Array.isArray(args) ? args : [],
+          ...(eventRequestId === null ? {} : { eventRequestId: String(eventRequestId) }),
         }, '*')
       } catch { /* a frame may be unloading */ }
     }
 
-    function broadcastCardHostEvent(sessionId, eventName, ...args) {
+    async function broadcastCardHostEvent(sessionId, eventName, ...args) {
       const expectedSession = sessionId === null || sessionId === undefined ? '' : String(sessionId)
-      for (const frame of document.querySelectorAll('iframe.msg-card-html-frame')) {
-        if (expectedSession && frame.dataset.sessionId !== expectedSession) continue
-        postCardHostEvent(frame, eventName, args)
-      }
+      const frames = [...document.querySelectorAll('iframe.msg-card-html-frame')]
+        .filter(frame => !expectedSession || frame.dataset.sessionId === expectedSession)
+        .filter(frame => frame.contentWindow && frame.id)
+      if (frames.length === 0) return
+      const requestId = `host-event-${Math.random().toString(36).slice(2)}-${Date.now()}`
+      await new Promise((resolve) => {
+        const expected = new Set(frames.map(frame => frame.id))
+        let timer
+        const finish = () => {
+          clearTimeout(timer)
+          window.removeEventListener('message', onMessage)
+          resolve(undefined)
+        }
+        const onMessage = (event) => {
+          const data = event.data
+          if (!event.source || !data || data.type !== 'agent-rp-card-host-event-done' || String(data.eventRequestId || '') !== requestId) return
+          if (!expected.has(data.id)) return
+          const frame = frames.find(item => item.id === data.id)
+          if (frame && event.source !== frame.contentWindow) return
+          expected.delete(data.id)
+          if (expected.size === 0) finish()
+        }
+        window.addEventListener('message', onMessage)
+        // An iframe can be closed while an event is in flight. The timeout
+        // prevents generation from being held by a stale frame, while the
+        // normal path waits for every async listener and its RPC mutations.
+        timer = setTimeout(finish, 5000)
+        for (const frame of frames) postCardHostEvent(frame, eventName, args, requestId)
+        if (expected.size === 0) finish()
+      })
     }
 
     async function prepareCardHostInjections(sessionId) {
@@ -3658,10 +3763,10 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
         // Match SillyTavern's host lifecycle. The actual prompt pipeline still
         // runs on the server, but card extensions must see the same ordering
         // before their generation hooks are evaluated.
-        if (!bodyObj?.reroll) broadcastCardHostEvent(sessionId, 'message_sent', Number.isSafeInteger(lifecycle.userMessageId) ? lifecycle.userMessageId : -1)
-        broadcastCardHostEvent(sessionId, 'generation_started', generationType, {}, false)
-        broadcastCardHostEvent(sessionId, 'GENERATION_AFTER_COMMANDS', generationType, {}, false)
-        if (bodyObj?.reroll) broadcastCardHostEvent(sessionId, 'message_deleted', messageId)
+        if (!bodyObj?.reroll) await broadcastCardHostEvent(sessionId, 'message_sent', Number.isSafeInteger(lifecycle.userMessageId) ? lifecycle.userMessageId : -1)
+        await broadcastCardHostEvent(sessionId, 'generation_started', generationType, {}, false)
+        await broadcastCardHostEvent(sessionId, 'GENERATION_AFTER_COMMANDS', generationType, {}, false)
+        if (bodyObj?.reroll) await broadcastCardHostEvent(sessionId, 'message_deleted', messageId)
         let resp
         try {
           resp = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyObj) })
@@ -3703,9 +3808,9 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                   setProgressStages((prev) => ({ ...prev, [payload.name]: payload.status }))
                   if (!lifecycleFinished) {
                     lifecycleFinished = true
-                    broadcastCardHostEvent(sessionId, 'message_received', messageId, generationType)
-                    broadcastCardHostEvent(sessionId, 'character_message_rendered', messageId, generationType)
-                    broadcastCardHostEvent(sessionId, 'generation_ended', generationType)
+                    await broadcastCardHostEvent(sessionId, 'message_received', messageId, generationType)
+                    await broadcastCardHostEvent(sessionId, 'character_message_rendered', messageId, generationType)
+                    await broadcastCardHostEvent(sessionId, 'generation_ended', generationType)
                   }
                 } else if (payload.name === 'error') {
                   setError(payload.message || '未知错误')
