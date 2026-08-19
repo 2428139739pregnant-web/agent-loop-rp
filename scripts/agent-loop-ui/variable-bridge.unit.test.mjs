@@ -128,3 +128,28 @@ test('omitting option keeps the legacy chat default while preserving option on t
   assert.deepEqual(plain(event?.option), { type: 'chat' })
   assert.deepEqual(plain(frame.window.getVariables()), { stat_data: { chat: 'updated' } })
 })
+
+test('Tavern Helper injectPrompts and uninjectPrompts use the canonical mutation bridge', async () => {
+  const frame = createFrame()
+  const handle = frame.window.injectPrompts([
+    { id: 'prompt-a', position: 'in_chat', depth: 0, role: 'system', content: 'A', should_scan: true },
+    { id: 'prompt-b', position: 'none', depth: 1, role: 'user', content: 'B' },
+  ], { once: true })
+  const inject = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(inject?.method, 'tavern-helper-mutation')
+  assert.equal(inject?.payload.operation, 'inject-prompts')
+  assert.equal(inject?.payload.scriptId, 'frame-test')
+  assert.equal(inject?.payload.once, true)
+  assert.deepEqual(plain(inject?.payload.prompts), [
+    { id: 'prompt-a', position: 'in_chat', depth: 0, role: 'system', content: 'A', should_scan: true },
+    { id: 'prompt-b', position: 'none', depth: 1, role: 'user', content: 'B' },
+  ])
+
+  handle.uninject()
+  const uninject = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(uninject?.method, 'tavern-helper-mutation')
+  assert.equal(uninject?.payload.operation, 'uninject-prompts')
+  assert.deepEqual(plain(uninject?.payload.ids), ['prompt-a', 'prompt-b'])
+  assert.equal(typeof frame.window.TavernHelper.injectPrompts, 'function')
+  assert.equal(typeof frame.window.TavernHelper.uninjectPrompts, 'function')
+})

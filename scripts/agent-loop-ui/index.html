@@ -1602,6 +1602,33 @@
   window.getPreferredScriptId=()=>__currentScriptId();
   window.getTavernHelperVersion=()=> '3.4.17';
   window.getFunctionCallingApiVersionUnsupportedMessage=()=>'';
+  const __normalizeInjectionPrompt=prompt=>{
+    if(!prompt||typeof prompt!=='object')return null;
+    const normalized={...prompt};
+    if(typeof normalized.id!=='string'||normalized.id.trim()==='')return null;
+    normalized.id=normalized.id.trim();
+    if(typeof normalized.filter==='function'){
+      try{
+        const result=normalized.filter();
+        // The official filter may be async. A function cannot cross the
+        // JSON/RPC boundary; preserve synchronous false as a safe snapshot
+        // and leave async/true filters enabled for the host selection lane.
+        if(typeof result==='boolean')normalized.filter=result;
+        else delete normalized.filter;
+      }catch{normalized.filter=false;}
+    }
+    return normalized;
+  };
+  const __injectPrompts=(prompts,options={})=>{
+    const normalized=(Array.isArray(prompts)?prompts:[]).map(__normalizeInjectionPrompt).filter(Boolean);
+    const ids=normalized.map(prompt=>prompt.id);
+    const payload={format:0,operation:'inject-prompts',scriptId:__currentScriptId(),prompts:__clone(normalized),...(typeof options?.once==='boolean'?{once:options.once}:{})};
+    void __rpc('tavern-helper-mutation',payload).catch(error=>console.error('[agent-rp Tavern Helper injectPrompts]',error));
+    return {uninject:()=>{if(!ids.length)return;void __rpc('tavern-helper-mutation',{format:0,operation:'uninject-prompts',ids}).catch(error=>console.error('[agent-rp Tavern Helper uninjectPrompts]',error));}};
+  };
+  const __uninjectPrompts=ids=>{const normalized=(Array.isArray(ids)?ids:[]).map(String).filter(Boolean);if(!normalized.length)return;void __rpc('tavern-helper-mutation',{format:0,operation:'uninject-prompts',ids:normalized}).catch(error=>console.error('[agent-rp Tavern Helper uninjectPrompts]',error));};
+  window.injectPrompts=__injectPrompts;
+  window.uninjectPrompts=__uninjectPrompts;
   window.getLocaleMessage=(key)=>String(key??'');
   window.updateVariables=value=>__replace(value);
   window.getMvuVariable=window.getVariable;
@@ -1647,7 +1674,7 @@
 if(!window.showdown)window.showdown={Converter:class{constructor(options={}){this.options=options;}makeHtml(value){return String(value??'').replace(/&/gu,'&amp;').replace(/</gu,'&lt;').replace(/>/gu,'&gt;').replace(/\\*\\*(.+?)\\*\\*/gu,'<strong>$1</strong>').replace(/\\*(.+?)\\*/gu,'<em>$1</em>').replace(/\\n/gu,'<br>');}}};
   const __events={VARIABLE_INITIALIZED:'mag_variable_initialized',VARIABLE_UPDATE_STARTED:'mag_variable_update_started',VARIABLE_UPDATE_ENDED:'mag_variable_update_ended'};
   window.Mvu=Object.assign({},__parent?.Mvu||{}, {events:__events,getMvuData:option=>__scopeValue(option),getVariable:window.getVariable,replaceMvuData:(value,option)=>__replaceVariables(value,option),isDuringExtraAnalysis:()=>false});
-  window.TavernHelper=Object.assign({},__parent?.TavernHelper||{}, {getAllVariables:()=>__getVariables({type:'chat'}),getVariable:(path,fallback)=>__get(__getVariables({type:'chat'}),path,fallback),getVariables:__getVariables,replaceVariables:__replaceVariables,updateVariablesWith:__updateVariablesWith,insertOrAssignVariables:__insertOrAssignVariables,insertVariables:__insertVariables,deleteVariable:__deleteVariable,getScriptTrees:__getScriptTrees,replaceScriptTrees:__replaceScriptTrees,updateScriptTreesWith:__updateScriptTreesWith,eventOn:window.eventOn,eventOnce:window.eventOnce,eventEmit:window.eventEmit,waitGlobalInitialized:window.waitGlobalInitialized});
+  window.TavernHelper=Object.assign({},__parent?.TavernHelper||{}, {getAllVariables:()=>__getVariables({type:'chat'}),getVariable:(path,fallback)=>__get(__getVariables({type:'chat'}),path,fallback),getVariables:__getVariables,replaceVariables:__replaceVariables,updateVariablesWith:__updateVariablesWith,insertOrAssignVariables:__insertOrAssignVariables,insertVariables:__insertVariables,deleteVariable:__deleteVariable,getScriptTrees:__getScriptTrees,replaceScriptTrees:__replaceScriptTrees,updateScriptTreesWith:__updateScriptTreesWith,injectPrompts:__injectPrompts,uninjectPrompts:__uninjectPrompts,eventOn:window.eventOn,eventOnce:window.eventOnce,eventEmit:window.eventEmit,waitGlobalInitialized:window.waitGlobalInitialized});
   window.SillyTavern=Object.assign({},__parent?.SillyTavern||{}, {eventSource:{on:window.eventOn,once:window.eventOnce,emit:window.eventEmit},getContext:()=>({eventSource:window.SillyTavern.eventSource,chat:window.SillyTavern.chat}),chat:[],characters:[],characterId:0,name2:'',extensionSettings:{},chatCompletionSettings:{},getCurrentChatId:()=>window.__agentRpCardFrameId,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),saveChat:async()=>undefined,saveSettingsDebounced:()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined});
   const __wrap=items=>{const list=Array.from(items||[]),api={length:list.length};list.forEach((el,i)=>api[i]=el);api.toArray=()=>list.slice();api.get=index=>index===undefined?list.slice():list[index];api.each=fn=>{list.forEach((el,i)=>fn.call(el,i,el));return api;};api.clone=()=>__wrap(list.map(el=>el.cloneNode?.(true)).filter(Boolean));api.appendTo=target=>{const destination=typeof target==='string'?__query(target):target?.length!==undefined?target:__wrap([target]);destination?.each?.((_i,el)=>list.forEach(item=>el.append(item)));return api;};api.find=sel=>__wrap(list.flatMap(el=>[...el.querySelectorAll(sel)]));api.parent=()=>__wrap(list.map(el=>el.parentElement).filter(Boolean));api.siblings=()=>__wrap(list.flatMap(el=>el.parentElement?[...el.parentElement.children].filter(x=>x!==el):[]));api.addClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.add(x)));api.removeClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.remove(x)));api.toggleClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.toggle(x)));api.hasClass=v=>!!list[0]?.classList.contains(String(v||''));api.html=v=>v===undefined?(list[0]?.innerHTML||''):api.each((_i,el)=>el.innerHTML=String(v));api.text=v=>v===undefined?(list[0]?.textContent||''):api.each((_i,el)=>el.textContent=String(v));api.val=v=>v===undefined?(list[0]?.value||''):api.each((_i,el)=>el.value=String(v));api.attr=(k,v)=>v===undefined?list[0]?.getAttribute(k):api.each((_i,el)=>el.setAttribute(k,String(v)));api.data=(k,v)=>v===undefined?list[0]?.dataset?.[k]:api.each((_i,el)=>el.dataset[k]=String(v));api.empty=()=>api.each((_i,el)=>el.replaceChildren());api.append=v=>api.each((_i,el)=>typeof v==='string'?el.insertAdjacentHTML('beforeend',v):v?.nodeType&&el.append(v));api.css=(k,v)=>v===undefined?(list[0]?getComputedStyle(list[0])[k]:undefined):api.each((_i,el)=>el.style[k]=String(v));api.show=()=>api.each((_i,el)=>el.style.display='');api.hide=()=>api.each((_i,el)=>el.style.display='none');api.on=(type,fn)=>api.each((_i,el)=>el.addEventListener(type,fn));api.off=(type,fn)=>api.each((_i,el)=>el.removeEventListener(type,fn));api.trigger=type=>api.each((_i,el)=>el.dispatchEvent(new Event(type,{bubbles:true})));api.sortable=()=>api;return api;};
   const __query=value=>{if(typeof value==='function'){if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',value,{once:true});else queueMicrotask(value);return __wrap([]);}if(value?.nodeType)return __wrap([value]);if(Array.isArray(value))return __wrap(value);try{return __wrap(document.querySelectorAll(String(value||'')));}catch{return __wrap([]);}};
