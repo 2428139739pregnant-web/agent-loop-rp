@@ -89,6 +89,11 @@ export interface WorldbookMatchCandidate {
   sticky?: number
   cooldown?: number
   delay?: number
+  /** ST inclusion group(s), comma-separated; one entry can belong to several groups. */
+  group?: string
+  groupOverride?: boolean
+  groupWeight?: number
+  useGroupScoring?: boolean
   /** Macro-expanded authoritative content used only by the local recursive scanner. */
   recursiveContent?: string
   /** ST prompt insertion metadata retained after activation. */
@@ -202,6 +207,10 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
       ...(e.sticky === undefined ? {} : { sticky: e.sticky }),
       ...(e.cooldown === undefined ? {} : { cooldown: e.cooldown }),
       ...(e.delay === undefined ? {} : { delay: e.delay }),
+      ...(e.group === undefined ? {} : { group: e.group }),
+      ...(e.groupOverride === undefined ? {} : { groupOverride: e.groupOverride }),
+      ...(e.groupWeight === undefined ? {} : { groupWeight: e.groupWeight }),
+      ...(e.useGroupScoring === undefined ? {} : { useGroupScoring: e.useGroupScoring }),
       ...(e.recursiveScanning === true
         ? { recursiveContent: macro(ctx.worldbook.getContent(e.path) ?? '') }
         : {}),
@@ -263,12 +272,12 @@ export function formatCandidates(candidates: readonly WorldbookMatchCandidate[])
     const secondary = c.secondaryKeys.length > 0 ? c.secondaryKeys.join(', ') : '(无)'
     return [
       `| ${c.path} | ${c.comment} | ${keys} | ${secondary} | ${SELECTIVE_LOGIC_LABELS[c.selectiveLogic]} |`,
-      `  ${c.caseSensitive ? '是' : '否'} | ${c.matchWholeWords ? '是' : '否'} | ${c.useRegex ? '是' : '否'} | ${c.probability} | ${c.order} | ${c.weight} |`,
+      `  ${c.caseSensitive ? '是' : '否'} | ${c.matchWholeWords ? '是' : '否'} | ${c.useRegex ? '是' : '否'} | ${c.probability} | ${c.order} | ${c.weight} | ${c.group ?? '(无)'} |`,
     ].join('')
   })
   return [
-    '| 路径 | 名称 | 主关键词 | 次关键词 | 次关键词逻辑 | 大小写敏感 | 整词匹配 | 正则 | 概率% | 顺序 | 权重 |',
-    '|---|---|---|---|---|---|---|---|---|---|---|',
+    '| 路径 | 名称 | 主关键词 | 次关键词 | 次关键词逻辑 | 大小写敏感 | 整词匹配 | 正则 | 概率% | 顺序 | 权重 | 包含组 |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|',
     ...rows,
   ].join('\n')
 }
@@ -432,6 +441,100 @@ function appendRecursiveContent(
   return true
 }
 
+function inclusionGroupNames(candidate: WorldbookMatchCandidate): string[] {
+  return (candidate.group ?? '')
+    .split(/,\s*/u)
+    .map(value => value.trim())
+    .filter(value => value.length > 0)
+}
+
+function candidateKeyScore(input: WorldbookMatchInput, candidate: WorldbookMatchCandidate): number {
+  const text = scanTextForCandidate(input, candidate)
+  const primary = candidate.keys.reduce((score, key) =>
+    score + (matchesWorldbookKey(text, key, candidate) ? 1 : 0), 0)
+  const secondary = candidate.secondaryKeys.reduce((score, key) =>
+    score + (matchesWorldbookKey(text, key, candidate) ? 1 : 0), 0)
+  if (candidate.selectiveLogic === 'and-all' || candidate.selectiveLogic === 'and-any') {
+    return primary + secondary
+  }
+  return primary
+}
+
+/**
+ * Apply SillyTavern's inclusion-group winner rules to one activation pass.
+ * Groups are deliberately resolved after deterministic key activation and
+ * before probability/content assembly, matching WorldInfo's pipeline. A
+ * candidate may belong to several comma-separated groups; losing any group
+ * removes it from this pass.
+ */
+export function filterInclusionGroupCandidates(
+  activeCandidates: readonly WorldbookMatchCandidate[],
+  input: WorldbookMatchInput,
+  random: () => number = Math.random,
+): WorldbookMatchCandidate[] {
+  const allowed = new Set(activeCandidates.map(candidate => candidate.path))
+  const grouped = new Map<string, WorldbookMatchCandidate[]>()
+  for (const candidate of activeCandidates) {
+    for (const group of inclusionGroupNames(candidate)) {
+      const entries = grouped.get(group) ?? []
+      entries.push(candidate)
+      grouped.set(group, entries)
+    }
+  }
+
+  for (const group of grouped.values()) {
+    const current = group.filter(candidate => allowed.has(candidate.path))
+    if (current.length <= 1) continue
+    const sticky = current.filter(candidate => isTimedEffectStickyActive(
+      input.timedEffects ?? {},
+      candidate.path,
+      input.messageCount ?? input.recentMessages.length,
+    ))
+    let winners: WorldbookMatchCandidate[]
+    if (sticky.length > 0) {
+      // ST keeps all sticky members of a group and removes non-sticky losers.
+      winners = sticky
+    } else {
+      const overrides = current
+        .filter(candidate => candidate.groupOverride === true)
+        .sort((left, right) => right.order - left.order || right.weight - left.weight || left.path.localeCompare(right.path))
+      if (overrides.length > 0) {
+        winners = [overrides[0]!]
+      } else {
+        let pool = current
+        if (current.some(candidate => candidate.useGroupScoring === true)) {
+          const scored = current.filter(candidate => candidate.useGroupScoring === true)
+          const best = Math.max(...scored.map(candidate => candidateKeyScore(input, candidate)))
+          pool = current.filter(candidate => candidate.useGroupScoring !== true
+            || candidateKeyScore(input, candidate) === best)
+        }
+        if (pool.length <= 1) {
+          winners = pool
+        } else {
+          const totalWeight = pool.reduce((sum, candidate) =>
+            sum + Math.max(1, candidate.groupWeight ?? 100), 0)
+          const roll = Math.max(0, Math.min(0.999999999999, random())) * totalWeight
+          let cursor = 0
+          let winner = pool.at(-1)!
+          for (const candidate of pool) {
+            cursor += Math.max(1, candidate.groupWeight ?? 100)
+            if (roll <= cursor) {
+              winner = candidate
+              break
+            }
+          }
+          winners = [winner]
+        }
+      }
+    }
+    const winnerPaths = new Set(winners.map(candidate => candidate.path))
+    for (const candidate of current) {
+      if (!winnerPaths.has(candidate.path)) allowed.delete(candidate.path)
+    }
+  }
+  return activeCandidates.filter(candidate => allowed.has(candidate.path))
+}
+
 /**
  * Apply the deterministic ST key semantics and recursively scan activated
  * entry content. `seedCandidates` is used by the one existing semantic call:
@@ -442,6 +545,7 @@ function collectWorldbookActivations(
   input: WorldbookMatchInput,
   seedCandidates: readonly WorldbookMatchCandidate[] = [],
   includeInitial = true,
+  random: () => number = Math.random,
 ): Set<string> {
   const active = new Set<string>()
   const textByBook = new Map<string, string>()
@@ -521,7 +625,12 @@ function collectWorldbookActivations(
     }
   }
 
-  return active
+  const filtered = filterInclusionGroupCandidates(
+    input.candidates.filter(candidate => active.has(candidate.path)),
+    input,
+    random,
+  )
+  return new Set(filtered.map(candidate => candidate.path))
 }
 
 /** Apply SillyTavern's deterministic key/secondary-key semantics. */
@@ -529,11 +638,12 @@ export function deterministicWorldbookMatch(
   input: WorldbookMatchInput,
   options: {
     readonly rollProbability?: boolean
+    readonly random?: () => number
     /** Additional already-selected entries that may seed recursive scanning. */
     readonly seedCandidates?: readonly WorldbookMatchCandidate[]
   } = {},
 ): WorldbookMatchCandidate[] {
-  const active = collectWorldbookActivations(input, options.seedCandidates)
+  const active = collectWorldbookActivations(input, options.seedCandidates, true, options.random)
   return input.candidates.filter(candidate => {
     if (!active.has(candidate.path)) return false
     return !candidate.useProbability
@@ -614,9 +724,17 @@ export const worldbookMatchAgent: Agent<WorldbookMatchInput, WorldbookMatchOutpu
     const plugin = input.pluginCandidates === undefined || input.pluginCandidates.length === 0
       ? undefined
       : buildWorldbookPluginOutput(input.pluginCandidates, ctx)
-    const withPlugin = (output: WorldbookMatchOutput): WorldbookMatchOutput => plugin === undefined
-      ? output
-      : { ...output, plugin }
+    const withPlugin = (output: WorldbookMatchOutput): WorldbookMatchOutput => {
+      // The LLM may add a semantic candidate that shares a group with the ST
+      // baseline. Re-apply the same local winner rule to the merged result so
+      // group ownership never depends on model compliance.
+      const known = input.candidates.filter(candidate => output.matches.some(match => match.path === candidate.path))
+      const winners = new Set(filterInclusionGroupCandidates(known, input).map(candidate => candidate.path))
+      const matches = output.matches.filter(match =>
+        !input.candidates.some(candidate => candidate.path === match.path) || winners.has(match.path))
+      const normalized = matches.length === output.matches.length ? output : { ...output, matches }
+      return plugin === undefined ? normalized : { ...normalized, plugin }
+    }
     // ST-owned entries (including native ST regex keys) are always resolved
     // locally. Enhanced mode uses this as its baseline; strict mode stops here.
     // First determine ST key activation without rolling.  Probability is a

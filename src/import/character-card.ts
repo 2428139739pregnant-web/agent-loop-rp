@@ -338,6 +338,11 @@ function parseLorebookEntry(value: JsonValue, index: number, version: CharacterC
   const sticky = timedNumber('sticky', 'sticky')
   const cooldown = timedNumber('cooldown', 'cooldown')
   const delay = timedNumber('delay', 'delay')
+  const groupRaw = extensions.group ?? entry.group
+  const group = typeof groupRaw === 'string' && groupRaw.trim().length > 0 ? groupRaw.trim() : undefined
+  const groupOverride = lenientBool(extensions.group_override ?? entry.group_override)
+  const groupWeight = lenientNumber(extensions.group_weight ?? entry.group_weight)
+  const useGroupScoring = lenientBool(extensions.use_group_scoring ?? entry.use_group_scoring)
   // ST position 枚举原值:extensions.position ?? (position==='before_char' ? 0 : 1)
   // (换算与 ST world-info.js:5517 一致)。
   const stPosition = lenientNumber(extensions.position) ?? (position === 'before_char' ? 0 : 1)
@@ -362,6 +367,10 @@ function parseLorebookEntry(value: JsonValue, index: number, version: CharacterC
     ...(sticky === undefined ? {} : { sticky }),
     ...(cooldown === undefined ? {} : { cooldown }),
     ...(delay === undefined ? {} : { delay }),
+    ...(group === undefined ? {} : { group }),
+    ...(groupOverride === undefined ? {} : { groupOverride }),
+    ...(groupWeight === undefined ? {} : { groupWeight }),
+    ...(useGroupScoring === undefined ? {} : { useGroupScoring }),
     position,
     stPosition,
     ...(probability === undefined ? {} : { probability }),

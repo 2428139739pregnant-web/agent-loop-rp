@@ -156,6 +156,14 @@ export interface ImportedLorebookEntry {
   readonly cooldown?: number
   /** ST/Tavern Helper timed effect: require N chat messages before activation. */
   readonly delay?: number
+  /** ST inclusion-group name(s), comma-separated in the source format. */
+  readonly group?: string
+  /** ST inclusion-group priority override. */
+  readonly groupOverride?: boolean
+  /** Weighted-random weight inside an inclusion group. */
+  readonly groupWeight?: number
+  /** Enable ST key-score filtering for this entry's inclusion group. */
+  readonly useGroupScoring?: boolean
   readonly position: 'before_char' | 'after_char'
   /**
    * SillyTavern position 枚举原值(0=before,1=after,2=ANTop,3=ANBottom,

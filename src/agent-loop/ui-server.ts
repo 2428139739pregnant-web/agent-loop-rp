@@ -4394,6 +4394,15 @@ function parseWorldInfoJson(json: string): ImportedLorebook {
     const sticky = timedNumber('sticky', 'sticky')
     const cooldown = timedNumber('cooldown', 'cooldown')
     const delay = timedNumber('delay', 'delay')
+    const groupRaw = ext?.group ?? r.group
+    const group = typeof groupRaw === 'string' && groupRaw.trim().length > 0 ? groupRaw.trim() : undefined
+    const groupOverride = typeof (ext?.group_override ?? r.group_override) === 'boolean'
+      ? (ext?.group_override ?? r.group_override) as boolean : undefined
+    const groupWeightRaw = ext?.group_weight ?? r.group_weight
+    const groupWeight = typeof groupWeightRaw === 'number' && Number.isFinite(groupWeightRaw)
+      ? Math.max(1, Math.trunc(groupWeightRaw)) : undefined
+    const groupScoringRaw = ext?.use_group_scoring ?? r.use_group_scoring
+    const useGroupScoring = typeof groupScoringRaw === 'boolean' ? groupScoringRaw : undefined
     // ST position 枚举原值(0-7):extensions.position ?? 数字 position ?? 字符串换算。
     const stPositionRaw = typeof ext?.position === 'number' ? ext.position : r.position
     const stPosition = typeof stPositionRaw === 'number' ? stPositionRaw
@@ -4424,6 +4433,10 @@ function parseWorldInfoJson(json: string): ImportedLorebook {
       ...(sticky === undefined ? {} : { sticky }),
       ...(cooldown === undefined ? {} : { cooldown }),
       ...(delay === undefined ? {} : { delay }),
+      ...(group === undefined ? {} : { group }),
+      ...(groupOverride === undefined ? {} : { groupOverride }),
+      ...(groupWeight === undefined ? {} : { groupWeight }),
+      ...(useGroupScoring === undefined ? {} : { useGroupScoring }),
       ...(probability !== undefined ? { probability } : {}),
       ...(useProbability !== undefined ? { useProbability } : {}),
       ...(priority !== undefined ? { priority } : {}),
@@ -4629,6 +4642,10 @@ function lorebookEntryToWorldbookEntry(
     ...(e.sticky === undefined ? {} : { sticky: e.sticky }),
     ...(e.cooldown === undefined ? {} : { cooldown: e.cooldown }),
     ...(e.delay === undefined ? {} : { delay: e.delay }),
+    ...(e.group === undefined ? {} : { group: e.group }),
+    ...(e.groupOverride === undefined ? {} : { groupOverride: e.groupOverride }),
+    ...(e.groupWeight === undefined ? {} : { groupWeight: e.groupWeight }),
+    ...(e.useGroupScoring === undefined ? {} : { useGroupScoring: e.useGroupScoring }),
     ignoreBudget: e.ignoreBudget,
     hasDecorators: e.hasDecorators,
   }
@@ -4653,6 +4670,12 @@ function tavernHelperWorldbookEntryToWorldbookEntry(bookName: string, entry: Tav
             : positionType === 'after_author_note' ? 3
               : positionType === 'outlet' ? 7 : 4
   const path = `酒馆助手/${bookName}/${entry.uid}`
+  const extra = entry.extra ?? {}
+  const group = typeof extra.group === 'string' && extra.group.trim().length > 0 ? extra.group.trim() : undefined
+  const groupOverride = typeof extra.group_override === 'boolean' ? extra.group_override : undefined
+  const groupWeight = typeof extra.group_weight === 'number' && Number.isFinite(extra.group_weight)
+    ? Math.max(1, Math.trunc(extra.group_weight)) : undefined
+  const useGroupScoring = typeof extra.use_group_scoring === 'boolean' ? extra.use_group_scoring : undefined
   return {
     path,
     comment: entry.name,
@@ -4676,6 +4699,10 @@ function tavernHelperWorldbookEntryToWorldbookEntry(bookName: string, entry: Tav
     ...(entry.effect.sticky === null ? {} : { sticky: entry.effect.sticky }),
     ...(entry.effect.cooldown === null ? {} : { cooldown: entry.effect.cooldown }),
     ...(entry.effect.delay === null ? {} : { delay: entry.effect.delay }),
+    ...(group === undefined ? {} : { group }),
+    ...(groupOverride === undefined ? {} : { groupOverride }),
+    ...(groupWeight === undefined ? {} : { groupWeight }),
+    ...(useGroupScoring === undefined ? {} : { useGroupScoring }),
     ignoreBudget: entry.ignoreBudget === true,
   }
 }

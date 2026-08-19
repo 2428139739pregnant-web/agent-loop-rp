@@ -13,6 +13,7 @@
 - 导入 SillyTavern Character Card V1/V2/V3：PNG、JSON，以及当前兼容范围内的 CHARX 数据。
 - 读取角色卡的描述、性格、场景、示例对话、系统提示词、历史后指令、主开场白和多个备选开场白。
 - 兼容角色卡内嵌世界书，以及独立的 SillyTavern World Info JSON。
+- 支持世界书条目级递归控制、定时效果和包含组选择；确定性规则在本地执行，避免增加额外 LLM 调用。
 - 提供三种普通绿灯匹配模式：`ST strict`、`ST enhanced`、`Agent native`。
 - 支持角色卡自带的部分 EJS、ST-Prompt-Template 注入指令、Tavern Helper 状态和 MVU 变量处理；HTML 前端边界按 JS-Slash-Runner 的 iframe 规则运行。
 - 支持 SillyTavern 风格的 Regex 脚本，区分用户输入、AI 输出、显示文本和世界书位置。
@@ -241,7 +242,7 @@ PNG 中同时存在 `ccv3` 和旧 `chara` 元数据时，优先使用 `ccv3`。�
 - iframe 变量 API 兼容官方 option：省略 option 时默认为 `chat`，`message` 的 `message_id` 默认为 `latest`，`script` 的 `script_id` 默认为当前 iframe 脚本 ID；`extension` 必须显式传入 `extension_id`。option 会原样随宿主 bridge 传递，message 作用域不会回退为 chat。
 - MVU 的初始化、状态读取和变量更新路径。
 
-以下能力目前会保留但不执行，或只执行确定性安全子集：复杂 decorator、动态向量匹配、任意网络请求、文件访问、父页面 DOM 操作、未批准的模块导入、复杂变量写入和依赖宿主 UI 的功能。世界书 `sticky/cooldown/delay` 已按 SillyTavern 的消息计数接入会话级确定性状态机；普通递归、条目级 scan depth、exclude/prevent/delay recursion 也按确定性规则执行。未支持的部分会记录为 skipped/inactive，避免静默地产生错误结果。
+以下能力目前会保留但不执行，或只执行确定性安全子集：复杂 decorator、动态向量匹配、任意网络请求、文件访问、父页面 DOM 操作、未批准的模块导入、复杂变量写入和依赖宿主 UI 的功能。世界书 `sticky/cooldown/delay` 与包含组已按 SillyTavern 规则接入会话级确定性状态机；普通递归、条目级 scan depth、exclude/prevent/delay recursion 也按确定性规则执行。未支持的部分会记录为 skipped/inactive，避免静默地产生错误结果。
 
 项目底层有两个独立 adapter：`TavernHelperAdapter` 负责角色卡前端 iframe、脚本树、MVU 事件/变量和世界书桥；`PromptTemplateAdapter` 负责 EJS、`[GENERATE:*]`、`[RENDER:*]`、`@INJECT` 和 `[InitialVariables]`。两者都在发送正文前的本地兼容层运行，不会因为适配插件增加 LLM 调用；世界书匹配 Agent 与上下文 Agent 仍然并行。
 

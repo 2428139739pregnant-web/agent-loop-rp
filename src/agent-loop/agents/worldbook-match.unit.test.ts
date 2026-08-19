@@ -4,6 +4,7 @@ import {
   buildWorldbookMatchInput,
   deterministicWorldbookMatch,
   exactKeywordMatch,
+  filterInclusionGroupCandidates,
   formatCandidates,
   formatRecentMessages,
   parseWorldbookMatchResponse,
@@ -153,6 +154,42 @@ test('deterministicWorldbookMatch activates a keyless blue entry without chat te
     ],
   })
   assert.deepEqual(matches.map(candidate => candidate.path), ['blue.md'])
+})
+
+test('inclusion groups keep ST override winners and weighted winners local', () => {
+  const input = {
+    intent: makeIntent({ keywords: ['火'] }),
+    scanDepth: 2,
+    recentMessages: [{ role: 'user' as const, content: '火' }],
+    candidates: [],
+  }
+  const override = filterInclusionGroupCandidates([
+    makeCandidate({ path: 'low.md', keys: ['火'], group: 'scene', order: 1, groupOverride: true }),
+    makeCandidate({ path: 'high.md', keys: ['火'], group: 'scene', order: 9, groupOverride: true }),
+  ], input, () => 0)
+  assert.deepEqual(override.map(candidate => candidate.path), ['high.md'])
+
+  const weighted = filterInclusionGroupCandidates([
+    makeCandidate({ path: 'first.md', keys: ['火'], group: 'scene', groupWeight: 1 }),
+    makeCandidate({ path: 'second.md', keys: ['火'], group: 'scene', groupWeight: 9 }),
+  ], input, () => 0.95)
+  assert.deepEqual(weighted.map(candidate => candidate.path), ['second.md'])
+})
+
+test('sticky inclusion-group entries beat non-sticky candidates', () => {
+  const input = {
+    intent: makeIntent(),
+    scanDepth: 2,
+    recentMessages: [],
+    candidates: [],
+    messageCount: 3,
+    timedEffects: { 'sticky.md': { activatedAt: 2, stickyUntil: 5, cooldownUntil: 5 } },
+  }
+  const result = filterInclusionGroupCandidates([
+    makeCandidate({ path: 'sticky.md', group: 'same' }),
+    makeCandidate({ path: 'other.md', group: 'same' }),
+  ], input, () => 0.99)
+  assert.deepEqual(result.map(candidate => candidate.path), ['sticky.md'])
 })
 
 test('deterministicWorldbookMatch applies recursive scanning and all four recursion gates', () => {
@@ -308,6 +345,18 @@ test('buildWorldbookMatchInput carries ST entry params (logic/probability/flags)
   assert.equal(c?.useRegex, true)
   assert.equal(c?.probability, 40)
   assert.equal(c?.useProbability, false)
+})
+
+test('buildWorldbookMatchInput carries inclusion-group metadata', () => {
+  const store = new MemoryWorldbookStore([{
+    path: 'grouped.md', keywords: ['x'], order: 2, weight: 9, content: '',
+    group: 'scene, mood', groupOverride: true, groupWeight: 4, useGroupScoring: true,
+  }])
+  const candidate = buildWorldbookMatchInput(makeIntent(), makeCtx({ store })).candidates[0]
+  assert.equal(candidate?.group, 'scene, mood')
+  assert.equal(candidate?.groupOverride, true)
+  assert.equal(candidate?.groupWeight, 4)
+  assert.equal(candidate?.useGroupScoring, true)
 })
 
 test('buildWorldbookMatchInput carries recursive source metadata and macro-expanded content', () => {

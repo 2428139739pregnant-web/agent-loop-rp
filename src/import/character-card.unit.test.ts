@@ -142,3 +142,32 @@ test('character import preserves ST recursion controls from extensions and legac
     { excludeRecursion: true, preventRecursion: false, delayUntilRecursion: true },
   ])
 })
+
+test('character import preserves SillyTavern inclusion-group controls', () => {
+  const card = parseCharacterCardJson(cardWithLorebook([{
+    id: 'grouped',
+    name: '组条目',
+    comment: '',
+    keys: ['场景'],
+    secondary_keys: [],
+    content: 'grouped',
+    enabled: true,
+    selective: false,
+    constant: false,
+    case_sensitive: false,
+    match_whole_words: false,
+    position: 'after_char',
+    insertion_order: 1,
+    extensions: {
+      group: 'scene, mood',
+      group_override: true,
+      group_weight: 7,
+      use_group_scoring: true,
+    },
+  }]))
+  const entry = card.lorebook?.entries[0]
+  assert.equal(entry?.group, 'scene, mood')
+  assert.equal(entry?.groupOverride, true)
+  assert.equal(entry?.groupWeight, 7)
+  assert.equal(entry?.useGroupScoring, true)
+})

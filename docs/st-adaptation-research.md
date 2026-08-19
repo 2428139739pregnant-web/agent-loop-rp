@@ -179,8 +179,8 @@
 ### 可选（后置）
 
 - token 预算（budget/cap/ignoreBudget）—— 本项目上下文压力小，可先只做条目数上限
-- 更复杂的 timed-effects 边界——基础 `sticky/cooldown/delay` 已实现；仍需继续对齐 ST 的包含组、向量匹配及所有 chat_metadata 分支编辑细节
-- 包含组（group/groupWeight）—— 跳过
+- 更复杂的 timed-effects 边界——基础 `sticky/cooldown/delay` 已实现；仍需继续对齐 ST 的所有 chat_metadata 分支编辑细节
+- 包含组（`group/groupOverride/groupWeight/useGroupScoring`）——已在 matcher 中按确定性 ST 管道执行；仍需补齐与完整 Host 递归/预算生命周期的所有边界
 - vectorized 紫灯 —— 跳过（无向量库）
 - matchPersonaDescription 等 7 开关 —— 可选做 2 个（persona/character description）
 - persona AT_DEPTH 注入 —— v1 只做 IN_PROMPT
@@ -190,7 +190,7 @@
 
 1. 普通绿灯匹配由世界书模式决定：strict 只走 ST，enhanced 为 ST + agent，native 只走 agent；Resolver 纯代码合并，probability 掷骰与宏替换在代码层收尾
 2. position 2/3/5/6/7 并入文档尾部，不精确复刻 ST 的插入点
-3. 基础 sticky/cooldown/delay 定时效应已支持；包含组、向量匹配和部分 chat_metadata/分支编辑边界暂不支持，递归扫描仍只实现确定性 entry/content 语义
+3. 基础 sticky/cooldown/delay 定时效应和包含组已支持；向量匹配和部分 chat_metadata/分支编辑边界暂不支持，递归扫描仍只实现确定性 entry/content 语义
 4. token 计数用字符数近似（无 tokenizer 依赖）
 
 ## 9. 验收口径（A5 完成标准）

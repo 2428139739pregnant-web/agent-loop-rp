@@ -23,6 +23,10 @@ export interface WorldbookKeyIndexEntry {
   readonly caseSensitive: boolean
   readonly matchWholeWords: boolean
   readonly useRegex: boolean
+  readonly group?: string
+  readonly groupOverride?: boolean
+  readonly groupWeight?: number
+  readonly useGroupScoring?: boolean
   readonly order: number
   readonly weight: number
 }
@@ -67,6 +71,10 @@ export function buildWorldbookKeyIndex(
       caseSensitive: entry.caseSensitive === true,
       matchWholeWords: entry.matchWholeWords === true,
       useRegex: entry.useRegex === true,
+      ...(entry.group === undefined ? {} : { group: substituteMacros(entry.group, macros) }),
+      ...(entry.groupOverride === undefined ? {} : { groupOverride: entry.groupOverride }),
+      ...(entry.groupWeight === undefined ? {} : { groupWeight: entry.groupWeight }),
+      ...(entry.useGroupScoring === undefined ? {} : { useGroupScoring: entry.useGroupScoring }),
       order: entry.order,
       weight: entry.weight,
     }))
@@ -107,8 +115,8 @@ export function renderWorldbookKeyOnlyMd(
   }
 
   lines.push(
-    '| path | owner | comment | keys | secondaryKeys | selectiveLogic | caseSensitive | wholeWord | regex | order | weight |',
-    '| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |',
+    '| path | owner | comment | keys | secondaryKeys | selectiveLogic | caseSensitive | wholeWord | regex | group | groupOverride | groupWeight | order | weight |',
+    '| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |',
   )
   for (const entry of entries) {
     lines.push([
@@ -121,6 +129,9 @@ export function renderWorldbookKeyOnlyMd(
       `${entry.caseSensitive ? 'yes' : 'no'}`,
       `${entry.matchWholeWords ? 'yes' : 'no'}`,
       `${entry.useRegex ? 'yes' : 'no'}`,
+      `${markdownCell(entry.group ?? '') || '(none)'}`,
+      `${entry.groupOverride === true ? 'yes' : 'no'}`,
+      `${entry.groupWeight ?? 100}`,
       `${entry.order}`,
       `${entry.weight} |`,
     ].join(' | '))

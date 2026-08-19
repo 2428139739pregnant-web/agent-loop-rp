@@ -95,6 +95,11 @@ export interface WorldbookEntry {
   cooldown?: number
   /** ST/Tavern Helper timed effect: require N chat messages before activation. */
   delay?: number
+  /** ST inclusion group(s), comma-separated like world-info.js. */
+  group?: string
+  groupOverride?: boolean
+  groupWeight?: number
+  useGroupScoring?: boolean
   /** Preserve ST's budget bypass flag for deterministic activation. */
   ignoreBudget?: boolean
   /** Decorated/template entries are retained but not activated by the Harness. */
