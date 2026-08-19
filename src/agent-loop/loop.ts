@@ -6,10 +6,11 @@ import type { LLMProvider } from './provider.ts'
 import type { PromptLoader } from './agents/types.ts'
 import type { SessionStore, WorldbookStore } from './session.ts'
 import type { PreprocessedCharacter } from './character-loader.ts'
+import type { ResponseGenerationSettings } from './response-settings.ts'
 import type { triggerSummarize } from './agents/summarize.ts'
 import { runMvuUpdate, type MvuRuntimeSettings } from './agents/mvu-update.ts'
 import { readMvuStateFromMessages } from '../mvu.ts'
-import { buildWorldbookMatchInput } from './agents/worldbook-match.ts'
+import { buildWorldbookMatchInput, deterministicWorldbookMatch } from './agents/worldbook-match.ts'
 import { applyWorldbookRenderDirectives } from './worldbook-plugin.ts'
 import type {
   ContextSegmentOutput,
@@ -21,7 +22,8 @@ import type {
 /** ②.2 context agent's input shape — re-exported here so callers don't have to dig into the agent file. */
 export interface ContextProcessInput {
   intent: IntentOutput
-  worldbookMatches: WorldbookMatchOutput
+  worldbookMatches?: WorldbookMatchOutput
+  worldbookHints?: readonly string[]
   reader: import('./agents/context-process.ts').ContextReader
 }
 
@@ -34,6 +36,8 @@ export interface ResponseInput {
   character: PreprocessedCharacter
   /** 用户 persona(酒馆 {{user}})。null = 未配置。 */
   userPersona?: { name: string; description: string } | null
+  /** 用户可配置的人称与正文长度；缺省时跟随角色卡。 */
+  responseSettings?: ResponseGenerationSettings
 }
 
 /**
@@ -86,6 +90,8 @@ export interface RunLoopDeps {
   character?: PreprocessedCharacter
   /** 用户 persona(酒馆 {{user}})。可选;未配置时 response 以"用户"泛称。 */
   userPersona?: { name: string; description: string } | null
+  /** 用户可配置的人称与正文长度；缺省时跟随角色卡。 */
+  responseSettings?: ResponseGenerationSettings
   /** 重 roll 用:跳过把 userInput 重新 append 进历史(该轮 user 消息已在历史里)。 */
   skipUserAppend?: boolean
   /** 落库前的确定性后处理(正则脚本 ai_output 位)。在 ⑤ postprocess 之后应用。 */
@@ -179,13 +185,17 @@ export async function runLoop(
     // 2.1 输入改为结构化(最近 N 条消息 + 候选绿灯条目参数表,ST 语义适配):
     // 组装逻辑在 buildWorldbookMatchInput 内(读 ctx.session / ctx.worldbook /
     // ctx.worldbookSettings / ctx.macros),输出 schema 不变。
-    const worldbookMatch = await agents.worldbook.run(buildWorldbookMatchInput(intent, ctx), ctx)
+    const worldbookInput = buildWorldbookMatchInput(intent, ctx)
     const reader = buildContextReader(deps.session, deps.sessionId)
-    const contextSegs = await agents.context.run({
-      intent,
-      worldbookMatches: worldbookMatch,
-      reader,
-    }, ctx)
+    // Worldbook semantics and context compaction are independent calls. The
+    // context branch receives only a local ST keyword baseline as a hint, so it
+    // never waits for or consumes the semantic matcher output.
+    const worldbookHints = deterministicWorldbookMatch(worldbookInput, { rollProbability: false })
+      .map(candidate => candidate.path)
+    const [worldbookMatch, contextSegs] = await Promise.all([
+      agents.worldbook.run(worldbookInput, ctx),
+      agents.context.run({ intent, worldbookHints, reader }, ctx),
+    ])
     const responseInput: ResponseInput = {
       intent,
       worldbook: worldbookMatch,
@@ -193,6 +203,7 @@ export async function runLoop(
       userInput,
       character: deps.character,
       userPersona: deps.userPersona ?? null,
+      ...(deps.responseSettings === undefined ? {} : { responseSettings: deps.responseSettings }),
     }
     const result = await agents.response.run(responseInput, ctx)
     if (result.reply.length > 0) reply = result.reply

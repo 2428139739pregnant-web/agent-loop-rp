@@ -35,6 +35,7 @@ import {
 import { classifyWorldbookEntry, type WorldbookEntryOwner, type WorldbookPluginKind } from '../worldbook-compat.ts'
 import { resolveWorldbookMatches } from '../worldbook-resolver.ts'
 import { buildWorldbookPluginOutput } from '../worldbook-plugin.ts'
+import { renderWorldbookKeyOnlyMd } from '../worldbook-key-index.ts'
 
 /** 扫描文本里的单条消息(ST:最近 world_info_depth 条聊天消息,user/assistant 都算)。 */
 export interface WorldbookScanMessage {
@@ -94,6 +95,13 @@ export interface WorldbookMatchInput {
   candidates: readonly WorldbookMatchCandidate[]
   /** ST-Prompt-Template/扩展条目，仅用于 trace 与后续兼容适配，不进 agent 候选池。 */
   pluginCandidates?: readonly WorldbookMatchCandidate[]
+  /**
+   * Code-generated merged key-only Markdown for the current worldbook
+   * combination. The LLM prompt reads this compact index instead of receiving
+   * full worldbook content. Optional for backwards-compatible callers/tests;
+   * the agent falls back to the in-memory formatter when omitted.
+   */
+  keyIndexMarkdown?: string
   /** Explicit worldbook mode; omitted callers use the context setting. */
   mode?: WorldbookMatchMode
 }
@@ -187,6 +195,10 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
     scanDepth,
     recentMessages,
     candidates,
+    // The persisted/indexed document includes every green entry, including
+    // ST-owned regex entries. The prompt tells the LLM to select only the
+    // owner=agent subset; ST-owned paths remain controlled by the local base.
+    keyIndexMarkdown: renderWorldbookKeyOnlyMd(candidates),
     ...(activatedPluginCandidates.length === 0 ? {} : { pluginCandidates: activatedPluginCandidates }),
     mode,
   }
@@ -439,7 +451,10 @@ export const worldbookMatchAgent: Agent<WorldbookMatchInput, WorldbookMatchOutpu
       .replace('{{keywords}}', JSON.stringify(agentInput.intent.keywords))
       .replace('{{scan_depth}}', String(agentInput.scanDepth))
       .replace('{{recent_messages}}', formatRecentMessages(agentInput.recentMessages))
-      .replace('{{candidates}}', formatCandidates(agentInput.candidates))
+      // New prompts use {{key_index}}. Keep {{candidates}} as a compatibility
+      // alias for custom/older prompt templates.
+      .replace('{{key_index}}', agentInput.keyIndexMarkdown ?? formatCandidates(agentInput.candidates))
+      .replace('{{candidates}}', agentInput.keyIndexMarkdown ?? formatCandidates(agentInput.candidates))
       .replace('{{st_baseline}}', formatStBaseline(stBaseline.matches))
       + (template.includes('{{st_baseline}}') ? '' : `\n\n## ST 本地关键词基线(不可删除,只允许追加语义候选)\n${formatStBaseline(stBaseline.matches)}`)
 

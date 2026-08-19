@@ -155,7 +155,7 @@ Model: deepseek-chat（以模型列表实际返回值为准）
 | --- | --- |
 | 角色 | 查看和切换角色卡，查看三份角色文档、开场白和内嵌世界书状态 |
 | 会话 | 新建、切换、重命名和删除本地会话 |
-| 模型 | 配置 OpenAI 兼容模型或 Mock，拉取模型，开关后处理和 MVU |
+| 模型 | 配置 OpenAI 兼容模型或 Mock，拉取模型，设置正文人称/字数，开关后处理和 MVU |
 | Persona | 配置用户名称和用户背景，供 `{{user}}` 和意图/回复上下文使用 |
 | 世界书 | 查看角色卡内嵌世界书和独立世界书，切换条目启用状态 |
 | 正则 | 创建、编辑、删除和试跑 Regex 脚本 |
@@ -188,6 +188,13 @@ Model: deepseek-chat（以模型列表实际返回值为准）
 - 预设：保存和切换后处理参数。
 
 MVU 面板是另一套独立配置：可以单独指定模型、温度、提示词和预设。MVU 的 token 会在 Trace 中记为 `mvu`，不要把它和正文 response 阶段混为一谈。
+
+“回复设置”参考 SillyTavern 预设中的 POV 与 response length block：
+
+  - 人称是可编辑列表：预置跟随角色卡、第一人称、第二人称、第三人称有限视角和第三人称群像；用户可以新增、删除、重命名选项，并直接编辑某个选项实际发送给 response agent 的提示词。
+- 字数可选择跟随角色卡、短（200–500 字）、中（500–900 字）、长（1000–1800 字）或自定义区间。
+- 字数是 response prompt 的软目标，同时会给 OpenAI-compatible 请求设置 `max_tokens` 安全上限；状态栏、HTML/CSS 和机器标记不计入正文目标。
+  - 人称和字数设置停止编辑约 500ms 后自动保存，下一轮 response 会实时使用新值；设置保存到本机 `response-settings.json`，不写回角色卡，也不影响角色卡原始内容。
 
 ## SillyTavern 兼容范围
 
@@ -334,6 +341,7 @@ node --experimental-transform-types scripts/agent-loop-demo.mjs
 | `GET/PUT` | `/api/worldbook-settings` | 世界书扫描深度和匹配模式 |
 | `GET/PUT/POST` | `/api/postprocess-settings` | 后处理设置和预设 |
 | `GET/PUT/POST` | `/api/mvu-settings` | MVU 模型、温度和预设 |
+| `GET/PUT` | `/api/response-settings` | 正文人称与字数设置 |
 | `GET/POST` | `/api/regex` | Regex 脚本管理 |
 
 `/api/run` 的 SSE 事件主要包括：

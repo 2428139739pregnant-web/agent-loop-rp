@@ -73,6 +73,7 @@ export { intentAgent } from './agents/intent.ts'
 export {
   worldbookMatchAgent,
   buildWorldbookMatchInput,
+  deterministicWorldbookMatch,
   rollProbability,
   formatCandidates,
   formatRecentMessages,
@@ -81,6 +82,12 @@ export {
   type WorldbookMatchCandidate,
   type WorldbookScanMessage,
 } from './agents/worldbook-match.ts'
+export {
+  buildWorldbookKeyIndex,
+  renderWorldbookKeyOnlyMd,
+  type WorldbookKeyIndexEntry,
+  type WorldbookKeyIndexMacros,
+} from './worldbook-key-index.ts'
 export { contextProcessAgent, type ContextReader, type ConversationSegment, type SummarySegment } from './agents/context-process.ts'
 export {
   responseAgent,
@@ -88,9 +95,22 @@ export {
   buildContextBlock,
   buildWorldbookBlock,
   buildConstantWorldbookBlocks,
+  listConstantWorldbookEntries,
   constantWorldbookDoc,
 } from './agents/response.ts'
 export { runMvuUpdate, type MvuRuntimeSettings, type MvuUpdateInput, type MvuUpdateResult } from './agents/mvu-update.ts'
+export {
+  DEFAULT_RESPONSE_PERSPECTIVES,
+  DEFAULT_RESPONSE_SETTINGS,
+  RESPONSE_LENGTH_RANGES,
+  buildResponseSettingsInstruction,
+  normalizeResponseSettings,
+  responseMaxTokens,
+  type ResponseGenerationSettings,
+  type ResponseLengthPreset,
+  type ResponsePerspective,
+  type ResponsePerspectiveOption,
+} from './response-settings.ts'
 export {
   postprocessAgent,
   POSTPROCESS_DENSITY_MAX,

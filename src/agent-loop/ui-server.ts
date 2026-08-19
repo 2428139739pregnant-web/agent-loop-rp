@@ -30,6 +30,7 @@ import {
   buildWorldbookMatchInput,
   classifyLorebookEntry,
   contextProcessAgent,
+  deterministicWorldbookMatch,
   intentAgent,
   loadCharacterCardFromJson,
   loadCharacterCardFromPng,
@@ -39,6 +40,7 @@ import {
   preprocessCharacterCard,
   readConfig,
   responseAgent,
+  listConstantWorldbookEntries,
   runMvuUpdate,
   runLoop,
   runPostprocessPipeline as runPostprocessPipelineCore,
@@ -64,6 +66,12 @@ import { EjsTemplateEngine, type EjsTemplateResult, type EjsTemplateTarget } fro
 import { readMvuStateFromMessages, type MvuMacroContext } from '../mvu.ts'
 import { PersonaStore, substituteUserCharMacros } from './persona-store.ts'
 import { RegexScriptStore, applyRegexScripts, type RegexPlacement } from './regex-scripts.ts'
+import { buildWorldbookKeyIndex, renderWorldbookKeyOnlyMd } from './worldbook-key-index.ts'
+import {
+  DEFAULT_RESPONSE_SETTINGS,
+  normalizeResponseSettings,
+  type ResponseGenerationSettings,
+} from './response-settings.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OpenAI-compatible provider + runtime API config
@@ -93,6 +101,7 @@ class OpenAICompatibleProvider implements LLMProvider {
       model: options?.model ?? 'gpt-4o-mini',
       messages: messages.map(m => ({ role: m.role, content: m.content })),
       ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+      ...(options?.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),
       ...(options?.response_format !== undefined ? { response_format: options.response_format } : {}),
     }
     const resp = await fetch(url, {
@@ -154,6 +163,12 @@ interface AgentTokenStats extends TokenUsageStats {
   reused?: boolean
   deferred?: boolean
   reusedFromRunId?: string
+}
+
+/** One exact provider request captured for trace inspection. */
+interface PromptTraceCall {
+  messages: ChatMessage[]
+  options?: ChatOptions
 }
 
 interface ReusableTurnArtifacts {
@@ -219,14 +234,23 @@ class UsageTrackingProvider implements LLMProvider {
   readonly name: string
   private activeStage: string | null = null
   private readonly byStage = new Map<string, TokenUsageStats>()
+  private readonly promptsByStage = new Map<string, PromptTraceCall[]>()
 
   constructor(private readonly inner: LLMProvider) {
     this.name = inner.name
   }
 
   async chat(messages: ChatMessage[], options?: ChatOptions): Promise<LLMResult> {
-    const result = await this.inner.chat(messages, options)
     const stage = this.activeStage
+    if (stage !== null) {
+      const calls = this.promptsByStage.get(stage) ?? []
+      calls.push({
+        messages: messages.map(message => ({ ...message })),
+        ...(options === undefined ? {} : { options: { ...options } }),
+      })
+      this.promptsByStage.set(stage, calls)
+    }
+    const result = await this.inner.chat(messages, options)
     if (stage === null) return result
     const reported = this.inner.name !== 'mock'
       && result.usage !== undefined
@@ -265,6 +289,14 @@ class UsageTrackingProvider implements LLMProvider {
 
   snapshotAll(): Record<string, TokenUsageStats> {
     return Object.fromEntries([...this.byStage.entries()].map(([name, usage]) => [name, cloneTokenUsage(usage)]))
+  }
+
+  /** Return the exact request message arrays sent during one stage. */
+  promptTrace(name: string): readonly PromptTraceCall[] {
+    return (this.promptsByStage.get(name) ?? []).map(call => ({
+      messages: call.messages.map(message => ({ ...message })),
+      ...(call.options === undefined ? {} : { options: { ...call.options } }),
+    }))
   }
 }
 
@@ -525,6 +557,24 @@ const ABS_STATE_JSON = join(PROJECT_ROOT, 'ui-server-state.json')
 const ABS_API_CONFIG_JSON = join(PROJECT_ROOT, 'api-config.json')
 /** 导入角色卡时,把 `card.lorebook` 序列化为总条目目录 md 后写入此目录。 */
 const ABS_WORLDBOOK_INDEX_DIR = join(PROJECT_ROOT, 'worldbook_index')
+const pendingKeyIndexWrites = new Map<string, Promise<void>>()
+
+/** Serialize generated key-index writes so an older rebuild cannot win a race. */
+function queueWorldbookKeyIndexWrite(path: string, content: string): void {
+  const previous = pendingKeyIndexWrites.get(path) ?? Promise.resolve()
+  const next = previous
+    .catch(() => undefined)
+    .then(async () => {
+      await mkdir(ABS_WORLDBOOK_INDEX_DIR, { recursive: true })
+      await writeFile(path, content, 'utf-8')
+    })
+  pendingKeyIndexWrites.set(path, next)
+  void next
+    .catch(err => process.stderr.write(`[worldbook-index] warn: failed to write ${path}: ${err instanceof Error ? err.message : String(err)}\n`))
+    .finally(() => {
+      if (pendingKeyIndexWrites.get(path) === next) pendingKeyIndexWrites.delete(path)
+    })
+}
 /** 独立世界书(从酒馆 World Info .json 导入)存储目录。 */
 const ABS_WORLDBOOKS_DIR = join(PROJECT_ROOT, 'worldbooks')
 /** agent prompt 文件目录(PUT /api/prompts/:name 会写这里)。 */
@@ -537,6 +587,8 @@ const ABS_REGEX_JSON = join(PROJECT_ROOT, 'regex_scripts.json')
 const ABS_POSTPROCESS_JSON = join(PROJECT_ROOT, 'postprocess-settings.json')
 /** 独立 MVU 变量处理配置;不与正文/后处理 preset 混用。 */
 const ABS_MVU_SETTINGS_JSON = join(PROJECT_ROOT, 'mvu-settings.json')
+/** 正文人称/字数设置;参考 ST preset,独立于 provider 与后处理配置。 */
+const ABS_RESPONSE_SETTINGS_JSON = join(PROJECT_ROOT, 'response-settings.json')
 /** ⑤ postprocess watchdog 超时:只写 stderr 警告,不再 race 抢跑。 */
 const POSTPROCESS_TIMEOUT_MS = 600_000
 
@@ -758,6 +810,18 @@ async function saveMvuSettings(s: MvuSettings): Promise<void> {
   await writeFile(ABS_MVU_SETTINGS_JSON, JSON.stringify(s, null, 2), 'utf-8')
 }
 
+async function loadResponseSettings(): Promise<ResponseGenerationSettings> {
+  try {
+    return normalizeResponseSettings(JSON.parse(await readFile(ABS_RESPONSE_SETTINGS_JSON, 'utf-8')))
+  } catch {
+    return { ...DEFAULT_RESPONSE_SETTINGS }
+  }
+}
+
+async function saveResponseSettings(s: ResponseGenerationSettings): Promise<void> {
+  await writeFile(ABS_RESPONSE_SETTINGS_JSON, JSON.stringify(s, null, 2), 'utf-8')
+}
+
 /** 保存 WebUI 的 API 配置;密钥只落在本机项目目录,不会通过 API 返回。 */
 async function saveApiConfig(config: ApiConfig): Promise<void> {
   await writeFile(ABS_API_CONFIG_JSON, JSON.stringify(config, null, 2), 'utf-8')
@@ -882,6 +946,8 @@ interface AppState {
   postprocessSettings: PostprocessSettings
   /** 独立 MVU 变量分析模型/生成预设。GET/PUT /api/mvu-settings 读写。 */
   mvuSettings: MvuSettings
+  /** response stage 人称与正文长度。GET/PUT /api/response-settings 读写。 */
+  responseSettings: ResponseGenerationSettings
   /** Isolated ST-Prompt-Template evaluator, initialized once at server boot. */
   ejsEngine: EjsTemplateEngine | undefined
 }
@@ -922,6 +988,7 @@ function buildState(opts: StartServerOptions, env: NodeJS.ProcessEnv): AppState 
     worldbookSettings: { ...DEFAULT_WORLDBOOK_SETTINGS },
     postprocessSettings: { ...DEFAULT_POSTPROCESS_SETTINGS },
     mvuSettings: { ...DEFAULT_MVU_SETTINGS, presets: [{ ...DEFAULT_MVU_PRESET, config: { ...DEFAULT_MVU_CONFIG } }] },
+    responseSettings: { ...DEFAULT_RESPONSE_SETTINGS },
     ejsEngine: undefined,
   }
 }
@@ -1273,6 +1340,7 @@ async function handleRunJson(state: AppState, req: IncomingMessage, res: ServerR
         skipUserAppend: reroll,
         // 世界书全局设置(扫描深度 / LLM 匹配开关):ST world_info_depth 对应物。
         worldbookSettings: state.worldbookSettings,
+        responseSettings: state.responseSettings,
         postprocessSettings: state.postprocessSettings,
         mvu: state.mvuSettings,
         // 正则脚本(ai_output 位):落库前应用,存的就是成品(酒馆 "Alter Chat Output")。
@@ -1452,6 +1520,10 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     try {
       const inputStr = JSON.stringify(input) ?? 'null'
       const outputStr = JSON.stringify(output) ?? 'null'
+      const promptCalls = usageTracker.promptTrace(name)
+      // Unlike the diagnostic input/output summaries, promptJson is never
+      // truncated: it is the exact provider request the user needs to audit.
+      const promptJson = promptCalls.length > 0 ? JSON.stringify(promptCalls) : undefined
       const truncated = (s: string) => s.length > TRACE_MAX_CHARS
         ? `${s.slice(0, TRACE_MAX_CHARS)}…(已截断,原长 ${s.length})`
         : s
@@ -1464,6 +1536,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
         turn: traceTurn, runId, reroll,
         usage: { ...usage, ...meta },
         usageTotal,
+        ...(promptJson === undefined ? {} : { promptJson }),
         ...meta,
       }
       writeSseEvent(res, 'agent-trace', trace)
@@ -1604,50 +1677,99 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
 
   try {
     if (reusableTurn?.reusable !== undefined) {
-      intent = await runReusedStage(
+      const reusedIntent = await runReusedStage(
         'intent',
         { userInput, reusedFromTurn: reusableTurn.turn },
         reusableTurn.reusable.intent,
         reusableTurn.runId,
       )
+      intent = reusedIntent
       wb = await runReusedStage(
         'worldbook',
-        { intent: reusableTurn.reusable.intent, reusedFromTurn: reusableTurn.turn },
+        { intent: reusedIntent, reusedFromTurn: reusableTurn.turn },
         reusableTurn.reusable.worldbook,
         reusableTurn.runId,
       )
+      const reader = buildContextReader(session, sessionId)
+      const contextInput = {
+        intent: reusedIntent,
+        worldbookMatches: { matchCount: (wb as { matches: unknown[] }).matches.length },
+        reader: '<ContextReader: not serializable>',
+      }
+      ctxSegs = reusableTurn.reusable.context !== undefined
+        ? await runReusedStage(
+          'context',
+          { ...contextInput, reusedFromTurn: reusableTurn.turn },
+          reusableTurn.reusable.context,
+          reusableTurn.runId,
+        )
+        : await runStageWithTrace('context', contextInput, () => contextProcessAgent.run(
+          {
+            intent: reusedIntent,
+            worldbookHints: (wb as { matches: Array<{ path: string }> }).matches.map(match => match.path),
+            reader,
+          },
+          agentCtx,
+        ))
     } else {
       intent = await runStageWithTrace('intent', { userInput }, () => intentAgent.run(userInput, agentCtx))
       if (intent === null) { res.end(); return }
+      const currentIntent = intent
 
       // 2.1 输入改为结构化(最近 N 条消息 + 候选绿灯条目参数表,ST 语义适配):
       // 先组装再喂 agent,trace(SSE + traces.jsonl)里能看到完整输入结构。
-      const wbInput = buildWorldbookMatchInput(intent, agentCtx)
-      wb = await runStageWithTrace('worldbook', wbInput, () => worldbookMatchAgent.run(wbInput, agentCtx))
+      const wbInput = buildWorldbookMatchInput(currentIntent, agentCtx)
+      const reader = buildContextReader(session, sessionId)
+      // Context selection is independent from semantic worldbook matching.
+      // Give it only a local deterministic baseline as a hint, then run both
+      // LLM calls concurrently. The final worldbook output is still resolved
+      // before response generation below.
+      const worldbookHints = deterministicWorldbookMatch(wbInput, { rollProbability: false })
+        .map(candidate => candidate.path)
+      const contextInput = {
+        intent: currentIntent,
+        worldbookHints,
+        reader: '<ContextReader: not serializable>',
+      }
+      const [nextWorldbook, nextContext] = await Promise.all([
+        runStageWithTrace('worldbook', wbInput, () => worldbookMatchAgent.run(wbInput, agentCtx)),
+        runStageWithTrace('context', contextInput, () => contextProcessAgent.run(
+          { intent: currentIntent, worldbookHints, reader },
+          agentCtx,
+        )),
+      ])
+      wb = nextWorldbook
+      ctxSegs = nextContext
     }
     if (wb === null) { res.end(); return }
-
-    const reader = buildContextReader(session, sessionId)
-    const contextInput = {
-      intent,
-      worldbookMatches: { matchCount: (wb as { matches: unknown[] }).matches.length },
-      reader: '<ContextReader: not serializable>',
-    }
-    ctxSegs = reusableTurn?.reusable?.context !== undefined
-      ? await runReusedStage(
-        'context',
-        { ...contextInput, reusedFromTurn: reusableTurn.turn },
-        reusableTurn.reusable.context,
-        reusableTurn.runId,
-      )
-      : await runStageWithTrace('context', contextInput, () => contextProcessAgent.run(
-        { intent: intent as never, worldbookMatches: wb as never, reader },
-        agentCtx,
-      ))
     if (ctxSegs === null) { res.end(); return }
 
+    // The response agent receives standalone blue-light entries through
+    // agentCtx.worldbook and injects them into the final system prompt. Keep
+    // the same source entries visible in the structured trace input too;
+    // otherwise the trace misleadingly shows only matchCount and looks as if
+    // an external worldbook was never passed to the response stage.
+    const constantWorldbookEntries = listConstantWorldbookEntries(
+      state.worldbook,
+      text => text,
+    )
     result = await runStageWithTrace('response',
-      { intent, worldbook: { matchCount: (wb as { matches: unknown[] }).matches.length }, contextSegmentation: ctxSegs, userInput, character: { name: character.name, persona: character.persona, worldview: character.worldview, style: character.style } },
+      {
+        intent,
+        worldbook: {
+          matchCount: (wb as { matches: unknown[] }).matches.length,
+          constantWorldbookEntries,
+        },
+        contextSegmentation: ctxSegs,
+        userInput,
+        responseSettings: state.responseSettings,
+        character: {
+          name: character.name,
+          persona: character.persona,
+          worldview: character.worldview,
+          style: character.style,
+        },
+      },
       () => responseAgent.run(
         {
           intent: intent as never,
@@ -1656,6 +1778,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
           userInput,
           character,
           userPersona: getCurrentUserPersona(state),
+          responseSettings: state.responseSettings,
         },
         agentCtx,
       ),
@@ -2758,6 +2881,11 @@ interface TraceRecord {
   inputJson: string
   /** 序列化 + 截断后的输出。 */
   outputJson: string
+  /**
+   * 实际发送给 provider 的完整请求(messages + options)。与 input/output
+   * 摘要分开保存，专供提示词审计；不做 TRACE_MAX_CHARS 截断。
+   */
+  promptJson?: string
   durationMs: number
   runId: string
   reroll: boolean
@@ -2988,6 +3116,24 @@ async function handleDeleteMvuPreset(state: AppState, id: string, res: ServerRes
     : { ...state.mvuSettings, presets }
   await saveMvuSettings(state.mvuSettings)
   sendJson(res, 200, mvuSettingsResponse(state))
+}
+
+// ─── /api/response-settings — 正文人称与字数 ────────────────────────────────
+
+function handleGetResponseSettings(state: AppState, res: ServerResponse): void {
+  sendJson(res, 200, { ...state.responseSettings })
+}
+
+async function handlePutResponseSettings(state: AppState, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const payload = parseJsonBody(await readBody(req, 16 * 1024))
+  if (payload === null) return sendError(res, 400, 'invalid JSON body')
+  state.responseSettings = normalizeResponseSettings(payload, state.responseSettings)
+  try {
+    await saveResponseSettings(state.responseSettings)
+  } catch (err) {
+    return sendError(res, 500, `failed to persist response settings: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  sendJson(res, 200, { ...state.responseSettings })
 }
 
 /** PUT /api/worldbook-settings — body { scanDepth?: number, mode?: strict|enhanced|native }。
@@ -3856,6 +4002,27 @@ function getMergedWorldbook(state: AppState, characterId: CharacterId | null): W
     }
   }
   const store = new MemoryWorldbookStore([...fixtureEntries, ...cardEntries, ...importedEntries])
+  // Generate a debug/inspection artifact for the exact active combination.
+  // This is a local operation: only ordinary green-light keys are written;
+  // entry content stays in the authoritative store and is loaded after a hit.
+  const characterName = characterId === null
+    ? 'current'
+    : state.characters.get(characterId)?.name ?? characterId
+  const userPersona = getCurrentUserPersona(state)
+  const keyIndex = buildWorldbookKeyIndex(store.list(), {
+    user: userPersona?.name ?? null,
+    char: characterId === null ? null : characterName,
+  })
+  const keyIndexMd = renderWorldbookKeyOnlyMd(
+    keyIndex,
+    `${characterName} — 当前游玩组合 Green Worldbook Key Index`,
+  )
+  const keyIndexPath = join(ABS_WORLDBOOK_INDEX_DIR, `${safeFileName(characterName)}_key-only.md`)
+  queueWorldbookKeyIndexWrite(keyIndexPath, keyIndexMd)
+  // Stable alias for tools/UI that need the currently active combination after
+  // a character or external-worldbook switch.
+  const currentKeyIndexPath = join(ABS_WORLDBOOK_INDEX_DIR, 'current_key-only.md')
+  if (currentKeyIndexPath !== keyIndexPath) queueWorldbookKeyIndexWrite(currentKeyIndexPath, keyIndexMd)
   process.stderr.write(`[getMergedWorldbook] char=${characterId ?? 'null'} imported=${state.importedWorldbooks.size} cfgDisabled=${disabledIds === null ? 'none(default enable all)' : [...disabledIds].join(',')} storeSize=${store.list().length} (fixture=${fixtureEntries.length} card=${cardEntries.length} imported=${importedEntries.length})\n`)
   return store
 }
@@ -4007,6 +4174,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   state.postprocessSettings = await loadPostprocessSettings()
   // 加载独立 MVU 变量处理配置(缺省启用,模型留空=复用主模型)
   state.mvuSettings = await loadMvuSettings()
+  // 加载正文人称/字数设置(缺省跟随角色卡)
+  state.responseSettings = await loadResponseSettings()
   // 从磁盘恢复角色库 / 会话 / UI 全局状态(best-effort,失败只打 warning)
   await loadPersisted(state)
   // 加载独立世界书(从 worldbooks/ 目录扫)
@@ -4131,6 +4300,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
           if (method === 'DELETE') return await handleDeleteMvuPreset(state, id, res)
         }
       }
+      if (method === 'GET' && url.pathname === '/api/response-settings') return handleGetResponseSettings(state, res)
+      if (method === 'PUT' && url.pathname === '/api/response-settings') return await handlePutResponseSettings(state, req, res)
       {
         const m = /^\/api\/personas\/([^/]+)$/u.exec(url.pathname)
         if (m !== null) {

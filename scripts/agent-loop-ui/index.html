@@ -45,11 +45,14 @@
     /** @typedef {{scanDepth:number, useLlmMatcher:boolean}} WorldbookSettingsView */
     /** @typedef {{name:string, length:number, overridden:boolean}} PromptSummary */
     /** @typedef {{provider:'openai'|'mock', baseUrl:string, apiKey:string, model:string}} ApiConfigView */
+    /** @typedef {{id:string, name:string, instruction:string}} ResponsePerspectiveOptionView */
+    /** @typedef {{perspective:string, perspectives:ResponsePerspectiveOptionView[], lengthPreset:'card'|'short'|'medium'|'long'|'custom', minChars:number, maxChars:number}} ResponseSettingsView */
     /**
      * @typedef {Object} AgentTrace
      * @property {string} name
      * @property {string} inputJson
      * @property {string} outputJson
+     * @property {string=} promptJson
      * @property {number} durationMs
      * @property {string} ts
      * @property {{promptTokens:number,completionTokens:number,totalTokens:number,calls:number,estimated:boolean,reused?:boolean,deferred?:boolean,reusedFromRunId?:string}} usage
@@ -114,6 +117,21 @@
 
     const API_KEY_MASK = '***'
 
+    // Keep the first paint useful before the settings request returns. The
+    // server remains the source of truth; this only mirrors its defaults.
+    const DEFAULT_RESPONSE_PERSPECTIVES = [
+      { id: 'card', name: '跟随角色卡', instruction: '' },
+      { id: 'first', name: '第一人称', instruction: '采用第一人称；用户扮演的角色使用“我”自称，只写该角色可知的感受与所见。' },
+      { id: 'second', name: '第二人称', instruction: '采用第二人称沉浸视角，使用“你”指代用户扮演的角色，通过其感官营造在场感。' },
+      { id: 'third', name: '第三人称有限', instruction: '采用第三人称有限视角，以用户角色的名字为主、他/她为辅；只写用户角色亲眼所见、亲耳所闻和亲身所感。' },
+      { id: 'group', name: '第三人称群像', instruction: '采用第三人称群像视角；允许在相关角色之间自然切换，但保持叙事清晰，不替用户角色做未授权的关键决定。' },
+    ]
+    function mergeResponseSettings(value, previous) {
+      const next = { ...previous, ...(value && typeof value === 'object' ? value : {}) }
+      if (!Array.isArray(value?.perspectives)) next.perspectives = previous.perspectives
+      return next
+    }
+
     // SillyTavern's `chat_width` is a user-facing layout preference rather
     // than a character-card override. Keep the same idea here: the value
     // controls the shared message column, while the card's own HTML/CSS is
@@ -176,6 +194,13 @@
       const [loading, setLoading] = useState(false)
       const [error, setError] = useState(null)
       const [hasSavedKey, setHasSavedKey] = useState(false)
+      const [responseSettings, setResponseSettings] = useState(/** @type {ResponseSettingsView} */({
+        perspective: 'card', perspectives: DEFAULT_RESPONSE_PERSPECTIVES, lengthPreset: 'card', minChars: 500, maxChars: 900,
+      }))
+      const [responseSaving, setResponseSaving] = useState(false)
+      const responseSettingsLoaded = useRef(false)
+      const responseSaveTimer = useRef(null)
+      const responseLatestSaved = useRef('')
       // ⑤ 后处理设置 + SillyTavern 风格的可保存 preset
       const [ppSettings, setPpSettings] = useState({
         enabled: true, maxRounds: 2, densityMax: 0.6, deferExtract: true,
@@ -205,6 +230,21 @@
           try {
             const r = await apiGet('/api/mvu-settings')
             if (r && typeof r === 'object') setMvuSettings((prev) => ({ ...prev, ...r }))
+          } catch (err) { setError(String(err.message || err)) }
+        })()
+      }, [])
+      useEffect(() => {
+        (async () => {
+          try {
+            const r = await apiGet('/api/response-settings')
+            if (r && typeof r === 'object') {
+              setResponseSettings((prev) => {
+                const next = mergeResponseSettings(r, prev)
+                responseLatestSaved.current = JSON.stringify(next)
+                return next
+              })
+            }
+            responseSettingsLoaded.current = true
           } catch (err) { setError(String(err.message || err)) }
         })()
       }, [])
@@ -324,6 +364,66 @@
         } catch (err) { setError(String(err.message || err)) }
         finally { setMvuSaving(false) }
       }
+      const updateResponse = (key, value) => setResponseSettings((prev) => ({ ...prev, [key]: value }))
+      const updateResponsePerspective = (id, key, value) => setResponseSettings((prev) => ({
+        ...prev,
+        perspectives: prev.perspectives.map((option) => option.id === id ? { ...option, [key]: value } : option),
+      }))
+      const addResponsePerspective = () => setResponseSettings((prev) => {
+        const used = new Set(prev.perspectives.map((option) => option.id))
+        let index = 1
+        let id = 'custom'
+        while (used.has(id)) id = `custom-${index++}`
+        const option = { id, name: '自定义人称', instruction: '请在这里填写发送给 AI 的人称与叙事视角要求。' }
+        return { ...prev, perspective: id, perspectives: [...prev.perspectives, option] }
+      })
+      const removeResponsePerspective = (id) => {
+        if (id === 'card') return
+        setResponseSettings((prev) => ({
+          ...prev,
+          perspective: prev.perspective === id ? 'card' : prev.perspective,
+          perspectives: prev.perspectives.filter((option) => option.id !== id),
+        }))
+      }
+      const selectResponseLength = (preset) => {
+        const ranges = {
+          short: { minChars: 200, maxChars: 500 },
+          medium: { minChars: 500, maxChars: 900 },
+          long: { minChars: 1000, maxChars: 1800 },
+        }
+        setResponseSettings((prev) => ({
+          ...prev,
+          lengthPreset: preset,
+          ...(ranges[preset] || {}),
+        }))
+      }
+      const persistResponseSettings = useCallback(async (value) => {
+        const payload = JSON.stringify(value)
+        if (payload === responseLatestSaved.current) return
+        setResponseSaving(true)
+        try {
+          const r = await apiPut('/api/response-settings', value)
+          if (r && typeof r === 'object') {
+            setResponseSettings((prev) => {
+              const next = mergeResponseSettings(r, prev)
+              responseLatestSaved.current = JSON.stringify(next)
+              return next
+            })
+          } else {
+            responseLatestSaved.current = payload
+          }
+        } catch (err) { setError(String(err.message || err)) }
+        finally { setResponseSaving(false) }
+      }, [])
+      useEffect(() => {
+        if (!responseSettingsLoaded.current) return undefined
+        if (responseSaveTimer.current) clearTimeout(responseSaveTimer.current)
+        responseSaveTimer.current = setTimeout(() => { void persistResponseSettings(responseSettings) }, 500)
+        return () => {
+          if (responseSaveTimer.current) clearTimeout(responseSaveTimer.current)
+        }
+      }, [responseSettings, persistResponseSettings])
+      const saveResponseSettings = () => { void persistResponseSettings(responseSettings) }
       useEffect(() => {
         (async () => {
           try {
@@ -387,6 +487,66 @@
             h('button', { onClick: fetchModels, disabled: loading, title: '拉取 /v1/models' }, loading ? '…' : '↻ 拉取'),
           ),
           models.length === 0 ? h('div', { className: 'hint' }, '尚未拉取,点 ↻ 拉取模型列表。') : h('div', { className: 'hint' }, `${models.length} 个模型可选用`),
+        ),
+        h('div', { className: 'field response-settings' },
+          h('div', { className: 'panel-head' },
+            h('h3', null, '回复设置'),
+            responseSaving ? h('span', { className: 'hint' }, '保存中…') : null,
+          ),
+          h('div', { className: 'hint' }, '参考 SillyTavern 预设：人称和正文长度作为 response 阶段的独立控制，不修改角色卡原文。'),
+          h('div', { className: 'row' },
+            h('label', { className: 'compact-field', style: { flex: 1 } }, '人称视角',
+              h('select', { value: responseSettings.perspective, onChange: (e) => updateResponse('perspective', e.target.value) },
+                ...responseSettings.perspectives.map((option) => h('option', { key: option.id, value: option.id }, option.name)),
+              ),
+            ),
+            h('label', { className: 'compact-field', style: { flex: 1 } }, '正文长度',
+              h('select', { value: responseSettings.lengthPreset, onChange: (e) => selectResponseLength(e.target.value) },
+                h('option', { value: 'card' }, '跟随角色卡'),
+                h('option', { value: 'short' }, '短：200–500 字'),
+                h('option', { value: 'medium' }, '中：500–900 字'),
+                h('option', { value: 'long' }, '长：1000–1800 字'),
+                h('option', { value: 'custom' }, '自定义'),
+              ),
+            ),
+          ),
+          responseSettings.lengthPreset === 'custom'
+            ? h('div', { className: 'row', style: { marginTop: '6px' } },
+                h('label', { className: 'compact-field', style: { flex: 1 } }, '最少字数', h('input', { type: 'number', min: 20, max: 20000, step: 10, value: responseSettings.minChars, onChange: (e) => updateResponse('minChars', Number(e.target.value)) })),
+                h('label', { className: 'compact-field', style: { flex: 1 } }, '最多字数', h('input', { type: 'number', min: 20, max: 20000, step: 10, value: responseSettings.maxChars, onChange: (e) => updateResponse('maxChars', Number(e.target.value)) })),
+              )
+            : null,
+          h('div', { className: 'hint' }, '人称选项可新增、删除、重命名；下面的提示词就是实际发送给 response agent 的文字。停止编辑约 500ms 后自动保存，下一轮回复生效。'),
+          h('div', { className: 'response-perspective-list' },
+            ...responseSettings.perspectives.map((option) => h('div', {
+              key: option.id,
+              className: 'response-perspective-editor',
+              style: { border: '1px solid var(--border)', borderRadius: '6px', padding: '8px', marginTop: '6px' },
+            },
+              h('div', { className: 'row', style: { alignItems: 'center' } },
+                h('input', {
+                  type: 'text', value: option.name, placeholder: '显示名称',
+                  onChange: (e) => updateResponsePerspective(option.id, 'name', e.target.value),
+                  style: { flex: 1 },
+                }),
+                option.id === 'card'
+                  ? h('span', { className: 'hint', style: { whiteSpace: 'nowrap' } }, '保留项')
+                  : h('button', { className: 'mini', onClick: () => removeResponsePerspective(option.id) }, '删除'),
+              ),
+              option.id === 'card'
+                ? h('div', { className: 'hint', style: { marginTop: '5px' } }, '不额外强制人称，跟随角色卡原本的写法。')
+                : h('textarea', {
+                  value: option.instruction,
+                  onChange: (e) => updateResponsePerspective(option.id, 'instruction', e.target.value),
+                  placeholder: '填写实际发送给 AI 的人称/叙事提示词…',
+                  rows: 3,
+                  style: { width: '100%', marginTop: '6px', resize: 'vertical', boxSizing: 'border-box' },
+                }),
+            )),
+          ),
+          h('button', { className: 'mini', onClick: addResponsePerspective, style: { width: '100%', marginTop: '6px' } }, '+ 新增人称选项'),
+          h('div', { className: 'hint' }, '字数是正文软目标，同时会设置模型的 max_tokens 安全上限；状态栏、HTML/CSS 和机器标记不计入目标字数。'),
+          h('button', { className: 'primary', onClick: saveResponseSettings, disabled: responseSaving, style: { width: '100%', marginTop: '6px' } }, '应用回复设置'),
         ),
         h('div', { className: 'field postprocess-settings' },
           h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', cursor: 'pointer' } },
@@ -1049,8 +1209,11 @@
     function StageTraceCard(/** @type {{name:string, status:string, trace: AgentTrace|null}} */ props) {
       const { name, status, trace } = props
       const [open, setOpen] = useState(false)
-      const [tab, setTab] = useState('output')
+      const [tab, setTab] = useState(() => trace?.promptJson ? 'prompt' : 'output')
       const label = STAGE_LABELS[name] || name
+      const payload = tab === 'prompt'
+        ? trace?.promptJson
+        : (tab === 'output' ? trace?.outputJson : trace?.inputJson)
       return h('div', { className: `stage-card stage-card-${status}` },
         h('div', { className: 'stage-card-head', onClick: () => setOpen((o) => !o) },
           h('span', { className: 'stage-card-dot' }),
@@ -1065,13 +1228,12 @@
           h('div', { className: 'stage-card-tabs' },
             h('button', { className: 'mini ' + (tab === 'output' ? 'active' : ''), onClick: () => setTab('output') }, '输出'),
             h('button', { className: 'mini ' + (tab === 'input' ? 'active' : ''), onClick: () => setTab('input') }, '输入'),
-            trace.outputJson.length > 500 || trace.inputJson.length > 500
+            trace?.promptJson ? h('button', { className: 'mini ' + (tab === 'prompt' ? 'active' : ''), onClick: () => setTab('prompt') }, '实际提示词') : null,
+            trace && (trace.outputJson.length > 500 || trace.inputJson.length > 500)
               ? h('span', { className: 'hint', style: { marginLeft: 'auto' } }, 'JSON 可能很长,可滚动')
               : null,
           ),
-          h('pre', { className: 'stage-card-payload' },
-            tab === 'output' ? prettyJson(trace.outputJson) : prettyJson(trace.inputJson),
-          ),
+          payload === undefined ? null : h('pre', { className: 'stage-card-payload' }, prettyJson(payload)),
         ) : null,
         open && !trace ? h('div', { className: 'stage-card-body hint' }, '(无 I/O,等待 stage 完成…)') : null,
       )
@@ -1111,9 +1273,9 @@
     const TRACE_PREVIEW_CHARS = 500
 
     /** 单个 JSON payload 展示:pretty-print,超长默认截断 + "展开全部"。 */
-    function TracePayload(/** @type {{jsonStr: string, expandKey: string, expanded: boolean, onExpand: (k: string) => void}} */ props) {
+    function TracePayload(/** @type {{jsonStr: string, expandKey: string, expanded: boolean, full?: boolean, onExpand: (k: string) => void}} */ props) {
       const pretty = prettyJson(props.jsonStr)
-      if (pretty.length <= TRACE_PREVIEW_CHARS || props.expanded) {
+      if (props.full === true || pretty.length <= TRACE_PREVIEW_CHARS || props.expanded) {
         return h('pre', { className: 'stage-card-payload' }, pretty)
       }
       return h('div', null,
@@ -1125,7 +1287,7 @@
     /** 一轮里的单个 stage 卡片(持久化 trace 版,只读)。 */
     function TraceStageCard(/** @type {{trace: AgentTrace, traceKey: string}} */ props) {
       const [open, setOpen] = useState(false)
-      const [tab, setTab] = useState('output')
+      const [tab, setTab] = useState(() => props.trace.promptJson ? 'prompt' : 'output')
       const [expandedAll, setExpandedAll] = useState(() => new Set())
       const t = props.trace
       const toggleAll = (k) => setExpandedAll((prev) => {
@@ -1145,12 +1307,14 @@
           h('div', { className: 'stage-card-tabs' },
             h('button', { className: 'mini ' + (tab === 'output' ? 'active' : ''), onClick: () => setTab('output') }, '输出'),
             h('button', { className: 'mini ' + (tab === 'input' ? 'active' : ''), onClick: () => setTab('input') }, '输入'),
+            t.promptJson ? h('button', { className: 'mini ' + (tab === 'prompt' ? 'active' : ''), onClick: () => setTab('prompt') }, '实际提示词') : null,
             h('span', { className: 'hint', style: { marginLeft: 'auto' } }, fmtTime(t.ts)),
           ),
           h(TracePayload, {
-            jsonStr: tab === 'output' ? t.outputJson : t.inputJson,
+            jsonStr: tab === 'prompt' ? t.promptJson : (tab === 'output' ? t.outputJson : t.inputJson),
             expandKey,
             expanded: expandedAll.has(expandKey),
+            full: tab === 'prompt',
             onExpand: toggleAll,
           }),
         ) : null,

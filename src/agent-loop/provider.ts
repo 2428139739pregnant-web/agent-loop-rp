@@ -10,6 +10,8 @@ export interface ChatMessage {
 export interface ChatOptions {
   model?: string
   temperature?: number
+  /** OpenAI-compatible completion cap; the response prompt still carries the soft length target. */
+  max_tokens?: number
   response_format?: { type: 'json_object' } | { type: 'text' }
 }
 

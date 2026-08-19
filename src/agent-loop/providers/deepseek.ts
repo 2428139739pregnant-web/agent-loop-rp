@@ -23,6 +23,7 @@ export class DeepSeekProvider implements LLMProvider {
       model: options?.model ?? this.config.model,
       messages: messages.map(m => ({ role: m.role, content: m.content })),
       ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+      ...(options?.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),
       ...(options?.response_format !== undefined ? { response_format: options.response_format } : {}),
     }
     const response = await fetch(`${this.config.baseUrl}/chat/completions`, {

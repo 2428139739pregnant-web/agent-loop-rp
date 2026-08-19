@@ -9,9 +9,10 @@ import {
   responseAgent,
   type ResponseInput,
 } from './response.ts'
+import { DEFAULT_RESPONSE_PERSPECTIVES } from '../response-settings.ts'
 import { InMemoryPromptLoader, type AgentContext } from './types.ts'
 import type { PreprocessedCharacter } from '../character-loader.ts'
-import type { ChatMessage, LLMProvider } from '../provider.ts'
+import type { ChatMessage, ChatOptions, LLMProvider } from '../provider.ts'
 import {
   type ContextSegmentOutput,
   type IntentOutput,
@@ -199,6 +200,43 @@ test('responseAgent.run returns the LLM content as reply', async () => {
   assert.equal(result.turn, 0)
   assert.equal(result.usedWorldbook, false)
   assert.equal(result.usedContextSegmentation, false)
+})
+
+test('responseAgent applies configurable perspective, length, and max token cap', async () => {
+  let captured: ChatMessage[] = []
+  let options: ChatOptions | undefined
+  const provider: LLMProvider = {
+    name: 'spy',
+    async chat(messages, nextOptions) {
+      captured = messages
+      options = nextOptions
+      return { content: 'r' }
+    },
+  }
+  const ctx = makeCtx({
+    provider,
+    promptBody: '{{response_settings}}',
+  })
+  await responseAgent.run(
+    {
+      intent: makeIntent(),
+      worldbook: { matches: [] },
+      contextSegmentation: { segments: [] },
+      userInput: 'hi',
+      character: makeCharacter(),
+      responseSettings: {
+        perspective: 'third',
+        perspectives: DEFAULT_RESPONSE_PERSPECTIVES,
+        lengthPreset: 'medium',
+        minChars: 500,
+        maxChars: 900,
+      },
+    },
+    ctx,
+  )
+  assert.match(captured[0]?.content ?? '', /第三人称有限/u)
+  assert.match(captured[0]?.content ?? '', /500-900/u)
+  assert.equal(options?.max_tokens, 1980)
 })
 
 test('responseAgent applies plugin prompt injections in the same single response call', async () => {

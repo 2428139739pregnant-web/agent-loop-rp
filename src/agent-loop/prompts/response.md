@@ -55,6 +55,10 @@
 
 {{post_history_instructions}}
 
+## 当前回复设置（用户可配置）
+
+{{response_settings}}
+
 ## 当前动态状态（只读，若卡片启用）
 
 {{mvu_state}}

@@ -1,5 +1,6 @@
 node_modules/
 api-config.json
+response-settings.json
 characters/
 imagery/
 personas/

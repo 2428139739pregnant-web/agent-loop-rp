@@ -56,7 +56,13 @@ export interface ContextReader {
 /** Input contract for {@link contextProcessAgent}. */
 export interface ContextProcessInput {
   intent: IntentOutput
-  worldbookMatches: WorldbookMatchOutput
+  /**
+   * Legacy compatibility field. New callers should provide worldbookHints so
+   * this agent does not wait for the worldbook semantic matcher.
+   */
+  worldbookMatches?: WorldbookMatchOutput
+  /** Local deterministic hints only; never the final semantic worldbook result. */
+  worldbookHints?: readonly string[]
   reader: ContextReader
 }
 
@@ -160,18 +166,23 @@ export const contextProcessAgent: Agent<ContextProcessInput, ContextSegmentOutpu
   name: 'context-process',
 
   async run(input: ContextProcessInput, ctx: AgentContext): Promise<ContextSegmentOutput> {
-    const { intent, worldbookMatches, reader } = input
+    const { intent, reader } = input
 
     // 1. Snapshot the data the LLM needs to see.
     const conversations = reader.listConversations()
     const summaries = reader.listSummaries()
-    const worldbookPaths = worldbookMatches.matches.map(m => m.path)
+    // The context agent is independent from the semantic worldbook agent. A
+    // deterministic hint is useful for its fallback, but the final worldbook
+    // output is intentionally not a dependency of this call.
+    const worldbookPaths = input.worldbookHints
+      ?? input.worldbookMatches?.matches.map(m => m.path)
+      ?? []
 
     // 2. Render the system prompt with the current turn's signals.
     const template = await ctx.prompts.load('context-process')
     const systemPrompt = renderTemplate(template, {
       intent: JSON.stringify(intent, null, 2),
-      worldbook_paths: JSON.stringify(worldbookPaths),
+      worldbook_hints: JSON.stringify(worldbookPaths),
       conversation_count: String(conversations.length),
       summary_count: String(summaries.length),
     })

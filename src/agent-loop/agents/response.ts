@@ -9,6 +9,7 @@
 
 import type { PreprocessedCharacter } from '../character-loader.ts'
 import type { ChatMessage } from '../provider.ts'
+import type { WorldbookEntry } from '../session.ts'
 import { substituteUserCharMacros } from '../persona-store.ts'
 import {
   readMvuStateFromMessages,
@@ -25,6 +26,13 @@ import {
   type ReplyResult,
   type WorldbookMatchOutput,
 } from '../schema.ts'
+import {
+  buildResponseSettingsInstruction,
+  DEFAULT_RESPONSE_SETTINGS,
+  normalizeResponseSettings,
+  responseMaxTokens,
+  type ResponseGenerationSettings,
+} from '../response-settings.ts'
 import type { Agent, AgentContext } from './types.ts'
 import { applyWorldbookPromptInjections } from '../worldbook-plugin.ts'
 import { classifyWorldbookEntry } from '../worldbook-compat.ts'
@@ -43,6 +51,8 @@ export interface ResponseInput {
   character: PreprocessedCharacter
   /** 用户 persona(酒馆 {{user}})。null = 未配置,系统按"用户"称呼。 */
   userPersona?: { name: string; description: string } | null
+  /** 用户可配置的人称与正文长度；缺省时跟随角色卡。 */
+  responseSettings?: ResponseGenerationSettings
 }
 
 /** Placeholder pattern, e.g. `{{persona}}`. */
@@ -100,27 +110,52 @@ export function constantWorldbookDoc(position: number | undefined): 'persona' | 
 }
 
 /**
+ * Return the standalone worldbook entries that the response stage injects on
+ * every turn.  This is also used by the trace layer so the structured stage
+ * input and the actual prompt describe the same source entries.
+ */
+export interface ConstantWorldbookTraceEntry {
+  readonly path: string
+  readonly order: number
+  readonly position: number | undefined
+  readonly content: string
+}
+
+export function listConstantWorldbookEntries(
+  worldbook: { list(): readonly WorldbookEntry[] },
+  macro: (text: string) => string,
+): readonly ConstantWorldbookTraceEntry[] {
+  return worldbook
+    .list()
+    .filter(e => e.constant === true
+      && e.enabled !== false
+      && classifyWorldbookEntry(e).owner !== 'plugin')
+    .sort((a, b) => b.order - a.order)
+    .map(e => ({
+      path: e.path,
+      order: e.order,
+      position: e.position,
+      content: macro(e.content),
+    }))
+}
+
+/**
  * 从 ctx.worldbook 提取**独立世界书**的蓝灯条目(constant && enabled),
  * 按 position 映射分到三文档,组内按 order **降序**拼接(ST world-info.js:87)。
  * 蓝灯语义 = 无条件每轮注入,不受消息内容/关键词影响(ST checkWorldInfo 第 3 步)。
  * 与 ST 的差异:ST 对 probability<100 的蓝灯也会掷骰,本项目蓝灯严格无条件。
  */
 export function buildConstantWorldbookBlocks(
-  worldbook: { list(): readonly import('../session.ts').WorldbookEntry[] },
+  worldbook: { list(): readonly WorldbookEntry[] },
   macro: (text: string) => string,
 ): { persona: string; worldview: string; style: string } {
   const buckets: Record<'persona' | 'worldview' | 'style', string[]> = {
     persona: [], worldview: [], style: [],
   }
-  const constants = worldbook
-    .list()
-    .filter(e => e.constant === true
-      && e.enabled !== false
-      && classifyWorldbookEntry(e).owner !== 'plugin')
-    .sort((a, b) => b.order - a.order) // ST:同注入点 order 降序
+  const constants = listConstantWorldbookEntries(worldbook, macro)
   for (const e of constants) {
     buckets[constantWorldbookDoc(e.position)].push(
-      `### ${e.path} (常驻条目,order=${e.order})\n${macro(e.content)}`,
+      `### ${e.path} (常驻条目,order=${e.order})\n${e.content}`,
     )
   }
   const render = (blocks: string[]): string =>
@@ -215,6 +250,9 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
   name: 'response',
 
   async run(input: ResponseInput, ctx: AgentContext): Promise<ReplyResult> {
+    const responseSettings = normalizeResponseSettings(
+      input.responseSettings ?? DEFAULT_RESPONSE_SETTINGS,
+    )
     // 1. Load + render the system prompt.
     const template = renderEjs(ctx, await ctx.prompts.load('response'))
     const history = ctx.session.getHistory(ctx.sessionId)
@@ -270,7 +308,8 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     const cardSystemPrompt = macro(input.character.systemPrompt ?? '')
     const postHistoryInstructions = macro(input.character.postHistoryInstructions ?? '')
 
-    const systemPrompt = renderTemplate(template, {
+    const responseSettingsInstruction = buildResponseSettingsInstruction(responseSettings)
+    const renderedSystemPrompt = renderTemplate(template, {
       character_name: macro(input.character.name),
       persona: macro(input.character.persona) + constantBlocks.persona,
       worldview: macro(input.character.worldview) + constantBlocks.worldview,
@@ -289,7 +328,13 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
       keywords: input.intent.keywords.join(', '),
       worldbook_block: macro(worldbookBlock) || NO_WORLDBOOK,
       context_block: contextBlock || NO_HISTORY,
+      response_settings: responseSettingsInstruction,
     })
+    // Keep the setting effective even when a user replaces response.md with a
+    // custom template that does not include the new placeholder.
+    const systemPrompt = template.includes('{{response_settings}}')
+      ? renderedSystemPrompt
+      : `${renderedSystemPrompt}\n\n## 当前回复设置（用户可配置）\n\n${responseSettingsInstruction}`
 
     const promptUserInput = renderCharacterPromptView(
       input.userInput,
@@ -312,11 +357,15 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     )
 
     // 3. Call the LLM. Plain text — no response_format.
+    const maxTokens = responseMaxTokens(responseSettings)
     const result = await ctx.provider.chat(
       promptMessages,
       {
         model: ctx.model,
         temperature: ctx.temperature,
+        ...(maxTokens === undefined
+          ? {}
+          : { max_tokens: maxTokens }),
       },
     )
 
