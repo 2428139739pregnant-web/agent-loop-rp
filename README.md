@@ -347,7 +347,7 @@ node --experimental-transform-types scripts/agent-loop-demo.mjs
 | `POST` | `/api/run` | 执行一次回复，SSE 模式返回阶段事件 |
 | `GET` | `/api/history` | 读取会话历史 |
 | `GET` | `/api/sessions/:id/traces` | 读取 Trace 和轮次统计 |
-| `GET/PUT` | `/api/worldbook-settings` | 世界书扫描深度和匹配模式 |
+| `GET/PUT` | `/api/worldbook-settings` | ST 世界书扫描深度、min activations、递归、书名扫描、包含组打分、预算和匹配模式 |
 | `GET/PUT/POST` | `/api/postprocess-settings` | 后处理设置和预设 |
 | `GET/PUT/POST` | `/api/mvu-settings` | MVU 模型、温度和预设 |
 | `GET/PUT` | `/api/response-settings` | 正文人称与字数设置 |

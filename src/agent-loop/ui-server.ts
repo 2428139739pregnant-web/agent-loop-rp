@@ -1164,7 +1164,7 @@ interface AppState {
   /** 全局正则脚本库(酒馆 Regex 扩展)。startServer 时从 regex_scripts.json 加载。 */
   readonly regexScripts: RegexScriptStore
   /**
-   * 世界书全局设置(酒馆 world_info_depth 对应物):绿灯扫描深度 + LLM 匹配开关。
+   * 世界书全局设置(酒馆 World Info 全局配置):扫描、递归、预算和匹配模式。
    * GET/PUT /api/worldbook-settings 读写,持久化到 worldbook-settings.json。
    */
   worldbookSettings: WorldbookSettings
@@ -3588,7 +3588,11 @@ async function writeStateJson(state: AppState): Promise<void> {
 async function loadWorldbookSettings(): Promise<WorldbookSettings> {
   try {
     const raw = await readFile(ABS_WORLDBOOK_SETTINGS_JSON, 'utf-8')
-    const obj = JSON.parse(raw) as { scanDepth?: unknown; useLlmMatcher?: unknown; mode?: unknown; budgetPercent?: unknown; budgetCap?: unknown }
+    const obj = JSON.parse(raw) as {
+      scanDepth?: unknown; useLlmMatcher?: unknown; mode?: unknown; budgetPercent?: unknown; budgetCap?: unknown
+      minActivations?: unknown; minActivationsDepthMax?: unknown; recursive?: unknown
+      maxRecursionSteps?: unknown; includeNames?: unknown; useGroupScoring?: unknown
+    }
     const scanDepth = typeof obj.scanDepth === 'number' && Number.isInteger(obj.scanDepth)
       && obj.scanDepth >= 0 && obj.scanDepth <= 100
       ? obj.scanDepth
@@ -3600,7 +3604,20 @@ async function loadWorldbookSettings(): Promise<WorldbookSettings> {
       ? Math.min(100, Math.max(0, obj.budgetPercent)) : DEFAULT_WORLDBOOK_SETTINGS.budgetPercent ?? 25
     const budgetCap = typeof obj.budgetCap === 'number' && Number.isFinite(obj.budgetCap)
       ? Math.min(2_000_000, Math.max(0, Math.trunc(obj.budgetCap))) : DEFAULT_WORLDBOOK_SETTINGS.budgetCap ?? 0
-    return { scanDepth, useLlmMatcher: mode !== 'strict', mode, budgetPercent, budgetCap }
+    const minActivations = typeof obj.minActivations === 'number' && Number.isInteger(obj.minActivations)
+      ? Math.min(1_000, Math.max(0, obj.minActivations)) : DEFAULT_WORLDBOOK_SETTINGS.minActivations ?? 0
+    const minActivationsDepthMax = typeof obj.minActivationsDepthMax === 'number' && Number.isInteger(obj.minActivationsDepthMax)
+      ? Math.min(1_000, Math.max(0, obj.minActivationsDepthMax)) : DEFAULT_WORLDBOOK_SETTINGS.minActivationsDepthMax ?? 0
+    const maxRecursionSteps = typeof obj.maxRecursionSteps === 'number' && Number.isInteger(obj.maxRecursionSteps)
+      ? Math.min(1_000, Math.max(0, obj.maxRecursionSteps)) : DEFAULT_WORLDBOOK_SETTINGS.maxRecursionSteps ?? 0
+    const recursive = typeof obj.recursive === 'boolean' ? obj.recursive : DEFAULT_WORLDBOOK_SETTINGS.recursive ?? false
+    const includeNames = typeof obj.includeNames === 'boolean' ? obj.includeNames : DEFAULT_WORLDBOOK_SETTINGS.includeNames ?? true
+    const useGroupScoring = typeof obj.useGroupScoring === 'boolean'
+      ? obj.useGroupScoring : DEFAULT_WORLDBOOK_SETTINGS.useGroupScoring ?? false
+    return {
+      scanDepth, useLlmMatcher: mode !== 'strict', mode, budgetPercent, budgetCap,
+      minActivations, minActivationsDepthMax, recursive, maxRecursionSteps, includeNames, useGroupScoring,
+    }
   } catch {
     return { ...DEFAULT_WORLDBOOK_SETTINGS }
   }
@@ -3805,8 +3822,10 @@ async function handlePutResponseSettings(state: AppState, req: IncomingMessage, 
   sendJson(res, 200, { ...state.responseSettings })
 }
 
-/** PUT /api/worldbook-settings — body { scanDepth?: number, mode?: strict|enhanced|native, budgetPercent?: number, budgetCap?: number }。
+/** PUT /api/worldbook-settings — body 支持 scanDepth、mode、budgetPercent、budgetCap、
+ * minActivations、minActivationsDepthMax、recursive、maxRecursionSteps、includeNames、useGroupScoring。
  *  scanDepth = 绿灯匹配扫描的最近消息条数(酒馆 world_info_depth,默认 2)。
+ *  其余全局字段对应酒馆 World Info 的 min activations、递归、书名扫描和包含组打分选项。
  *  useLlmMatcher 保留为旧客户端兼容字段。写盘 best-effort。 */
 async function handlePutWorldbookSettings(state: AppState, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readBody(req, 16 * 1024)
@@ -3835,6 +3854,28 @@ async function handlePutWorldbookSettings(state: AppState, req: IncomingMessage,
     && (typeof budgetCapRaw !== 'number' || !Number.isInteger(budgetCapRaw) || budgetCapRaw < 0 || budgetCapRaw > 2_000_000)) {
     return sendError(res, 400, 'budgetCap must be an integer in [0, 2000000]')
   }
+  const minActivationsRaw = payload.minActivations
+  if (minActivationsRaw !== undefined
+    && (typeof minActivationsRaw !== 'number' || !Number.isInteger(minActivationsRaw) || minActivationsRaw < 0 || minActivationsRaw > 1_000)) {
+    return sendError(res, 400, 'minActivations must be an integer in [0, 1000]')
+  }
+  const minActivationsDepthMaxRaw = payload.minActivationsDepthMax
+  if (minActivationsDepthMaxRaw !== undefined
+    && (typeof minActivationsDepthMaxRaw !== 'number' || !Number.isInteger(minActivationsDepthMaxRaw) || minActivationsDepthMaxRaw < 0 || minActivationsDepthMaxRaw > 1_000)) {
+    return sendError(res, 400, 'minActivationsDepthMax must be an integer in [0, 1000]')
+  }
+  const maxRecursionStepsRaw = payload.maxRecursionSteps
+  if (maxRecursionStepsRaw !== undefined
+    && (typeof maxRecursionStepsRaw !== 'number' || !Number.isInteger(maxRecursionStepsRaw) || maxRecursionStepsRaw < 0 || maxRecursionStepsRaw > 1_000)) {
+    return sendError(res, 400, 'maxRecursionSteps must be an integer in [0, 1000]')
+  }
+  for (const [key, value] of [
+    ['recursive', payload.recursive],
+    ['includeNames', payload.includeNames],
+    ['useGroupScoring', payload.useGroupScoring],
+  ] as const) {
+    if (value !== undefined && typeof value !== 'boolean') return sendError(res, 400, `${key} must be a boolean`)
+  }
   const mode: WorldbookMatchMode = modeRaw === 'strict' || modeRaw === 'enhanced' || modeRaw === 'native'
     ? modeRaw
     : useLlmMatcherRaw === false ? 'strict' : state.worldbookSettings.mode ?? 'enhanced'
@@ -3846,6 +3887,18 @@ async function handlePutWorldbookSettings(state: AppState, req: IncomingMessage,
       ? budgetPercentRaw : state.worldbookSettings.budgetPercent ?? DEFAULT_WORLDBOOK_SETTINGS.budgetPercent ?? 25,
     budgetCap: typeof budgetCapRaw === 'number'
       ? budgetCapRaw : state.worldbookSettings.budgetCap ?? DEFAULT_WORLDBOOK_SETTINGS.budgetCap ?? 0,
+    minActivations: typeof minActivationsRaw === 'number'
+      ? minActivationsRaw : state.worldbookSettings.minActivations ?? DEFAULT_WORLDBOOK_SETTINGS.minActivations ?? 0,
+    minActivationsDepthMax: typeof minActivationsDepthMaxRaw === 'number'
+      ? minActivationsDepthMaxRaw : state.worldbookSettings.minActivationsDepthMax ?? DEFAULT_WORLDBOOK_SETTINGS.minActivationsDepthMax ?? 0,
+    maxRecursionSteps: typeof maxRecursionStepsRaw === 'number'
+      ? maxRecursionStepsRaw : state.worldbookSettings.maxRecursionSteps ?? DEFAULT_WORLDBOOK_SETTINGS.maxRecursionSteps ?? 0,
+    recursive: typeof payload.recursive === 'boolean'
+      ? payload.recursive : state.worldbookSettings.recursive ?? DEFAULT_WORLDBOOK_SETTINGS.recursive ?? false,
+    includeNames: typeof payload.includeNames === 'boolean'
+      ? payload.includeNames : state.worldbookSettings.includeNames ?? DEFAULT_WORLDBOOK_SETTINGS.includeNames ?? true,
+    useGroupScoring: typeof payload.useGroupScoring === 'boolean'
+      ? payload.useGroupScoring : state.worldbookSettings.useGroupScoring ?? DEFAULT_WORLDBOOK_SETTINGS.useGroupScoring ?? false,
   }
   state.worldbookSettings = next
   try {

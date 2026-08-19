@@ -325,6 +325,92 @@ test('buildWorldbookMatchInput respects scanDepth from settings and defaults to 
   assert.deepEqual(two.recentMessages.map(m => m.content), ['2', '3'])
 })
 
+test('buildWorldbookMatchInput exposes ST min-activation history and active book names', () => {
+  const history: ChatMessage[] = [
+    { role: 'user', content: '旧消息' },
+    { role: 'assistant', content: '新消息' },
+  ]
+  const store = new MemoryWorldbookStore([
+    { path: 'book.md', sourceBookId: 'worldbook:魔法书', keywords: ['魔法书'], order: 1, weight: 1, content: '' },
+  ])
+  const input = buildWorldbookMatchInput(
+    makeIntent(),
+    {
+      ...makeCtx({ store, history }),
+      worldbookSettings: {
+        scanDepth: 1,
+        useLlmMatcher: false,
+        minActivations: 2,
+        minActivationsDepthMax: 4,
+        includeNames: true,
+      },
+    },
+  )
+  assert.equal(input.scanDepth, 1)
+  assert.deepEqual(input.recentMessages.map(message => message.content), ['旧消息', '新消息'])
+  assert.equal(input.minActivations, 2)
+  assert.equal(input.minActivationsDepthMax, 4)
+  assert.deepEqual(input.globalScanData?.worldbookNames, ['魔法书'])
+})
+
+test('ST global names can activate an entry even when chat depth is zero', () => {
+  const matches = deterministicWorldbookMatch({
+    intent: makeIntent(),
+    scanDepth: 0,
+    recentMessages: [],
+    globalScanData: { worldbookNames: ['魔法书'] },
+    includeNames: true,
+    candidates: [makeCandidate({ path: 'book.md', keys: ['魔法书'] })],
+  }, { rollProbability: false })
+  assert.deepEqual(matches.map(candidate => candidate.path), ['book.md'])
+})
+
+test('ST min_activations widens the initial scan without an extra LLM call', () => {
+  const matches = deterministicWorldbookMatch({
+    intent: makeIntent(),
+    scanDepth: 1,
+    minActivations: 1,
+    minActivationsDepthMax: 2,
+    recentMessages: [
+      { role: 'user', content: '旧消息有火' },
+      { role: 'assistant', content: '新消息无关' },
+    ],
+    candidates: [makeCandidate({ path: 'old.md', keys: ['火'] })],
+  }, { rollProbability: false })
+  assert.deepEqual(matches.map(candidate => candidate.path), ['old.md'])
+})
+
+test('ST global recursion and max recursion steps apply to entries without local flags', () => {
+  const matches = deterministicWorldbookMatch({
+    intent: makeIntent({ keywords: ['start'] }),
+    scanDepth: 2,
+    recentMessages: [],
+    recursive: true,
+    maxRecursionSteps: 1,
+    candidates: [
+      makeCandidate({ path: 'root.md', keys: ['start'], recursiveBookId: 'book', recursiveContent: 'next' }),
+      makeCandidate({ path: 'next.md', keys: ['next'], recursiveBookId: 'book', recursiveContent: 'late' }),
+      makeCandidate({ path: 'late.md', keys: ['late'], recursiveBookId: 'book' }),
+    ],
+  }, { rollProbability: false })
+  assert.deepEqual(matches.map(candidate => candidate.path), ['root.md', 'next.md'])
+})
+
+test('ST global group scoring chooses the highest key-hit candidate', () => {
+  const input = {
+    intent: makeIntent({ keywords: ['火', '水'] }),
+    scanDepth: 2,
+    recentMessages: [{ role: 'user' as const, content: '火水' }],
+    useGroupScoring: true,
+    candidates: [],
+  }
+  const result = filterInclusionGroupCandidates([
+    makeCandidate({ path: 'one.md', keys: ['火'], group: 'scene' }),
+    makeCandidate({ path: 'two.md', keys: ['火', '水'], group: 'scene' }),
+  ], input, () => 0.99)
+  assert.deepEqual(result.map(candidate => candidate.path), ['two.md'])
+})
+
 test('buildWorldbookMatchInput substitutes {{user}}/{{char}} macros in keys', () => {
   const store = new MemoryWorldbookStore([
     {

@@ -163,6 +163,18 @@ export interface WorldbookMatchInput {
   budgetCap?: number
   /** Context window shared with response PromptManager budgeting. */
   maxContextTokens?: number
+  /** ST `world_info_min_activations`; expands the initial scan depth locally. */
+  minActivations?: number
+  /** ST `world_info_min_activations_depth_max`; 0 means available history. */
+  minActivationsDepthMax?: number
+  /** ST `world_info_recursive`; enables recursion for entries without a local flag. */
+  recursive?: boolean
+  /** ST `world_info_max_recursion_steps`; 0 means no explicit limit. */
+  maxRecursionSteps?: number
+  /** ST `world_info_include_names`; include active book names in the scan buffer. */
+  includeNames?: boolean
+  /** ST `world_info_use_group_scoring`; global group-scoring switch. */
+  useGroupScoring?: boolean
   /** Session-local World Info timed effects; rerolls reuse this snapshot. */
   timedEffects?: TimedEffectState
   /** Model-visible message count before this generation starts. */
@@ -192,12 +204,21 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
   const scanDepth = Number.isFinite(settings.scanDepth) && settings.scanDepth >= 0
     ? Math.floor(settings.scanDepth)
     : DEFAULT_WORLDBOOK_SETTINGS.scanDepth
+  const minActivations = Number.isFinite(settings.minActivations) && (settings.minActivations ?? 0) > 0
+    ? Math.floor(settings.minActivations!) : 0
+  const minActivationsDepthMax = Number.isFinite(settings.minActivationsDepthMax)
+    && (settings.minActivationsDepthMax ?? 0) > 0
+    ? Math.floor(settings.minActivationsDepthMax!) : 0
+  const scanHistoryDepth = minActivations > 0
+    ? Math.max(scanDepth, minActivationsDepthMax > 0 ? minActivationsDepthMax : 1_000)
+    : scanDepth
 
-  // 最近 N 条消息(任意角色,'tool' 不算扫描文本)。单条超长截断,防止 prompt 爆炸。
+  // 最近 N 条消息(任意角色,'tool' 不算扫描文本)。开启 min_activations 时，
+  // 一次准备可供 ST 深度扩展的历史，实际使用深度仍由确定性 matcher 控制。
   const history = ctx.session.getHistory(ctx.sessionId) as readonly ChatMessage[]
   const recentMessages: WorldbookScanMessage[] = history
     .filter(m => m.role === 'user' || m.role === 'assistant' || m.role === 'system')
-    .slice(-scanDepth)
+    .slice(-Math.min(scanHistoryDepth, 1_000))
     .map(m => ({
       role: (m.role === 'assistant' || m.role === 'system') ? m.role : 'user',
       content: m.content.length > SCAN_MESSAGE_MAX_CHARS
@@ -207,6 +228,18 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
 
   const macro = (text: string): string =>
     substituteUserCharMacros(text, ctx.macros?.user ?? null, ctx.macros?.char ?? null)
+
+  // ST world_info_include_names scans the active book names as a shared
+  // chat-independent buffer. Normalized sourceBookId values are the host
+  // boundary for character cards and imported World Info books.
+  const worldbookNames = [...new Set(ctx.worldbook.list()
+    .map(entry => entry.sourceBookId)
+    .filter((value): value is string => value !== undefined && value.length > 0)
+    .map(value => value.replace(/^(?:character|worldbook):/u, ''))
+    .filter(value => value.length > 0))]
+  const globalScanData = ctx.worldbookGlobalScanData === undefined
+    ? (worldbookNames.length === 0 ? undefined : { worldbookNames })
+    : { ...ctx.worldbookGlobalScanData, ...(worldbookNames.length === 0 ? {} : { worldbookNames }) }
 
   // 绿灯候选:蓝灯普通条目由 response 常驻注入;但 special plugin entries
   // (例如 [GENERATE] blue entries) 仍必须进入兼容 lane。
@@ -250,7 +283,7 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
       ...(e.matchCharacterDepthPrompt === undefined ? {} : { matchCharacterDepthPrompt: e.matchCharacterDepthPrompt }),
       ...(e.matchScenario === undefined ? {} : { matchScenario: e.matchScenario }),
       ...(e.matchCreatorNotes === undefined ? {} : { matchCreatorNotes: e.matchCreatorNotes }),
-      ...(e.recursiveScanning === true
+      ...(e.recursiveScanning === true || settings.recursive === true
         ? { recursiveContent: macro(ctx.worldbook.getContent(e.path) ?? '') }
         : {}),
       ...(e.position === undefined ? {} : { position: e.position }),
@@ -274,8 +307,14 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
       intent,
       scanDepth,
       recentMessages,
-      ...(ctx.worldbookGlobalScanData === undefined ? {} : { globalScanData: ctx.worldbookGlobalScanData }),
+      ...(globalScanData === undefined ? {} : { globalScanData }),
       ...(ctx.tavernHelperState === undefined ? {} : { injectedScanText: tavernInjectedScanText(ctx.tavernHelperState) }),
+      minActivations,
+      minActivationsDepthMax,
+      recursive: settings.recursive === true,
+      maxRecursionSteps: settings.maxRecursionSteps ?? 0,
+      includeNames: settings.includeNames !== false,
+      useGroupScoring: settings.useGroupScoring === true,
       candidates: pluginCandidates,
       mode: 'strict',
     }, { rollProbability: false }).map(candidate => candidate.path),
@@ -289,7 +328,7 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
     intent,
     scanDepth,
     recentMessages,
-    ...(ctx.worldbookGlobalScanData === undefined ? {} : { globalScanData: ctx.worldbookGlobalScanData }),
+    ...(globalScanData === undefined ? {} : { globalScanData }),
     ...(ctx.tavernHelperState === undefined ? {} : { injectedScanText: tavernInjectedScanText(ctx.tavernHelperState) }),
     candidates,
     ...(constantCandidates.length === 0 ? {} : { constantCandidates }),
@@ -301,6 +340,12 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
     mode,
     ...(ctx.worldbookSettings?.budgetPercent === undefined ? {} : { budgetPercent: ctx.worldbookSettings.budgetPercent }),
     ...(ctx.worldbookSettings?.budgetCap === undefined ? {} : { budgetCap: ctx.worldbookSettings.budgetCap }),
+    minActivations,
+    minActivationsDepthMax,
+    recursive: settings.recursive === true,
+    maxRecursionSteps: settings.maxRecursionSteps ?? 0,
+    includeNames: settings.includeNames !== false,
+    useGroupScoring: settings.useGroupScoring === true,
     ...(ctx.responseSettings?.maxContextTokens === undefined ? {} : { maxContextTokens: ctx.responseSettings.maxContextTokens }),
     ...(ctx.worldbookTimedEffects === undefined ? {} : { timedEffects: ctx.worldbookTimedEffects }),
     messageCount: history.length,
@@ -460,8 +505,8 @@ function recursionDelayLevel(candidate: WorldbookMatchCandidate): number {
   return Math.min(MAX_SAFE_RECURSION_LEVEL, Math.max(0, Math.trunc(candidate.delayUntilRecursion)))
 }
 
-function recursionBookId(candidate: WorldbookMatchCandidate): string | undefined {
-  if (candidate.recursiveScanning !== true) return undefined
+function recursionBookId(candidate: WorldbookMatchCandidate, globalRecursive = false): string | undefined {
+  if (candidate.recursiveScanning !== true && !globalRecursive) return undefined
   return candidate.recursiveBookId ?? DEFAULT_RECURSION_BOOK_ID
 }
 
@@ -481,13 +526,14 @@ function scanTextForCandidate(
       ...input.intent.keywords,
     )
   const global = input.globalScanData
-  if (depth > 0 && global !== undefined) {
+  if (global !== undefined) {
     if (candidate.matchPersonaDescription) baseParts.push(global.personaDescription ?? '')
     if (candidate.matchCharacterDescription) baseParts.push(global.characterDescription ?? '')
     if (candidate.matchCharacterPersonality) baseParts.push(global.characterPersonality ?? '')
     if (candidate.matchCharacterDepthPrompt) baseParts.push(global.characterDepthPrompt ?? '')
     if (candidate.matchScenario) baseParts.push(global.scenario ?? '')
     if (candidate.matchCreatorNotes) baseParts.push(global.creatorNotes ?? '')
+    if (input.includeNames !== false) baseParts.push(...(global.worldbookNames ?? []))
   }
   if (depth > 0) baseParts.push(...(input.injectedScanText ?? []))
   const baseText = baseParts.filter(value => value.length > 0).join('\n\x01')
@@ -508,8 +554,9 @@ function candidateMatchesText(
 function appendRecursiveContent(
   textByBook: Map<string, string>,
   candidate: WorldbookMatchCandidate,
+  globalRecursive = false,
 ): boolean {
-  const bookId = recursionBookId(candidate)
+  const bookId = recursionBookId(candidate, globalRecursive)
   if (bookId === undefined || candidate.preventRecursion === true) return false
   const content = candidate.recursiveContent ?? ''
   if (content.length === 0) return false
@@ -579,11 +626,17 @@ export function filterInclusionGroupCandidates(
         winners = [overrides[0]!]
       } else {
         let pool = current
-        if (current.some(candidate => candidate.useGroupScoring === true)) {
-          const scored = current.filter(candidate => candidate.useGroupScoring === true)
+        const groupScoring = input.useGroupScoring === true
+          || current.some(candidate => candidate.useGroupScoring === true)
+        if (groupScoring) {
+          const scored = input.useGroupScoring === true
+            ? current
+            : current.filter(candidate => candidate.useGroupScoring === true)
           const best = Math.max(...scored.map(candidate => candidateKeyScore(input, candidate)))
-          pool = current.filter(candidate => candidate.useGroupScoring !== true
-            || candidateKeyScore(input, candidate) === best)
+          pool = input.useGroupScoring === true
+            ? current.filter(candidate => candidateKeyScore(input, candidate) === best)
+            : current.filter(candidate => candidate.useGroupScoring !== true
+              || candidateKeyScore(input, candidate) === best)
         }
         if (pool.length <= 1) {
           winners = pool
@@ -627,26 +680,47 @@ function collectWorldbookActivations(
   const active = new Set<string>()
   const textByBook = new Map<string, string>()
   const byPath = new Map(input.candidates.map(candidate => [candidate.path, candidate]))
+  const inputAtDepth = (scanDepth: number): WorldbookMatchInput =>
+    scanDepth === input.scanDepth ? input : { ...input, scanDepth }
 
   const activate = (candidate: WorldbookMatchCandidate): void => {
     if (active.has(candidate.path)) return
     active.add(candidate.path)
-    appendRecursiveContent(textByBook, candidate)
+    appendRecursiveContent(textByBook, candidate, input.recursive === true)
   }
 
   // Initial ST matching. Delayed entries are intentionally left for a
   // recursive pass, even when their key appears in the current chat turn.
   if (includeInitial) {
-    for (const candidate of input.candidates) {
-      if (candidate.hasDecorators === true) continue
-      const messageCount = input.messageCount ?? input.recentMessages.length
-      if (isTimedEffectStickyActive(input.timedEffects ?? {}, candidate.path, messageCount)) {
-        activate(candidate)
-        continue
+    const scanInitialAtDepth = (scanDepth: number): void => {
+      const scanInput = inputAtDepth(scanDepth)
+      for (const candidate of input.candidates) {
+        if (candidate.hasDecorators === true) continue
+        const messageCount = input.messageCount ?? input.recentMessages.length
+        if (isTimedEffectStickyActive(input.timedEffects ?? {}, candidate.path, messageCount)) {
+          activate(candidate)
+          continue
+        }
+        if (!canEvaluateTimedEffect(candidate, input.timedEffects ?? {}, messageCount)
+          || recursionDelayLevel(candidate) > 0) continue
+        if (candidateMatchesText(scanInput, candidate)) activate(candidate)
       }
-      if (!canEvaluateTimedEffect(candidate, input.timedEffects ?? {}, messageCount)
-        || recursionDelayLevel(candidate) > 0) continue
-      if (candidateMatchesText(input, candidate)) activate(candidate)
+    }
+    scanInitialAtDepth(input.scanDepth)
+
+    // ST's min_activations widens only the initial chat scan until enough
+    // entries are found or the configured depth limit is reached. Recursive
+    // buffers are intentionally not used for this pass.
+    const minimum = Math.max(0, Math.trunc(input.minActivations ?? 0))
+    let scanDepth = Math.max(0, Math.trunc(input.scanDepth))
+    const configuredMax = Math.max(0, Math.trunc(input.minActivationsDepthMax ?? 0))
+    const maxDepth = Math.min(
+      input.recentMessages.length,
+      configuredMax > 0 ? Math.max(scanDepth, configuredMax) : input.recentMessages.length,
+    )
+    while (minimum > 0 && active.size < minimum && scanDepth < maxDepth) {
+      scanDepth += 1
+      scanInitialAtDepth(scanDepth)
     }
   }
 
@@ -660,7 +734,7 @@ function collectWorldbookActivations(
 
   const recursiveBooks = new Map<string, WorldbookMatchCandidate[]>()
   for (const candidate of input.candidates) {
-    const bookId = recursionBookId(candidate)
+    const bookId = recursionBookId(candidate, input.recursive === true)
     if (bookId === undefined) continue
     const entries = recursiveBooks.get(bookId) ?? []
     entries.push(candidate)
@@ -674,8 +748,12 @@ function collectWorldbookActivations(
     if ((textByBook.get(bookId) ?? '').length === 0 && delayedLevels.length === 0) continue
     const levels = delayedLevels.length > 0 ? delayedLevels : [0]
 
+    let recursionSteps = 0
+    const maxRecursionSteps = Math.max(0, Math.trunc(input.maxRecursionSteps ?? 0))
     for (const recursionLevel of levels) {
       while (true) {
+        if (maxRecursionSteps > 0 && recursionSteps >= maxRecursionSteps) break
+        recursionSteps += 1
         const recursiveText = textByBook.get(bookId) ?? ''
         const newlyActivated: WorldbookMatchCandidate[] = []
         for (const candidate of entries) {

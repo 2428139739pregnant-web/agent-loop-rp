@@ -54,6 +54,8 @@ export interface WorldbookGlobalScanData {
   readonly characterDepthPrompt?: string
   readonly scenario?: string
   readonly creatorNotes?: string
+  /** ST `world_info_include_names`: active World Info book names in scan text. */
+  readonly worldbookNames?: readonly string[]
 }
 
 /** 世界书全局设置(对应 SillyTavern world_info_depth 等 world-info.js:69-86 全局项)。 */
@@ -74,6 +76,18 @@ export interface WorldbookSettings {
   readonly budgetPercent?: number
   /** ST `world_info_budget_cap`; zero/undefined means no absolute cap. */
   readonly budgetCap?: number
+  /** ST `world_info_min_activations`; 0 disables depth expansion. */
+  readonly minActivations?: number
+  /** ST `world_info_min_activations_depth_max`; 0 means through available history. */
+  readonly minActivationsDepthMax?: number
+  /** ST `world_info_recursive`; enables recursive scans for sources without a local override. */
+  readonly recursive?: boolean
+  /** ST `world_info_max_recursion_steps`; 0 means no explicit limit. */
+  readonly maxRecursionSteps?: number
+  /** ST `world_info_include_names`; include active World Info names in scan text. */
+  readonly includeNames?: boolean
+  /** ST `world_info_use_group_scoring`; use key-hit scores when resolving groups. */
+  readonly useGroupScoring?: boolean
 }
 
 /** Resolve the explicit mode while preserving old worldbook-settings.json files. */
@@ -89,6 +103,12 @@ export const DEFAULT_WORLDBOOK_SETTINGS: WorldbookSettings = {
   mode: 'enhanced',
   budgetPercent: 25,
   budgetCap: 0,
+  minActivations: 0,
+  minActivationsDepthMax: 0,
+  recursive: false,
+  maxRecursionSteps: 0,
+  includeNames: true,
+  useGroupScoring: false,
 }
 
 /** Runtime knobs for the optional ⑤ postprocess pipeline. */

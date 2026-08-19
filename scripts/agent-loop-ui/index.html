@@ -59,7 +59,7 @@
     /** @typedef {{sessionId:string, label:string, characterName:string, createdAt:string, turnCount:number}} SessionInfo */
     /** @typedef {{sourceId:string, name:string|null, keys:string[], secondaryKeys:string[], content:string, enabled:boolean, insertionOrder:number, selective:boolean, constant:boolean, caseSensitive:boolean, matchWholeWords:boolean, useRegex:boolean, position:'before_char'|'after_char', priority:number|null, selectiveLogic?:string, probability?:number, useProbability?:boolean, stPosition?:number}} WBEntry */
     /** @typedef {{id:string, name:string, entryCount:number, enabledCount:number, tokenBudget:number|null}} WBBook */
-    /** @typedef {{scanDepth:number, useLlmMatcher:boolean, budgetPercent:number, budgetCap:number}} WorldbookSettingsView */
+    /** @typedef {{scanDepth:number, useLlmMatcher:boolean, budgetPercent:number, budgetCap:number, minActivations:number, minActivationsDepthMax:number, maxRecursionSteps:number, recursive:boolean, includeNames:boolean, useGroupScoring:boolean}} WorldbookSettingsView */
     /** @typedef {{name:string, length:number, overridden:boolean}} PromptSummary */
     /** @typedef {{provider:'openai'|'mock', baseUrl:string, apiKey:string, model:string}} ApiConfigView */
     /** @typedef {{id:string, name:string, instruction:string}} ResponsePerspectiveOptionView */
@@ -2906,6 +2906,12 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       const [matchMode, setMatchMode] = useState('enhanced')
       const [budgetPercent, setBudgetPercent] = useState('25')
       const [budgetCap, setBudgetCap] = useState('0')
+      const [minActivations, setMinActivations] = useState('0')
+      const [minActivationsDepthMax, setMinActivationsDepthMax] = useState('0')
+      const [maxRecursionSteps, setMaxRecursionSteps] = useState('0')
+      const [recursive, setRecursive] = useState(false)
+      const [includeNames, setIncludeNames] = useState(true)
+      const [useGroupScoring, setUseGroupScoring] = useState(false)
       const [savingSettings, setSavingSettings] = useState(false)
       const scanDepthRef = useRef(null)
 
@@ -2918,6 +2924,12 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
             : r.useLlmMatcher === false ? 'strict' : 'enhanced')
           setBudgetPercent(String(r.budgetPercent ?? 25))
           setBudgetCap(String(r.budgetCap ?? 0))
+          setMinActivations(String(r.minActivations ?? 0))
+          setMinActivationsDepthMax(String(r.minActivationsDepthMax ?? 0))
+          setMaxRecursionSteps(String(r.maxRecursionSteps ?? 0))
+          setRecursive(r.recursive === true)
+          setIncludeNames(r.includeNames !== false)
+          setUseGroupScoring(r.useGroupScoring === true)
         } catch (err) { props.onError(String(err.message || err)) }
       }, [props])
       useEffect(() => { refreshSettings() }, [refreshSettings])
@@ -2929,15 +2941,31 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
         const cap = Number.parseInt(budgetCap, 10)
         if (!Number.isFinite(percent) || percent < 0 || percent > 100) { props.onError('世界书预算比例必须是 0-100'); return }
         if (Number.isNaN(cap) || cap < 0 || cap > 2000000) { props.onError('世界书绝对预算必须是 0-2000000 的整数'); return }
+        const min = Number.parseInt(minActivations, 10)
+        const minMax = Number.parseInt(minActivationsDepthMax, 10)
+        const recursionMax = Number.parseInt(maxRecursionSteps, 10)
+        if ([min, minMax, recursionMax].some((value) => Number.isNaN(value) || value < 0 || value > 1000)) {
+          props.onError('min activations / recursion steps 必须是 0-1000 的整数'); return
+        }
         setSavingSettings(true)
         try {
-          const r = await apiPut('/api/worldbook-settings', { scanDepth: n, mode: matchMode, budgetPercent: percent, budgetCap: cap })
+          const r = await apiPut('/api/worldbook-settings', {
+            scanDepth: n, mode: matchMode, budgetPercent: percent, budgetCap: cap,
+            minActivations: min, minActivationsDepthMax: minMax, maxRecursionSteps: recursionMax,
+            recursive, includeNames, useGroupScoring,
+          })
           setScanDepth(String(r.scanDepth))
           setMatchMode(r.mode || matchMode)
           setBudgetPercent(String(r.budgetPercent ?? percent))
           setBudgetCap(String(r.budgetCap ?? cap))
+          setMinActivations(String(r.minActivations ?? min))
+          setMinActivationsDepthMax(String(r.minActivationsDepthMax ?? minMax))
+          setMaxRecursionSteps(String(r.maxRecursionSteps ?? recursionMax))
+          setRecursive(r.recursive === true)
+          setIncludeNames(r.includeNames !== false)
+          setUseGroupScoring(r.useGroupScoring === true)
         } catch (err) { props.onError(String(err.message || err)) } finally { setSavingSettings(false) }
-      }, [scanDepth, matchMode, budgetPercent, budgetCap, props])
+      }, [scanDepth, matchMode, budgetPercent, budgetCap, minActivations, minActivationsDepthMax, maxRecursionSteps, recursive, includeNames, useGroupScoring, props])
 
       const refresh = useCallback(async () => {
         try {
@@ -3097,7 +3125,39 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
             }),
             h('button', { onClick: saveSettings, disabled: savingSettings }, savingSettings ? '保存中…' : '保存'),
           ),
-          h('div', { className: 'hint' }, '普通绿灯按所选模式处理;蓝灯 constant、EJS、@INJECT、[GENERATE]/[RENDER] 等扩展特殊条目始终由兼容层处理。预算按 ST 的 order 优先选择，ignoreBudget 条目不计入上限；enhanced 模式不会新增一次 LLM 调用。'),
+          h('div', { className: 'row' },
+            h('input', {
+              type: 'number', min: 0, max: 1000, step: 1, value: minActivations,
+              onChange: (e) => setMinActivations(e.target.value), style: { width: '90px' },
+              title: '对应 ST world_info_min_activations；未达到数量时逐步扩大初始聊天扫描深度',
+              placeholder: '最少激活数',
+            }),
+            h('input', {
+              type: 'number', min: 0, max: 1000, step: 1, value: minActivationsDepthMax,
+              onChange: (e) => setMinActivationsDepthMax(e.target.value), style: { width: '100px' },
+              title: '对应 ST world_info_min_activations_depth_max；0 表示扩展到可用历史',
+              placeholder: '扩展深度上限',
+            }),
+            h('input', {
+              type: 'number', min: 0, max: 1000, step: 1, value: maxRecursionSteps,
+              onChange: (e) => setMaxRecursionSteps(e.target.value), style: { width: '100px' },
+              title: '对应 ST world_info_max_recursion_steps；0 表示不限',
+              placeholder: '递归步数上限',
+            }),
+            h('label', { className: 'compact-check' },
+              h('input', { type: 'checkbox', checked: recursive, onChange: (e) => setRecursive(e.target.checked) }),
+              '全局递归',
+            ),
+            h('label', { className: 'compact-check' },
+              h('input', { type: 'checkbox', checked: includeNames, onChange: (e) => setIncludeNames(e.target.checked) }),
+              '扫描书名',
+            ),
+            h('label', { className: 'compact-check' },
+              h('input', { type: 'checkbox', checked: useGroupScoring, onChange: (e) => setUseGroupScoring(e.target.checked) }),
+              '包含组打分',
+            ),
+          ),
+          h('div', { className: 'hint' }, '普通绿灯按所选模式处理；min activations、递归、书名扫描和包含组打分遵循 ST World Info 全局设置。蓝灯 constant、EJS、@INJECT、[GENERATE]/[RENDER] 等扩展特殊条目始终由兼容层处理；enhanced 模式不会新增一次 LLM 调用。'),
         ),
         // 角色内嵌世界书(选中角色后才显示)
         characterBookGroup,

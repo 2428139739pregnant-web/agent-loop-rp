@@ -44,7 +44,7 @@
 | `characterFilterNames/Tags/Exclude` | — | 条目按角色卡过滤（模板外字段） |
 | `triggers` | array `[]` | 生成类型触发器 |
 
-**世界书级全局设置**（`world-info.js:69-86`）：`world_info_depth=2`（扫描最近 2 条消息，默认）、`world_info_budget=25`（占上下文 25%）、`world_info_budget_cap=0`（绝对上限，0=不限）、`world_info_case_sensitive=false`、`world_info_match_whole_words=false`、`world_info_recursive=false`、`world_info_max_recursion_steps=0`、`world_info_min_activations=0`。本项目当前把 `scan_depth`/`recursive_scanning` 以及条目递归控制映射进 `ImportedLorebook`；确定性 inspector 执行递归扫描，独立世界书 JSON 还兼容顶层 `recursive` 别名。`sticky/cooldown/delay` 由宿主按会话消息计数维护，不依赖 LLM。response 另有总上下文 `maxContextTokens`，在完整消息树和插件注入完成后执行历史裁剪。
+**世界书级全局设置**（`world-info.js:69-86`）：`world_info_depth=2`（扫描最近 2 条消息，默认）、`world_info_budget=25`（占上下文 25%）、`world_info_budget_cap=0`（绝对上限，0=不限）、`world_info_case_sensitive=false`、`world_info_match_whole_words=false`、`world_info_recursive=false`、`world_info_max_recursion_steps=0`、`world_info_min_activations=0`、`world_info_min_activations_depth_max=0`、`world_info_include_names=true`、`world_info_use_group_scoring=false`。本项目通过 `/api/worldbook-settings` 和世界书面板持久化这些全局控制；`min_activations` 只扩大初始扫描深度，递归/步数/包含组打分均在确定性 matcher 执行，不增加 LLM 调用。条目级 `scan_depth`/`recursive_scanning` 以及递归控制仍映射进 `ImportedLorebook`；独立世界书 JSON 还兼容顶层 `recursive` 别名。`sticky/cooldown/delay` 由宿主按会话消息计数维护，不依赖 LLM。response 另有总上下文 `maxContextTokens`，在完整消息树和插件注入完成后执行历史裁剪。
 
 ## 2. 蓝灯 vs 绿灯：激活语义（`checkWorldInfo`，`world-info.js:4597` 起）
 

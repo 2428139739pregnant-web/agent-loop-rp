@@ -4,6 +4,7 @@
 
 ### 修复
 
+- 世界书全局扫描设置补齐 ST 的 `min_activations`/深度上限、`recursive`、`max_recursion_steps`、`include_names` 和 `use_group_scoring`；全部由确定性 matcher 执行，不增加 LLM 调用，并在 UI/API 中可持久化配置。
 - 旧角色存档首次启动时会自动迁移到新的卡片世界书结构，并将迁移后的 `preprocessed.json` 持久化，避免每次启动重复迁移。
 - Tavern Helper 世界书的 `before_author_note/after_author_note` 现在映射到 ST 的 5/6 位置；独立世界书蓝灯按 0–7 位置进入示例区、atDepth、Author's Note 和 outlet，旧自定义模板保留三文档回退。
 - 角色卡内嵌蓝灯不再预先揉进三文档：新格式会与外部书进入同一 Store，统一参与来源预算和 ST 位置组装；同时补齐 Tavern Helper 的递归控制字段映射。
