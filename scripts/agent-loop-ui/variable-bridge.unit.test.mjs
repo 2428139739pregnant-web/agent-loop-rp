@@ -153,4 +153,8 @@ test('Tavern Helper injectPrompts and uninjectPrompts use the canonical mutation
   assert.deepEqual(plain(uninject?.payload.ids), ['prompt-a', 'prompt-b'])
   assert.equal(typeof frame.window.TavernHelper.injectPrompts, 'function')
   assert.equal(typeof frame.window.TavernHelper.uninjectPrompts, 'function')
+  assert.equal(frame.window.TavernHelper.getChatMessages, frame.window.getChatMessages)
+  assert.equal(frame.window.TavernHelper.getWorldbook, frame.window.getWorldbook)
+  assert.equal(typeof frame.window.TavernHelper.replaceWorldbook, 'function')
+  assert.equal(typeof frame.window.TavernHelper.rebindCharWorldbooks, 'function')
 })
