@@ -7,6 +7,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-session'
 import type { EjsTemplateResult, EjsTemplateTarget } from '../../ejs-template.ts'
 import type { LLMProvider } from '../provider.ts'
 import type { SessionStore, WorldbookStore } from '../session.ts'
+import type { TimedEffectState } from '../worldbook-timed-effects.ts'
 
 /** Reads a prompt template by name. The `name` is the file stem in the prompts directory. */
 export interface PromptLoader {
@@ -104,6 +105,8 @@ export interface AgentContext {
    * {@link DEFAULT_WORLDBOOK_SETTINGS}(scanDepth=2,useLlmMatcher=true)。
    */
   readonly worldbookSettings?: WorldbookSettings
+  /** Session-owned ST World Info sticky/cooldown/delay state. */
+  readonly worldbookTimedEffects?: TimedEffectState
   /** Optional ⑤ postprocess settings supplied by the host. */
   readonly postprocessSettings?: PostprocessRuntimeSettings
   /**

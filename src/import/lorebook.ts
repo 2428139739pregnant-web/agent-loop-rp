@@ -25,6 +25,8 @@ export type LorebookActivationReason =
   | 'regex-resource-limit'
   | 'primary-unmatched'
   | 'secondary-unmatched'
+  | 'recursion-excluded'
+  | 'recursion-delayed'
   | 'budget-excluded'
   | 'session-budget-excluded'
 
@@ -48,6 +50,12 @@ export interface InspectedLorebook extends ActiveLorebook {
 
 /** Optional isolated renderer used to admit executable EJS content. */
 export interface LorebookActivationOptions {
+  /** Global ST-style scan depth override. Defaults to two messages. */
+  readonly scanDepth?: number
+  /** Expand the initial message scan until this many entries activate. */
+  readonly minActivations?: number
+  /** Maximum message depth used by minActivations. Defaults to message count. */
+  readonly maxScanDepth?: number
   readonly renderTemplate?: (template: string, target?: EjsTemplateTarget) => EjsTemplateResult
   readonly worldInfoBookId?: string
   /** Isolated regular-expression runtime created once for each inspection pass. */
@@ -99,6 +107,28 @@ interface CandidateDecision {
   readonly matchedSecondaryKeys: readonly string[]
   readonly content: string
   readonly template?: LorebookEntryActivation['template']
+}
+
+interface ScanContext {
+  /** Whether this candidate is being evaluated against the recursive buffer. */
+  readonly recursive: boolean
+  /** One-based recursive pass, used by `delayUntilRecursion`. */
+  readonly recursionLevel: number
+}
+
+const INITIAL_SCAN_CONTEXT: ScanContext = { recursive: false, recursionLevel: 0 }
+const MAX_SAFE_SCAN_DEPTH = 1000
+
+function normalizedScanDepth(value: number | undefined, fallback: number): number {
+  const candidate = value ?? fallback
+  if (!Number.isFinite(candidate)) return Math.min(MAX_SAFE_SCAN_DEPTH, Math.max(0, Math.trunc(fallback)))
+  return Math.min(MAX_SAFE_SCAN_DEPTH, Math.max(0, Math.trunc(candidate)))
+}
+
+function recursionDelayLevel(entry: ImportedLorebookEntry): number {
+  if (entry.delayUntilRecursion === true) return 1
+  if (typeof entry.delayUntilRecursion !== 'number' || !Number.isFinite(entry.delayUntilRecursion)) return 0
+  return Math.min(MAX_SAFE_SCAN_DEPTH, Math.max(0, Math.trunc(entry.delayUntilRecursion)))
 }
 
 function includesKey(text: string, key: string, caseSensitive: boolean, matchWholeWords: boolean): boolean {
@@ -176,6 +206,8 @@ function candidate(
   bookDepth: number | undefined,
   options: LorebookActivationOptions,
   regexMatcher?: LorebookRegexMatcher,
+  additionalScanText = '',
+  scanContext: ScanContext = INITIAL_SCAN_CONTEXT,
 ): CandidateDecision {
   const decision = (
     candidate: boolean,
@@ -189,12 +221,26 @@ function candidate(
   if (entry.content.trim().length === 0) return decision(false, 'empty-content')
   if (entry.hasDecorators) return decision(false, 'decorator-unsupported')
 
+  // Match ST's deterministic recursion gates before constant/key activation:
+  // a delayed constant must not leak into the initial scan.
+  const delayLevel = recursionDelayLevel(entry)
+  if (!scanContext.recursive && delayLevel > 0) return decision(false, 'recursion-delayed')
+  if (scanContext.recursive && entry.excludeRecursion === true) {
+    return decision(false, 'recursion-excluded')
+  }
+  if (scanContext.recursive && delayLevel > scanContext.recursionLevel) {
+    return decision(false, 'recursion-delayed')
+  }
+
   let activation: CandidateDecision
   if (entry.constant) {
     activation = decision(true, 'active-constant')
   } else {
-    const depth = entry.scanDepth ?? bookDepth ?? messages.length
-    const text = depth === 0 ? '' : messages.slice(-Math.max(0, Math.trunc(depth))).join('\n')
+    const depth = normalizedScanDepth(entry.scanDepth, bookDepth ?? options.scanDepth ?? 2)
+    const text = [
+      ...(depth === 0 ? [] : messages.slice(-Math.max(0, Math.trunc(depth)))),
+      ...(additionalScanText.length === 0 ? [] : [additionalScanText]),
+    ].join('\n')
     if (entry.useRegex) {
       const primary = regexMatches(entry.keys, text, entry, regexMatcher)
       if (!primary.ok) {
@@ -340,16 +386,98 @@ function inspectLorebookWithMatcher(
   options: LorebookActivationOptions,
   matcher: LorebookRegexMatcher | undefined,
 ): InspectedLorebook {
-  const decisions = book.entries.map((entry, index) => ({
+  const baseDepth = normalizedScanDepth(options.scanDepth, book.scanDepth ?? 2)
+  const configuredMaxDepth = options.maxScanDepth ?? messages.length
+  const maxDepth = Math.min(
+    messages.length,
+    normalizedScanDepth(configuredMaxDepth, messages.length),
+  )
+  const minActivations = normalizedScanDepth(options.minActivations, 0)
+  const decisions = new Map<number, CandidateDecision>()
+  const activated = new Set<number>()
+
+  const scan = (
+    depth: number,
+    additionalScanText = '',
+    scanContext: ScanContext = INITIAL_SCAN_CONTEXT,
+  ): number[] => {
+    const newlyActivated: number[] = []
+    book.entries.forEach((entry, index) => {
+      if (activated.has(index)) return
+      const value = candidate(entry, messages, depth, options, matcher, additionalScanText, scanContext)
+      decisions.set(index, value)
+      if (value.candidate) {
+        activated.add(index)
+        newlyActivated.push(index)
+      }
+    })
+    return newlyActivated
+  }
+
+  // ST advances through the distinct configured delay levels (rather than
+  // blindly counting empty recursion passes). This preserves the behavior
+  // where an entry at level 2 can run on the first recursion state when no
+  // level-1 entry exists.
+  const delayedRecursionLevels = [...new Set(book.entries
+    .map(recursionDelayLevel)
+    .filter(level => level > 0))].sort((left, right) => left - right)
+  let depth = Math.min(maxDepth, baseDepth)
+  let recurseText = ''
+
+  const addRecursionText = (indices: readonly number[]): boolean => {
+    const content = indices
+      .filter(index => book.entries[index]?.preventRecursion !== true)
+      .map(index => decisions.get(index)?.content ?? book.entries[index]!.content)
+      .filter(value => value.length > 0)
+    if (content.length === 0) return false
+    // ST's recursion buffer is cumulative. Keeping all prior successful
+    // content is important when a later entry supplies only part of a
+    // selective match (for example, primary key now + secondary key earlier).
+    recurseText = [recurseText, ...content].filter(value => value.length > 0).join('\n')
+    return true
+  }
+
+  const runRecursion = (): void => {
+    if (!book.recursiveScanning) return
+    // A delayed entry may be eligible even when no ordinary entry supplied
+    // recursive text, so keep the delayed-level path open in that case.
+    if (recurseText.length === 0 && delayedRecursionLevels.length === 0) return
+    const recursionLevels = delayedRecursionLevels.length > 0 ? delayedRecursionLevels : [0]
+    for (const recursionLevel of recursionLevels) {
+      while (true) {
+        const newlyActivated = scan(
+          depth,
+          recurseText,
+          { recursive: true, recursionLevel },
+        )
+        const addedText = addRecursionText(newlyActivated)
+        if (!addedText) break
+        // ST repeats the recursive state while a pass adds new content. The
+        // accumulated buffer is retained for every subsequent pass.
+      }
+    }
+  }
+
+  // ST runs recursion before widening a min-activations scan. An entry-level
+  // scan_depth remains an override at every widening step.
+  while (true) {
+    const newlyActivated = scan(depth)
+    addRecursionText(newlyActivated)
+    runRecursion()
+    if (activated.size >= minActivations || depth >= maxDepth) break
+    depth += 1
+  }
+
+  const allDecisions = book.entries.map((entry, index) => ({
     index,
     entry,
-    decision: candidate(entry, messages, book.scanDepth, options, matcher),
+    decision: decisions.get(index) ?? candidate(entry, messages, depth, options, matcher),
   }))
-  const candidates = decisions.filter(value => value.decision.candidate)
+  const candidates = allDecisions.filter(value => value.decision.candidate)
   const included = new Set(budgeted(book, candidates.map(({ index, entry, decision }) => ({
     index, entry, content: decision.content,
   }))))
-  const entries = decisions.map(({ index, decision }): LorebookEntryActivation => ({
+  const entries = allDecisions.map(({ index, decision }): LorebookEntryActivation => ({
     index,
     active: decision.candidate && included.has(index),
     reason: decision.candidate && !included.has(index) ? 'budget-excluded' : decision.reason,

@@ -8,5 +8,6 @@ sessions/
 summary/
 worldbooks/
 worldbook_index/
+/extensions/
 *.log
 .test-dist/

@@ -38,6 +38,7 @@ function candidate(overrides: Partial<WorldbookPluginCandidate> = {}): Worldbook
     content: '提示 {{user}}',
     order: 1,
     weight: 1,
+    active: true,
     ...overrides,
   }
 }
@@ -106,4 +107,13 @@ test('render directives stay out of the prompt and only affect display text', ()
     { path: 'before', content: '前置状态', order: 1, placement: 'before' },
   ])
   assert.equal(reply, '前置状态\n\n正文\n\n尾部状态')
+})
+
+test('inactive plugin entries do not inject until ST activation marks them active', () => {
+  const output = buildWorldbookPluginOutput([
+    candidate({ active: false, comment: '[GENERATE:AFTER]' }),
+    candidate({ path: 'blue', constant: true }),
+  ], makeContext())
+  assert.deepEqual(output.promptInjections.map(item => item.path), ['blue'])
+  assert.ok(output.skipped.some(item => item.path === 'book/special.md'))
 })

@@ -27,6 +27,29 @@ export interface MvuMacroContext {
   readonly char?: string | null
 }
 
+/**
+ * Normalize a value received from a browser/card runtime to the JSON value
+ * used by the session layer.  Tavern Helper treats variable namespaces as
+ * JSON objects; keeping this conversion here makes the HTTP adapter and the
+ * history-based MVU reader share the same validation boundary.
+ */
+export function normalizeMvuJsonValue(value: unknown): JsonValue | undefined {
+  return snapshotJsonValue(value) as JsonValue | undefined
+}
+
+/**
+ * Extract the MVU `stat_data` value from either the canonical Tavern Helper
+ * chat namespace (`{ stat_data: ... }`) or the legacy iframe payload where
+ * the object itself is the MVU state.
+ */
+export function extractMvuStatData(value: unknown): JsonValue | undefined {
+  const snapshot = normalizeMvuJsonValue(value)
+  if (snapshot === undefined) return undefined
+  const record = jsonRecord(snapshot)
+  if (record !== undefined && 'stat_data' in record) return record.stat_data
+  return snapshot
+}
+
 function substituteMvuTextMacros(text: string, macros: MvuMacroContext | undefined): string {
   if (macros === undefined) return text
   let out = text
@@ -61,13 +84,50 @@ function unwrapInitializer(content: string): string {
   return source.trim().match(/^```[^\r\n]*\r?\n([\s\S]*?)\r?\n```$/u)?.[1] ?? source
 }
 
+/**
+ * Detect the prompt-template initializer markers without treating ordinary
+ * content containing the same text as an initializer.
+ *
+ * `[InitialVariables]` is a World Info title/memo marker.  The
+ * `@@initial_variables` form is a prompt-template decorator and, like the
+ * other decorators, is only valid in the leading decorator block of the
+ * entry content.
+ */
+function hasInitialVariablesMarker(entry: NonNullable<ImportedCharacterCard['lorebook']>['entries'][number]): boolean {
+  const title = `${entry.comment ?? ''}\n${entry.name ?? ''}`
+  if (/\[InitialVariables\]/iu.test(title)) return true
+
+  const lines = entry.content.split(/\r?\n/u)
+  let index = 0
+  let found = false
+  while (index < lines.length) {
+    const line = lines[index]?.trim() ?? ''
+    if (line === '') break
+    if (!line.startsWith('@@')) break
+    if (/^@@initial_variables$/iu.test(line)) found = true
+    index += 1
+  }
+  return found
+}
+
+/** Remove the leading prompt-template decorator block before parsing data. */
+function stripInitialVariablesDecorators(content: string): string {
+  const lines = content.split(/\r?\n/u)
+  let index = 0
+  while (index < lines.length && (lines[index]?.trim() ?? '').startsWith('@@')) index += 1
+  return lines.slice(index).join('\n').trim()
+}
+
 function initializerContents(card: ImportedCharacterCard): string[] {
   return [...(card.lorebook?.entries ?? [])]
     .sort((left, right) => left.insertionOrder - right.insertionOrder)
     .flatMap(entry => {
       const tagged = /<initvar>[\s\S]*?<\/initvar>/iu.test(entry.content)
       const named = /\[initvar\]/iu.test(`${entry.comment ?? ''}\n${entry.name ?? ''}`)
-      return tagged || named ? [unwrapInitializer(entry.content)] : []
+      const promptTemplate = hasInitialVariablesMarker(entry)
+      if (!tagged && !named && !promptTemplate) return []
+      const withoutDecorators = promptTemplate ? stripInitialVariablesDecorators(entry.content) : entry.content
+      return [unwrapInitializer(withoutDecorators)]
     })
 }
 
@@ -86,7 +146,21 @@ export function readInitialMvuState(card: ImportedCharacterCard, macros?: MvuMac
   if (contents.length === 0) return undefined
   const merged: Record<string, JsonValue> = {}
   for (const content of contents) {
-    const parsed: unknown = parseYaml(content, { maxAliasCount: 100 })
+    let parsed: unknown
+    try {
+      // ST-Prompt-Template deliberately gives JSON the first opportunity so
+      // JSON-only syntax (for example escaped strings) is never reinterpreted
+      // by YAML.  YAML is only the compatibility fallback.
+      parsed = JSON.parse(content)
+    } catch (jsonError: unknown) {
+      try {
+        parsed = parseYaml(content, { maxAliasCount: 100 })
+      } catch (yamlError: unknown) {
+        const jsonMessage = jsonError instanceof Error ? jsonError.message : String(jsonError)
+        const yamlMessage = yamlError instanceof Error ? yamlError.message : String(yamlError)
+        throw new Error(`Character Card MVU initializer must be valid JSON or YAML (JSON: ${jsonMessage}; YAML: ${yamlMessage})`)
+      }
+    }
     const snapshot = snapshotJsonValue(parsed) as JsonValue | undefined
     const record = snapshot === undefined ? undefined : jsonRecord(snapshot)
     if (record === undefined) {
@@ -179,6 +253,27 @@ export function readMvuStateFromMessages(
     updateCount,
     ...(lastError === undefined ? {} : { lastError }),
   }
+}
+
+/**
+ * Read MVU state with an explicitly persisted session snapshot taking
+ * precedence over machine tags in the transcript.  A snapshot is written by
+ * Tavern Helper's `replaceVariables`; replaying the same assistant tag on top
+ * of it would apply the update twice after a restart.
+ */
+export function readMvuStateWithSessionOverride(
+  card: ImportedCharacterCard,
+  messages: readonly { readonly role: 'system' | 'user' | 'assistant' | 'tool'; readonly content: string }[],
+  sessionStatData: JsonValue | undefined,
+  macros?: MvuMacroContext,
+): { readonly statData: JsonValue; readonly updateCount: number; readonly lastError?: string } | undefined {
+  if (sessionStatData !== undefined) {
+    return {
+      statData: substituteMvuValueMacros(sessionStatData, macros),
+      updateCount: 0,
+    }
+  }
+  return readMvuStateFromMessages(card, messages, macros)
 }
 
 function pointerSegments(pointer: string): string[] {

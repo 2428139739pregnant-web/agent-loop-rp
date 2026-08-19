@@ -1,6 +1,6 @@
 /** Public surface of the agent-loop module. Re-exports types and implementations. */
 
-export type { LLMProvider, ChatMessage, ChatOptions, LLMResult } from './provider.ts'
+export type { LLMProvider, ChatMessage, ChatOptions, LLMResult, SwipeInfo } from './provider.ts'
 
 export { DeepSeekProvider } from './providers/deepseek.ts'
 export { MockProvider } from './providers/mock.ts'
@@ -74,6 +74,7 @@ export {
   worldbookMatchAgent,
   buildWorldbookMatchInput,
   deterministicWorldbookMatch,
+  recursiveWorldbookMatch,
   rollProbability,
   formatCandidates,
   formatRecentMessages,
@@ -88,12 +89,26 @@ export {
   type WorldbookKeyIndexEntry,
   type WorldbookKeyIndexMacros,
 } from './worldbook-key-index.ts'
+export {
+  canEvaluateTimedEffect,
+  filterTimedEffectCandidates,
+  isTimedEffectCoolingDown,
+  isTimedEffectStickyActive,
+  normalizeTimedEffectState,
+  pruneTimedEffectState,
+  recordTimedEffectActivations,
+  type TimedEffectCandidate,
+  type TimedEffectRecord,
+  type TimedEffectState,
+} from './worldbook-timed-effects.ts'
 export { contextProcessAgent, type ContextReader, type ConversationSegment, type SummarySegment } from './agents/context-process.ts'
 export {
   responseAgent,
   renderTemplate,
   buildContextBlock,
   buildWorldbookBlock,
+  splitWorldbookMatches,
+  type WorldbookMatchPlacementBuckets,
   buildConstantWorldbookBlocks,
   listConstantWorldbookEntries,
   constantWorldbookDoc,

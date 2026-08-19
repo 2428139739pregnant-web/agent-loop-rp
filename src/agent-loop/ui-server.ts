@@ -17,6 +17,7 @@ import { dirname, join, resolve } from 'node:path'
 import { mkdir, readFile, writeFile, unlink, readdir, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import { snapshotJsonValue, type JsonValue } from '@deepseek-ai/dsh-session'
 
 import {
   FilePromptLoader,
@@ -47,6 +48,7 @@ import {
   triggerSummarize,
   worldbookMatchAgent,
   type ChatMessage,
+  type SwipeInfo,
   type ChatOptions,
   type ContextReader,
   type LLMProvider,
@@ -62,16 +64,47 @@ import {
 } from './index.ts'
 
 import type { ImportedLorebook, ImportedLorebookEntry } from '../import/types.ts'
-import { EjsTemplateEngine, type EjsTemplateResult, type EjsTemplateTarget } from '../ejs-template.ts'
-import { readMvuStateFromMessages, type MvuMacroContext } from '../mvu.ts'
+import {
+  createEjsWorldInfoBooks,
+  EjsTemplateEngine,
+  type EjsTemplateResult,
+  type EjsTemplateTarget,
+} from '../ejs-template.ts'
+import {
+  extractMvuStatData,
+  normalizeMvuJsonValue,
+  readInitialMvuState,
+  readMvuStateFromMessages,
+  readMvuStateWithSessionOverride,
+  type MvuMacroContext,
+} from '../mvu.ts'
 import { PersonaStore, substituteUserCharMacros } from './persona-store.ts'
 import { RegexScriptStore, applyRegexScripts, type RegexPlacement } from './regex-scripts.ts'
+import {
+  applyTavernHelperMutation,
+  decodeTavernHelperState,
+  encodeTavernHelperState,
+  initializeTavernHelperState,
+  parseTavernHelperMutationRequest,
+  type TavernHelperVariableMutationRequest,
+  type TavernHelperMutationRequest,
+  type TavernHelperState,
+  type TavernWorldbookEntry,
+} from '../tavern-helper.ts'
 import { buildWorldbookKeyIndex, renderWorldbookKeyOnlyMd } from './worldbook-key-index.ts'
+import {
+  normalizeTimedEffectState,
+  pruneTimedEffectState,
+  recordTimedEffectActivations,
+  type TimedEffectState,
+} from './worldbook-timed-effects.ts'
 import {
   DEFAULT_RESPONSE_SETTINGS,
   normalizeResponseSettings,
   type ResponseGenerationSettings,
 } from './response-settings.ts'
+import { ExtensionRegistry } from '../extensions/registry.ts'
+import type { ExtensionId } from '../extensions/types.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OpenAI-compatible provider + runtime API config
@@ -320,6 +353,8 @@ function buildAgentContext(deps: {
   macros?: { user: string | null; char: string | null }
   /** 世界书全局设置(扫描深度等);缺省 ST 默认 scanDepth=2。 */
   worldbookSettings?: WorldbookSettings
+  /** Session-local sticky/cooldown/delay snapshot. */
+  worldbookTimedEffects?: TimedEffectState
   /** ⑤ postprocess preset 当前值。 */
   postprocessSettings?: PostprocessRuntimeSettings
   /** 进度回调:多步骤 agent 在每个子步骤时调用。 */
@@ -340,6 +375,7 @@ function buildAgentContext(deps: {
     // exactOptionalPropertyTypes: 可选字段用条件展开,不显式赋 undefined。
     ...(deps.macros !== undefined ? { macros: deps.macros } : {}),
     ...(deps.worldbookSettings !== undefined ? { worldbookSettings: deps.worldbookSettings } : {}),
+    ...(deps.worldbookTimedEffects === undefined ? {} : { worldbookTimedEffects: deps.worldbookTimedEffects }),
     ...(deps.postprocessSettings !== undefined ? { postprocessSettings: deps.postprocessSettings } : {}),
     ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
     ...(deps.renderTemplate !== undefined ? { renderTemplate: deps.renderTemplate } : {}),
@@ -391,16 +427,49 @@ function displayHistory(
   state: AppState,
   sessionId: string,
   history: readonly ChatMessage[],
-): Array<{ role: ChatMessage['role']; content: string }> {
+): Array<ChatMessage> {
   const record = state.sessionRecords.get(sessionId)
-  if (record === undefined) return history.map(message => ({ role: message.role, content: message.content }))
+  if (record === undefined) return history.map(message => ({ ...message }))
   const directives = displayRenderDirectives(state, sessionId, record.character)
   return history.map(message => ({
+    ...message,
     role: message.role,
     content: message.role === 'assistant'
       ? applyWorldbookRenderDirectives(message.content, directives)
       : message.content,
   }))
+}
+
+function swipeInfoNow(): SwipeInfo {
+  const now = Date.now()
+  return { send_date: now, gen_started: now, gen_finished: now, extra: {} }
+}
+
+/** Keep one canonical assistant message while preserving every ST swipe. */
+function makeAssistantMessage(content: string, previous?: ChatMessage): ChatMessage {
+  const oldSwipes = previous?.role === 'assistant' && Array.isArray(previous.swipes) && previous.swipes.length > 0
+    ? [...previous.swipes]
+    : previous?.role === 'assistant' ? [previous.content] : []
+  const oldInfo = previous?.role === 'assistant' && Array.isArray(previous.swipe_info)
+    ? previous.swipe_info.map(info => ({ ...info, extra: info.extra === undefined ? {} : { ...info.extra } }))
+    : oldSwipes.map(() => swipeInfoNow())
+  const swipeId = oldSwipes.length
+  const swipes = [...oldSwipes, content]
+  const swipeInfo = [...oldInfo, swipeInfoNow()]
+  return { role: 'assistant', content, swipe_id: swipeId, swipes, swipe_info: swipeInfo }
+}
+
+function syncAssistantSwipe(message: ChatMessage, content: string): ChatMessage {
+  if (message.role !== 'assistant') return { ...message, content }
+  const swipes = Array.isArray(message.swipes) && message.swipes.length > 0
+    ? [...message.swipes]
+    : [message.content]
+  const swipeId = Number.isInteger(message.swipe_id) && (message.swipe_id as number) >= 0
+    && (message.swipe_id as number) < swipes.length ? message.swipe_id as number : 0
+  swipes[swipeId] = content
+  const swipeInfo = Array.isArray(message.swipe_info) ? [...message.swipe_info] : swipes.map(() => swipeInfoNow())
+  while (swipeInfo.length < swipes.length) swipeInfo.push(swipeInfoNow())
+  return { ...message, content, swipe_id: swipeId, swipes, swipe_info: swipeInfo }
 }
 
 /** Bind one bounded EJS context to the active character/session. */
@@ -413,11 +482,99 @@ function buildCharacterTemplateRenderer(
 ): ReturnType<EjsTemplateEngine['createRenderer']> | undefined {
   if (state.ejsEngine === undefined) return undefined
   const history = session.getHistory(sessionId)
-  const mvu = readMvuStateFromMessages(character.raw, history, {
+  const record = state.sessionRecords.get(sessionId)
+  const mvu = record === undefined
+    ? readMvuStateFromMessages(character.raw, history, {
+      user: userName,
+      char: character.name,
+    })
+    : readSessionMvuState(record, history, {
+      user: userName,
+      char: character.name,
+    })
+  const helperVariables = character.raw.frontend?.tavernHelperVariables ?? {}
+  const helperState = record?.tavernHelperState
+  const chatVariables = helperState?.scopes.chat ?? {}
+  const characterVariables = helperState?.scopes.character ?? helperVariables
+  const mergedVariables = {
+    ...helperVariables,
+    ...characterVariables,
+    ...chatVariables,
+  }
+  const initialState = readInitialMvuState(character.raw, {
     user: userName,
     char: character.name,
   })
-  const helperVariables = character.raw.frontend?.tavernHelperVariables ?? {}
+  const initialVariables = initialState !== undefined
+    && typeof initialState === 'object'
+    && initialState !== null
+    && !Array.isArray(initialState)
+    ? initialState as Readonly<Record<string, JsonValue>>
+    : {}
+  // ST-Prompt-Template's getwi()/getWorldInfo() reads the currently visible
+  // World Info collection. Keep this as a read-only projection of the same
+  // card/imported/helper sources that getMergedWorldbook() feeds to agents;
+  // otherwise EJS can render successfully while every worldbook lookup is
+  // silently empty.
+  const worldInfoSources: Array<{
+    readonly id: string
+    readonly name?: string
+    readonly lorebook: {
+      readonly entries: readonly {
+        readonly sourceId: string
+        readonly name?: string
+        readonly comment?: string
+        readonly content: string
+      }[]
+    }
+  }> = []
+  const activeCharacterId = record?.characterId ?? safeFileName(character.name)
+  const disabledImportedBooks = state.characterWorldbookConfigs.get(activeCharacterId)?.disabledBookIds ?? null
+  const cardBook = character.raw.lorebook
+  if (cardBook !== undefined) {
+    worldInfoSources.push({
+      id: `character:${safeFileName(character.name)}`,
+      name: cardBook.name ?? character.name,
+      lorebook: cardBook,
+    })
+  }
+  const fixtureEntries = state.fixtureWorldbook.list()
+  if (fixtureEntries.length > 0) {
+    worldInfoSources.push({
+      id: 'fixture',
+      name: 'fixture',
+      lorebook: {
+        entries: fixtureEntries.map(entry => ({
+          sourceId: entry.path,
+          ...(entry.comment === undefined ? {} : { name: entry.comment }),
+          content: entry.content,
+        })),
+      },
+    })
+  }
+  for (const [bookId, book] of state.importedWorldbooks) {
+    // Keep the EJS view identical to getMergedWorldbook(): a disabled external
+    // book must not become visible through getwi() just because it exists in
+    // the global catalogue.
+    if (disabledImportedBooks !== null && disabledImportedBooks.has(bookId)) continue
+    worldInfoSources.push({ id: `worldbook:${bookId}`, name: book.name ?? bookId, lorebook: book })
+  }
+  const activeHelperBooks = new Set(helperState === undefined ? [] : tavernHelperActiveWorldbookNames(helperState))
+  const deletedHelperBooks = new Set(helperState?.deletedWorldbookNames ?? [])
+  for (const [bookName, entries] of Object.entries(helperState?.worldbooks ?? {})) {
+    if (deletedHelperBooks.has(bookName) || !activeHelperBooks.has(bookName)) continue
+    worldInfoSources.push({
+      id: `tavern-helper:${bookName}`,
+      name: bookName,
+      lorebook: {
+        entries: entries.map(entry => ({
+          sourceId: String(entry.uid),
+          name: entry.name,
+          content: entry.content,
+        })),
+      },
+    })
+  }
   return state.ejsEngine.createRenderer({
     characterName: character.name,
     userName,
@@ -426,13 +583,49 @@ function buildCharacterTemplateRenderer(
       .filter((message): message is ChatMessage & { role: 'system' | 'user' | 'assistant' } =>
         message.role === 'system' || message.role === 'user' || message.role === 'assistant')
       .map(message => ({ role: message.role, content: message.content })),
-    variables: helperVariables,
+    variables: mergedVariables,
     variableScopes: {
-      character: helperVariables,
-      ...(mvu === undefined ? {} : { chat: { stat_data: mvu.statData } }),
+      global: helperState?.scopes.global ?? {},
+      preset: helperState?.scopes.preset ?? {},
+      character: characterVariables,
+      initial: initialVariables,
+      chat: chatVariables,
+      message: helperState?.scopes.message ?? {},
     },
+    worldInfoBooks: createEjsWorldInfoBooks(worldInfoSources),
     ...(mvu === undefined ? {} : { statData: mvu.statData }),
   })
+}
+
+/** Return the active helper state, lazily upgrading sessions created before
+ * session-variable persistence was introduced. */
+function ensureSessionTavernHelperState(record: SessionRecord): TavernHelperState {
+  return record.tavernHelperState
+    ?? initializeTavernHelperState(record.character.raw.frontend, record.characterId)
+}
+
+/** Read direct session variables first; only sessions without a snapshot
+ * replay MVU tags from the transcript. */
+function readSessionMvuState(
+  record: SessionRecord,
+  history: readonly ChatMessage[],
+  macros?: MvuMacroContext,
+): ReturnType<typeof readMvuStateFromMessages> {
+  const helperState = record.tavernHelperState
+  const helperStatData = helperState?.scopes.chat.stat_data
+  const persisted = record.mvuState !== undefined ? record.mvuState : helperStatData
+  return readMvuStateWithSessionOverride(record.character.raw, history, persisted, macros)
+}
+
+/** Reconcile one record with its current character while retaining session
+ * namespaces, matching Tavern Helper's character switch behavior. */
+function withSessionCharacter(record: SessionRecord, character: PreprocessedCharacter): SessionRecord {
+  const nextHelperState = initializeTavernHelperState(
+    character.raw.frontend,
+    record.characterId,
+    record.tavernHelperState,
+  )
+  return { ...record, character, tavernHelperState: nextHelperState }
 }
 
 /** Mirrors `loop.ts` buildContextReader — turns session history into the
@@ -589,6 +782,8 @@ const ABS_POSTPROCESS_JSON = join(PROJECT_ROOT, 'postprocess-settings.json')
 const ABS_MVU_SETTINGS_JSON = join(PROJECT_ROOT, 'mvu-settings.json')
 /** 正文人称/字数设置;参考 ST preset,独立于 provider 与后处理配置。 */
 const ABS_RESPONSE_SETTINGS_JSON = join(PROJECT_ROOT, 'response-settings.json')
+/** Official extension bundles downloaded only through the manual updater. */
+const ABS_EXTENSIONS_DIR = join(PROJECT_ROOT, 'extensions')
 /** ⑤ postprocess watchdog 超时:只写 stderr 警告,不再 race 抢跑。 */
 const POSTPROCESS_TIMEOUT_MS = 600_000
 
@@ -896,6 +1091,21 @@ interface SessionRecord {
   /** Active greeting: 0 = firstMes, 1..n = alternateGreetings. */
   greetingIndex: number
   label: string
+  /** Session-owned Tavern Helper namespaces, independent of transcript text. */
+  tavernHelperState?: TavernHelperState
+  /** Session-local World Info timed effects; rerolls never advance this clock. */
+  worldbookTimedEffects?: TimedEffectState
+  /** Current inner MVU `stat_data` snapshot, if one has been explicitly written. */
+  mvuState?: JsonValue
+}
+
+/** On-disk session variable envelope. The encoded helper state keeps its
+ * existing validation/prefix contract instead of duplicating its schema here. */
+interface PersistedSessionVariables {
+  readonly format: 0
+  readonly mvuState?: JsonValue
+  readonly tavernHelperState?: string
+  readonly worldbookTimedEffects?: TimedEffectState
 }
 
 /** 角色对独立世界书(imported)的启用选择。默认全启用,用户可以显式禁用某本。
@@ -950,6 +1160,8 @@ interface AppState {
   responseSettings: ResponseGenerationSettings
   /** Isolated ST-Prompt-Template evaluator, initialized once at server boot. */
   ejsEngine: EjsTemplateEngine | undefined
+  /** Built-in compatibility adapters plus optional manually downloaded upstream bundles. */
+  readonly extensions: ExtensionRegistry
 }
 
 function buildState(opts: StartServerOptions, env: NodeJS.ProcessEnv): AppState {
@@ -990,6 +1202,7 @@ function buildState(opts: StartServerOptions, env: NodeJS.ProcessEnv): AppState 
     mvuSettings: { ...DEFAULT_MVU_SETTINGS, presets: [{ ...DEFAULT_MVU_PRESET, config: { ...DEFAULT_MVU_CONFIG } }] },
     responseSettings: { ...DEFAULT_RESPONSE_SETTINGS },
     ejsEngine: undefined,
+    extensions: new ExtensionRegistry(ABS_EXTENSIONS_DIR),
   }
 }
 
@@ -1300,7 +1513,7 @@ async function handleRunJson(state: AppState, req: IncomingMessage, res: ServerR
     const character = resolveCharacterField(state, characterJson)
     if (character !== null) {
       const rec = state.sessionRecords.get(sessionId)
-      if (rec !== undefined) state.sessionRecords.set(sessionId, { ...rec, character })
+      if (rec !== undefined) state.sessionRecords.set(sessionId, withSessionCharacter(rec, character))
     }
   }
 
@@ -1308,12 +1521,14 @@ async function handleRunJson(state: AppState, req: IncomingMessage, res: ServerR
   if (record === undefined) return sendError(res, 500, 'session record vanished')
 
   // 重 roll:截掉最后一条 assistant,复用该轮 user 输入(runLoop 跳过重复 append)。
+  let rerollPrevious: ChatMessage | undefined
   if (reroll) {
-    const lastUser = await truncateForReroll(state, sessionId)
-    if (lastUser === null) {
+    const rerollState = await truncateForReroll(state, sessionId)
+    if (rerollState === null) {
       return sendError(res, 400, 'reroll requires a session whose last message is an assistant reply')
     }
-    userInput = lastUser
+    userInput = rerollState.userInput
+    rerollPrevious = rerollState.previousAssistant
   } else {
     // 正则脚本(user_input 位):新输入在进链路/落库前应用(reroll 不重复应用)。
     userInput = applyRegexScripts(
@@ -1359,13 +1574,26 @@ async function handleRunJson(state: AppState, req: IncomingMessage, res: ServerR
         ...(cfg.provider === 'mock' || !state.postprocessSettings.enabled ? {} : { postprocess: postprocessAgent }),
       },
     )
-    const afterHistory = state.sessions.getHistory(sessionId)
-    for (let i = before; i < afterHistory.length; i++) {
-      const m = afterHistory[i]
-      if (m === undefined) continue
-      try { await appendHistoryJsonl(sessionId, { role: m.role, content: m.content }) } catch { /* swallow */ }
+    const afterHistory = [...state.sessions.getHistory(sessionId)]
+    const lastIndex = afterHistory.length - 1
+    const last = afterHistory[lastIndex]
+    if (last?.role === 'assistant') {
+      afterHistory[lastIndex] = makeAssistantMessage(last.content, rerollPrevious)
+      state.sessions.setHistory(sessionId, afterHistory)
+      try { await rewriteHistoryJsonl(sessionId, afterHistory) } catch { /* swallow */ }
+    } else {
+      for (let i = before; i < afterHistory.length; i++) {
+        const m = afterHistory[i]
+        if (m === undefined) continue
+        try { await appendHistoryJsonl(sessionId, m) } catch { /* swallow */ }
+      }
     }
-    sendJson(res, 200, result)
+    const persistedHistory = state.sessions.getHistory(sessionId)
+    const persistedMessage = persistedHistory[persistedHistory.length - 1]
+    sendJson(res, 200, {
+      ...result,
+      ...(persistedMessage === undefined ? {} : { message: displayHistory(state, sessionId, [persistedMessage])[0] }),
+    })
   } catch (err) {
     sendError(res, 500, `runLoop failed: ${err instanceof Error ? err.message : String(err)}`)
   }
@@ -1408,7 +1636,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     const character = resolveCharacterField(state, characterJson)
     if (character !== null) {
       const rec = state.sessionRecords.get(sessionId)
-      if (rec !== undefined) state.sessionRecords.set(sessionId, { ...rec, character })
+      if (rec !== undefined) state.sessionRecords.set(sessionId, withSessionCharacter(rec, character))
     }
   }
 
@@ -1417,12 +1645,14 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
 
   // 重 roll:截掉最后一条 assistant 回复,复用该轮的 user 输入重新生成。
   // (必须在 SSE headers 之前完成,失败还能以 JSON 4xx 返回。)
+  let rerollPrevious: ChatMessage | undefined
   if (reroll) {
-    const lastUser = await truncateForReroll(state, sessionId)
-    if (lastUser === null) {
+    const rerollState = await truncateForReroll(state, sessionId)
+    if (rerollState === null) {
       return sendError(res, 400, 'reroll requires a session whose last message is an assistant reply')
     }
-    userInput = lastUser
+    userInput = rerollState.userInput
+    rerollPrevious = rerollState.previousAssistant
   } else {
     // 正则脚本(user_input 位):新输入在进链路/落库前应用。
     // (reroll 复用的是发送时已处理过的存量输入,不重复应用。)
@@ -1470,6 +1700,26 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
   const activeUserName = getCurrentUserPersona(state)?.name ?? '用户'
   const mvuMacros: MvuMacroContext = { user: activeUserName, char: character.name }
 
+  // World Info timed effects are scoped to the current chat and evaluated
+  // against the model-visible message count before this generation.  Reroll
+  // reaches this point with the same count, so pruning removes effects from
+  // the abandoned branch without advancing or refreshing them.
+  const timedEffectCandidates = state.worldbook.list()
+  const timedEffectMessageCount = session.getHistory(sessionId).length
+  const prunedTimedEffects = pruneTimedEffectState(
+    record.worldbookTimedEffects ?? {},
+    timedEffectCandidates,
+    timedEffectMessageCount,
+  )
+  const timedEffects = Object.keys(prunedTimedEffects).length === 0 ? undefined : prunedTimedEffects
+  const currentSessionRecord = state.sessionRecords.get(sessionId)
+  if (currentSessionRecord !== undefined) {
+    const { worldbookTimedEffects: _oldTimedEffects, ...recordWithoutTimedEffects } = currentSessionRecord
+    state.sessionRecords.set(sessionId, timedEffects === undefined
+      ? recordWithoutTimedEffects
+      : { ...recordWithoutTimedEffects, worldbookTimedEffects: timedEffects })
+  }
+
   // Persist user message first so 2.2 sees it.
   // (reroll 模式跳过:该轮的 user 消息已在历史里,truncate 时保留了。)
   if (!reroll) {
@@ -1490,11 +1740,12 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     sessionId,
     activeUserName,
   )
-  const mvuState = readMvuStateFromMessages(character.raw, session.getHistory(sessionId), mvuMacros)?.statData
+  const mvuState = readSessionMvuState(record, session.getHistory(sessionId), mvuMacros)?.statData
   const agentCtx = buildAgentContext({
     provider, model: cfg.model, prompts, session, worldbook, sessionId,
     macros: { user: activeUserName, char: character.name },
     worldbookSettings: state.worldbookSettings,
+    ...(timedEffects === undefined ? {} : { worldbookTimedEffects: timedEffects }),
     postprocessSettings: state.postprocessSettings,
     ...(templateRenderer === undefined ? {} : { renderTemplate: templateRenderer }),
     ...(mvuState === undefined ? {} : { statData: mvuState }),
@@ -1752,6 +2003,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     const constantWorldbookEntries = listConstantWorldbookEntries(
       state.worldbook,
       text => text,
+      { applyProbability: false },
     )
     result = await runStageWithTrace('response',
       {
@@ -1787,6 +2039,28 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
 
     usedWorldbook = (wb as { matches: unknown[] }).matches.length > 0
     usedContextSegmentation = (ctxSegs as { segments: unknown[] }).segments.length > 0
+
+    // Commit timed effects only for a normal advancing generation.  The
+    // matcher snapshot was evaluated before the assistant message was
+    // appended; rerolls intentionally reuse that snapshot and never refresh
+    // sticky/cooldown durations.
+    if (!reroll) {
+      const nextTimedEffects = recordTimedEffectActivations(
+        timedEffects ?? {},
+        timedEffectCandidates,
+        (wb as { matches: Array<{ path: string }> }).matches.map(match => match.path),
+        timedEffectMessageCount,
+      )
+      const latestRecord = state.sessionRecords.get(sessionId)
+      if (latestRecord !== undefined) {
+        const { worldbookTimedEffects: _previousTimedEffects, ...recordWithoutTimedEffects } = latestRecord
+        const nextRecord = Object.keys(nextTimedEffects).length === 0
+          ? recordWithoutTimedEffects
+          : { ...recordWithoutTimedEffects, worldbookTimedEffects: nextTimedEffects }
+        state.sessionRecords.set(sessionId, nextRecord)
+        try { await saveSessionVariables(nextRecord) } catch { /* best effort */ }
+      }
+    }
   } catch (err) {
     if (!res.writableEnded) {
       try { writeSseEvent(res, 'error', { name: 'error', status: 'error', message: String(err) }) } catch { /* */ }
@@ -1853,15 +2127,17 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     wb?.plugin?.renderDirectives ?? [],
   )
 
-  session.appendMessage(sessionId, { role: 'assistant', content: proseReply })
+  const assistantMessage = makeAssistantMessage(proseReply, rerollPrevious)
+  session.appendMessage(sessionId, assistantMessage)
   // 持久化 assistant 消息到 history.jsonl(best-effort)
-  try { await appendHistoryJsonl(sessionId, { role: 'assistant', content: proseReply }) } catch { /* swallow */ }
+  try { await appendHistoryJsonl(sessionId, assistantMessage) } catch { /* swallow */ }
   await writeCurrentTurnStats(proseReply.length)
   const initialTokenStats = buildTurnStats(proseReply.length)
-  const initialMvuState = readMvuStateFromMessages(character.raw, session.getHistory(sessionId), mvuMacros)?.statData
+  const initialMvuState = readSessionMvuState(record, session.getHistory(sessionId), mvuMacros)?.statData
 
   const finalResult = {
     reply: proseReply,
+    message: assistantMessage,
     ...(displayReply === proseReply ? {} : { displayReply }),
     sessionId,
     turn: session.turnCount(sessionId),
@@ -1900,7 +2176,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
 
   // MVU stays on this SSE connection so the browser can receive the state and
   // message patch, but it no longer delays the final prose event above.
-  const currentMvu = readMvuStateFromMessages(character.raw, session.getHistory(sessionId), mvuMacros)
+  const currentMvu = readSessionMvuState(record, session.getHistory(sessionId), mvuMacros)
   if (state.mvuSettings.enabled && currentMvu !== undefined) {
     const mvuInput = {
       userInput,
@@ -1926,7 +2202,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
       const history = [...session.getHistory(sessionId)]
       const last = history[history.length - 1]
       if (last?.role === 'assistant') {
-        history[history.length - 1] = { ...last, content: persistedReply }
+        history[history.length - 1] = syncAssistantSwipe(last, persistedReply)
         session.setHistory(sessionId, history)
         try { await rewriteHistoryJsonl(sessionId, history) } catch (err) {
           process.stderr.write(`[ui-server] warn: failed to persist MVU update for ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`)
@@ -1934,7 +2210,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
       }
     }
 
-    const updatedMvuState = readMvuStateFromMessages(character.raw, session.getHistory(sessionId), mvuMacros)?.statData
+    const updatedMvuState = readSessionMvuState(record, session.getHistory(sessionId), mvuMacros)?.statData
     await writeCurrentTurnStats(persistedReply.length)
     const updatedTokenStats = buildTurnStats(persistedReply.length)
     if (!res.writableEnded) {
@@ -1944,6 +2220,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
           displayReply: applyWorldbookRenderDirectives(persistedReply, wb?.plugin?.renderDirectives ?? []),
         }),
         ...(updatedMvuState === undefined ? {} : { mvuState: updatedMvuState }),
+        message: session.getHistory(sessionId).at(-1),
         tokenStats: updatedTokenStats,
       })
     }
@@ -1966,7 +2243,7 @@ async function handleHistory(state: AppState, req: IncomingMessage, res: ServerR
   const record = state.sessionRecords.get(sessionId)
   const mvuState = record === undefined
     ? undefined
-    : readMvuStateFromMessages(record.character.raw, state.sessions.getHistory(sessionId), {
+    : readSessionMvuState(record, state.sessions.getHistory(sessionId), {
       user: getCurrentUserPersona(state)?.name ?? '用户',
       char: record.character.name,
     })?.statData
@@ -1976,6 +2253,172 @@ async function handleHistory(state: AppState, req: IncomingMessage, res: ServerR
     turn: state.sessions.turnCount(sessionId),
     greetingIndex: record?.greetingIndex ?? 0,
     ...(mvuState === undefined ? {} : { mvuState }),
+  })
+}
+
+/** Accept both the canonical Tavern Helper request and the legacy iframe
+ * payload currently emitted by this project (`{ variables: { stat_data } }`). */
+function parseSessionVariableMutation(raw: string): TavernHelperVariableMutationRequest {
+  try {
+    const parsed = parseTavernHelperMutationRequest(raw)
+    if ('operation' in parsed) throw new Error('session variable endpoint accepts namespace replacements only')
+    return parsed as TavernHelperVariableMutationRequest
+  } catch (canonicalError) {
+    let payload: unknown
+    try { payload = JSON.parse(raw) } catch { throw canonicalError }
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) throw canonicalError
+    const object = payload as Record<string, unknown>
+    const source = object.variables ?? object.statData ?? object
+    const statData = extractMvuStatData(source)
+    if (statData === undefined || typeof statData !== 'object' || statData === null || Array.isArray(statData)) {
+      throw canonicalError
+    }
+    return { format: 0, scope: 'chat', variables: { stat_data: statData } }
+  }
+}
+
+function sessionVariablesPayload(
+  state: AppState,
+  record: SessionRecord,
+): Record<string, unknown> {
+  const helperState = ensureSessionTavernHelperState(record)
+  const mvuState = readSessionMvuState(
+    { ...record, tavernHelperState: helperState },
+    state.sessions.getHistory(record.id),
+    { user: getCurrentUserPersona(state)?.name ?? '用户', char: record.character.name },
+  )?.statData
+  return {
+    sessionId: record.id,
+    revision: helperState.revision,
+    variableScopes: helperState.scopes,
+    variables: helperState.scopes.chat,
+    ...(mvuState === undefined ? {} : { mvuState }),
+  }
+}
+
+/** GET /api/sessions/:id/variables — current session-owned namespaces. */
+async function handleGetSessionVariables(state: AppState, id: string, res: ServerResponse): Promise<void> {
+  const record = state.sessionRecords.get(id)
+  if (record === undefined) return sendError(res, 404, `session not found: ${id}`)
+  if (record.tavernHelperState === undefined) {
+    const upgraded = { ...record, tavernHelperState: ensureSessionTavernHelperState(record) }
+    state.sessionRecords.set(id, upgraded)
+    try { await saveSession(state, upgraded) } catch { /* best effort upgrade */ }
+    sendJson(res, 200, sessionVariablesPayload(state, upgraded))
+    return
+  }
+  sendJson(res, 200, sessionVariablesPayload(state, record))
+}
+
+/** PUT/POST /api/sessions/:id/variables — persist one Tavern Helper namespace. */
+async function handlePutSessionVariables(state: AppState, id: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const record = state.sessionRecords.get(id)
+  if (record === undefined) return sendError(res, 404, `session not found: ${id}`)
+  const raw = (await readBody(req, 2 * 1024 * 1024)).toString('utf8')
+  let mutation: TavernHelperVariableMutationRequest
+  try {
+    mutation = parseSessionVariableMutation(raw)
+  } catch (error: unknown) {
+    return sendError(res, 400, error instanceof Error ? error.message : 'invalid session variable update')
+  }
+  const current = ensureSessionTavernHelperState(record)
+  const nextHelperState = applyTavernHelperMutation(current, mutation)
+  const directStatData = mutation.scope === 'chat' ? extractMvuStatData(mutation.variables) : undefined
+  const nextRecord: SessionRecord = {
+    ...record,
+    tavernHelperState: nextHelperState,
+    ...(directStatData === undefined ? {} : { mvuState: directStatData }),
+  }
+  state.sessionRecords.set(id, nextRecord)
+  try {
+    await saveSession(state, nextRecord)
+  } catch (error: unknown) {
+    state.sessionRecords.set(id, record)
+    return sendError(res, 500, `failed to persist session variables: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  sendJson(res, 200, sessionVariablesPayload(state, nextRecord))
+}
+
+/** PUT /api/sessions/:id/tavern-helper — apply one canonical Tavern Helper
+ * mutation.  Variable updates keep using /variables for legacy cards; this
+ * route exists for worldbook/chat/injection/script-tree operations that the
+ * isolated JS-Slash-Runner bridge cannot safely serialize as executable code. */
+async function handlePutSessionTavernHelper(
+  state: AppState,
+  id: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const record = state.sessionRecords.get(id)
+  if (record === undefined) return sendError(res, 404, `session not found: ${id}`)
+  let mutation: TavernHelperMutationRequest
+  try {
+    mutation = parseTavernHelperMutationRequest((await readBody(req, 2 * 1024 * 1024)).toString('utf8'))
+  } catch (error: unknown) {
+    return sendError(res, 400, error instanceof Error ? error.message : 'invalid Tavern Helper mutation')
+  }
+  const current = ensureSessionTavernHelperState(record)
+  let nextHelperState: TavernHelperState
+  try {
+    nextHelperState = applyTavernHelperMutation(current, mutation)
+  } catch (error: unknown) {
+    return sendError(res, 400, error instanceof Error ? error.message : 'failed to apply Tavern Helper mutation')
+  }
+  const directStatData = 'scope' in mutation && mutation.scope === 'chat'
+    ? extractMvuStatData(mutation.variables) : undefined
+  const nextRecord: SessionRecord = {
+    ...record,
+    tavernHelperState: nextHelperState,
+    ...(directStatData === undefined ? {} : { mvuState: directStatData }),
+  }
+  const previousHistory = [...state.sessions.getHistory(id)]
+  if ('operation' in mutation && mutation.operation === 'set-chat-messages') {
+    const messages = (mutation as Extract<TavernHelperMutationRequest, { operation: 'set-chat-messages' }>).messages
+    const nextHistory: ChatMessage[] = messages.map((message: { role?: 'system' | 'assistant' | 'user'; message?: string }) => ({
+      role: message.role ?? 'assistant',
+      content: message.message ?? '',
+    }))
+    state.sessions.setHistory(id, nextHistory)
+    try { await rewriteHistoryJsonl(id, nextHistory) } catch (error: unknown) {
+      state.sessions.setHistory(id, previousHistory)
+      return sendError(res, 500, `failed to persist Tavern Helper chat mutation: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  state.sessionRecords.set(id, nextRecord)
+  try {
+    await saveSession(state, nextRecord)
+    if ('operation' in mutation && (
+      mutation.operation === 'replace-worldbook'
+      || mutation.operation === 'delete-worldbook'
+      || mutation.operation === 'bind-global-worldbooks'
+      || mutation.operation === 'bind-character-worldbooks'
+      || mutation.operation === 'bind-chat-worldbook'
+    )) {
+      ;(state as { worldbook: WorldbookStore }).worldbook = getMergedWorldbook(state, record.characterId, id)
+    }
+  } catch (error: unknown) {
+    state.sessionRecords.set(id, record)
+    if ('operation' in mutation && mutation.operation === 'set-chat-messages') state.sessions.setHistory(id, previousHistory)
+    return sendError(res, 500, `failed to persist Tavern Helper mutation: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  sendJson(res, 200, {
+    ...sessionVariablesPayload(state, nextRecord),
+    tavernHelperState: nextHelperState,
+    ...(nextHelperState.worldbookBindings === undefined ? {} : { worldbookBindings: nextHelperState.worldbookBindings }),
+  })
+}
+
+/** GET /api/sessions/:id/tavern-helper — read the canonical bridge snapshot
+ * for iframe RPCs.  Unlike /variables this intentionally includes script-owned
+ * worldbooks and bindings, because cards use it to implement updater callbacks
+ * before sending a validated replacement mutation back to the host. */
+function handleGetSessionTavernHelper(state: AppState, id: string, res: ServerResponse): void {
+  const record = state.sessionRecords.get(id)
+  if (record === undefined) return sendError(res, 404, `session not found: ${id}`)
+  const helperState = ensureSessionTavernHelperState(record)
+  sendJson(res, 200, {
+    ...sessionVariablesPayload(state, record),
+    tavernHelperState: helperState,
   })
 }
 
@@ -1998,10 +2441,10 @@ async function handlePutSessionGreeting(state: AppState, id: string, req: Incomi
   let nextHistory: typeof history
   if (first?.role === 'assistant') {
     nextHistory = greeting.length > 0
-      ? [{ role: 'assistant', content: greeting }, ...history.slice(1)]
+      ? [makeAssistantMessage(greeting), ...history.slice(1)]
       : history.slice(1)
   } else if (greeting.length > 0) {
-    nextHistory = [{ role: 'assistant', content: greeting }, ...history]
+    nextHistory = [makeAssistantMessage(greeting), ...history]
   } else {
     nextHistory = history
   }
@@ -2010,7 +2453,7 @@ async function handlePutSessionGreeting(state: AppState, id: string, req: Incomi
   state.sessionRecords.set(id, nextRecord)
   try { await rewriteHistoryJsonl(id, nextHistory) } catch { /* best-effort persistence */ }
   try { await saveSession(state, nextRecord) } catch { /* best-effort persistence */ }
-  const mvuState = readMvuStateFromMessages(record.character.raw, nextHistory, {
+  const mvuState = readSessionMvuState(record, nextHistory, {
     user: getCurrentUserPersona(state)?.name ?? '用户',
     char: record.character.name,
   })?.statData
@@ -2211,7 +2654,20 @@ async function handlePutMessage(state: AppState, id: string, indexRaw: string, r
   }
   const current = history[index]
   if (current === undefined) return sendError(res, 404, `message index out of range: ${index}`)
-  history[index] = { role: current.role, content }
+  // SillyTavern's Run on Edit gate is evaluated at the edited message's
+  // history depth.  Normal/prompt-only scripts may update the stored prompt;
+  // markdown-only scripts remain display-only and are applied by the UI.
+  const placement: RegexPlacement = current.role === 'assistant' ? 'ai_output' : 'user_input'
+  const editedContent = applyRegexScripts(
+    state.regexScripts.list(),
+    content,
+    placement,
+    { user: getCurrentUserPersona(state)?.name ?? null, char: record.character.name },
+    { depth: history.length - index - 1, isEdit: true, surface: 'prompt' },
+  )
+  history[index] = current.role === 'assistant'
+    ? syncAssistantSwipe(current, editedContent)
+    : { ...current, content: editedContent }
   state.sessions.setHistory(id, history)
   try {
     await rewriteHistoryJsonl(id, history)
@@ -2219,13 +2675,50 @@ async function handlePutMessage(state: AppState, id: string, indexRaw: string, r
     process.stderr.write(`[ui-server] warn: failed to rewrite history for ${id}: ${err instanceof Error ? err.message : String(err)}\n`)
   }
 
-  const mvuState = readMvuStateFromMessages(record.character.raw, history, {
+  const mvuState = readSessionMvuState(record, history, {
     user: getCurrentUserPersona(state)?.name ?? '用户',
     char: record.character.name,
   })?.statData
   sendJson(res, 200, {
     sessionId: id,
     updatedIndex: index,
+    history: displayHistory(state, id, history),
+    ...(mvuState === undefined ? {} : { mvuState }),
+  })
+}
+
+/** PUT /api/sessions/:id/message/:index/swipe — select an existing ST swipe. */
+async function handlePutMessageSwipe(state: AppState, id: string, indexRaw: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const record = state.sessionRecords.get(id)
+  if (record === undefined) return sendError(res, 404, `session not found: ${id}`)
+  const index = Number.parseInt(indexRaw, 10)
+  if (!Number.isInteger(index)) return sendError(res, 400, `invalid message index: ${indexRaw}`)
+  const payload = parseJsonBody(await readBody(req, 16 * 1024))
+  if (payload === null) return sendError(res, 400, 'invalid JSON body')
+  const rawSwipeId = readField(payload, 'swipeId')
+  const swipeId = typeof rawSwipeId === 'number' ? rawSwipeId : Number(rawSwipeId)
+  if (!Number.isSafeInteger(swipeId)) return sendError(res, 400, 'swipeId must be an integer')
+
+  const history = [...state.sessions.getHistory(id)]
+  const current = history[index]
+  if (current === undefined || current.role !== 'assistant') return sendError(res, 400, 'only assistant messages support swipes')
+  const swipes = Array.isArray(current.swipes) && current.swipes.length > 0 ? [...current.swipes] : [current.content]
+  if (swipeId < 0 || swipeId >= swipes.length) return sendError(res, 400, `swipeId out of range: ${swipeId}`)
+  const swipeInfo = Array.isArray(current.swipe_info) ? [...current.swipe_info] : swipes.map(() => swipeInfoNow())
+  while (swipeInfo.length < swipes.length) swipeInfo.push(swipeInfoNow())
+  history[index] = { ...current, content: swipes[swipeId] ?? '', swipe_id: swipeId, swipes, swipe_info: swipeInfo }
+  state.sessions.setHistory(id, history)
+  try { await rewriteHistoryJsonl(id, history) } catch (err) {
+    process.stderr.write(`[ui-server] warn: failed to rewrite swipe for ${id}: ${err instanceof Error ? err.message : String(err)}\n`)
+  }
+  const mvuState = readSessionMvuState(record, history, {
+    user: getCurrentUserPersona(state)?.name ?? '用户',
+    char: record.character.name,
+  })?.statData
+  sendJson(res, 200, {
+    sessionId: id,
+    updatedIndex: index,
+    swipeId,
     history: displayHistory(state, id, history),
     ...(mvuState === undefined ? {} : { mvuState }),
   })
@@ -2593,6 +3086,69 @@ async function handlePutPrompt(state: AppState, name: string, req: IncomingMessa
   }
 }
 
+// ─── /api/extensions — SillyTavern-compatible adapter registry ─────────────
+
+function parseExtensionId(value: unknown): ExtensionId | undefined {
+  return value === 'tavern-helper' || value === 'prompt-template' ? value : undefined
+}
+
+function handleListExtensions(state: AppState, res: ServerResponse): void {
+  sendJson(res, 200, {
+    extensions: state.extensions.list(),
+    updatePolicy: 'manual',
+    executionPolicy: 'bundled-adapter-only',
+  })
+}
+
+async function handleCheckExtensions(state: AppState, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const payload = parseJsonBody(await readBody(req, 16 * 1024))
+  const id = parseExtensionId(payload?.id)
+  try {
+    const extensions = await state.extensions.check(id)
+    sendJson(res, 200, { extensions })
+  } catch (error) {
+    sendError(res, 502, `failed to check extension updates: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+async function handleUpdateExtension(state: AppState, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const payload = parseJsonBody(await readBody(req, 16 * 1024))
+  const id = parseExtensionId(payload?.id)
+  if (id === undefined) return sendError(res, 400, 'id must be tavern-helper or prompt-template')
+  try {
+    const result = await state.extensions.update(id)
+    sendJson(res, 200, result)
+  } catch (error) {
+    sendError(res, 502, `failed to update extension: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+async function handleActivateExtension(state: AppState, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const payload = parseJsonBody(await readBody(req, 16 * 1024))
+  const id = parseExtensionId(payload?.id)
+  const version = readStringField(payload ?? {}, 'version')?.trim()
+  if (id === undefined) return sendError(res, 400, 'id must be tavern-helper or prompt-template')
+  if (version === undefined || version.length === 0) return sendError(res, 400, 'version is required')
+  try {
+    const status = await state.extensions.activate(id, version)
+    sendJson(res, 200, { status })
+  } catch (error) {
+    sendError(res, 409, `failed to activate extension version: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+async function handleRollbackExtension(state: AppState, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const payload = parseJsonBody(await readBody(req, 16 * 1024))
+  const id = parseExtensionId(payload?.id)
+  if (id === undefined) return sendError(res, 400, 'id must be tavern-helper or prompt-template')
+  try {
+    const status = await state.extensions.rollback(id)
+    sendJson(res, 200, { status })
+  } catch (error) {
+    sendError(res, 409, `failed to rollback extension: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 // ─── /api/models — list available models from the configured provider ────────
 
 async function handleGetModels(state: AppState, req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -2714,6 +3270,45 @@ async function saveCharacter(state: AppState, preprocessed: PreprocessedCharacte
   return record
 }
 
+/** Read the session-owned variable envelope. Invalid optional variable data is
+ * ignored so an old/broken variables file cannot make the whole chat vanish. */
+async function loadSessionVariables(sessionId: string): Promise<Pick<SessionRecord, 'mvuState' | 'tavernHelperState' | 'worldbookTimedEffects'>> {
+  try {
+    const raw = await readFile(join(ABS_SESSIONS_DIR, sessionId, 'variables.json'), 'utf-8')
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const mvuState = parsed.mvuState === undefined ? undefined : normalizeMvuJsonValue(parsed.mvuState)
+    let tavernHelperState: TavernHelperState | undefined
+    if (typeof parsed.tavernHelperState === 'string') {
+      try { tavernHelperState = decodeTavernHelperState(parsed.tavernHelperState) } catch { /* ignore invalid optional state */ }
+    }
+    const worldbookTimedEffects = normalizeTimedEffectState(parsed.worldbookTimedEffects)
+    return {
+      ...(mvuState === undefined ? {} : { mvuState }),
+      ...(tavernHelperState === undefined ? {} : { tavernHelperState }),
+      ...(Object.keys(worldbookTimedEffects).length === 0 ? {} : { worldbookTimedEffects }),
+    }
+  } catch {
+    return {}
+  }
+}
+
+/** Persist only session variables; the transcript remains in history.jsonl. */
+async function saveSessionVariables(record: SessionRecord): Promise<void> {
+  const envelope: PersistedSessionVariables = {
+    format: 0,
+    ...(record.mvuState === undefined ? {} : { mvuState: snapshotJsonValue(record.mvuState) as JsonValue }),
+    ...(record.tavernHelperState === undefined
+      ? {}
+      : { tavernHelperState: encodeTavernHelperState(record.tavernHelperState) }),
+    ...(record.worldbookTimedEffects === undefined
+      ? {}
+      : { worldbookTimedEffects: record.worldbookTimedEffects }),
+  }
+  const path = join(ABS_SESSIONS_DIR, record.id, 'variables.json')
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, JSON.stringify(envelope, null, 2), 'utf-8')
+}
+
 /** 把一个会话写到 `sessions/<id>/`。 */
 async function saveSession(_state: AppState, record: SessionRecord): Promise<void> {
   const dir = join(ABS_SESSIONS_DIR, record.id)
@@ -2726,27 +3321,34 @@ async function saveSession(_state: AppState, record: SessionRecord): Promise<voi
     greetingIndex: record.greetingIndex,
   }
   await writeFile(join(dir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf-8')
+  await saveSessionVariables(record)
 }
 
 /** 追加一条消息到 `sessions/<id>/history.jsonl`。 */
-async function appendHistoryJsonl(sessionId: string, message: { role: string; content: string }): Promise<void> {
+async function appendHistoryJsonl(sessionId: string, message: ChatMessage): Promise<void> {
   const path = join(ABS_SESSIONS_DIR, sessionId, 'history.jsonl')
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, `${JSON.stringify(message)}\n`, { encoding: 'utf-8', flag: 'a' })
 }
 
 /** 整体重写 `sessions/<id>/history.jsonl`(删消息 / 重 roll 截断后调用)。 */
-async function rewriteHistoryJsonl(sessionId: string, messages: readonly { role: string; content: string }[]): Promise<void> {
+async function rewriteHistoryJsonl(sessionId: string, messages: readonly ChatMessage[]): Promise<void> {
   const path = join(ABS_SESSIONS_DIR, sessionId, 'history.jsonl')
   await mkdir(dirname(path), { recursive: true })
-  const body = messages.map(m => JSON.stringify({ role: m.role, content: m.content })).join('\n')
+  // Keep ST swipe metadata when deleting/editing/selecting a floor.  Reducing
+  // messages to role/content here would silently erase every alternative on
+  // the next restart.
+  const body = messages.map(m => JSON.stringify(m)).join('\n')
   await writeFile(path, messages.length > 0 ? `${body}\n` : '', 'utf-8')
 }
 
 /** 重 roll 前置:校验并截掉最后一条 assistant 消息(内存 + jsonl),
  *  返回该轮的 user 输入(重跑链路直接复用,不再重复 append)。
  *  不满足条件(空历史 / 末条非 assistant / 截断后无 user)返回 null。 */
-async function truncateForReroll(state: AppState, sessionId: string): Promise<string | null> {
+async function truncateForReroll(
+  state: AppState,
+  sessionId: string,
+): Promise<{ userInput: string; previousAssistant: ChatMessage } | null> {
   const history = [...state.sessions.getHistory(sessionId)]
   const last = history[history.length - 1]
   if (last === undefined || last.role !== 'assistant') return null
@@ -2759,7 +3361,7 @@ async function truncateForReroll(state: AppState, sessionId: string): Promise<st
   if (lastUser === null || lastUser.length === 0) return null
   state.sessions.setHistory(sessionId, truncated)
   try { await rewriteHistoryJsonl(sessionId, truncated) } catch { /* swallow */ }
-  return lastUser
+  return { userInput: lastUser, previousAssistant: last }
 }
 
 /** Read the last revision for every generation in a session. The deferred
@@ -3350,7 +3952,7 @@ async function loadCharacterFromDisk(id: CharacterId): Promise<CharacterRecord |
 }
 
 /** 从磁盘读一个会话:meta + history.jsonl,返回 (record, history)。失败返回 null。 */
-async function loadSessionFromDisk(id: string): Promise<{ record: SessionRecord; history: Array<{ role: 'user' | 'assistant'; content: string }> } | null> {
+async function loadSessionFromDisk(id: string): Promise<{ record: SessionRecord; history: ChatMessage[] } | null> {
   const dir = join(ABS_SESSIONS_DIR, id)
   let meta: { id: string; characterId: string; label: string; createdAt: string; greetingIndex?: unknown }
   try {
@@ -3364,15 +3966,29 @@ async function loadSessionFromDisk(id: string): Promise<{ record: SessionRecord;
     ? meta.greetingIndex
     : 0
   // history.jsonl 可能不存在(会话创建后还没说话)
-  const history: Array<{ role: 'user' | 'assistant'; content: string }> = []
+  const history: ChatMessage[] = []
   try {
     const text = await readFile(join(dir, 'history.jsonl'), 'utf-8')
     for (const line of text.split('\n')) {
       if (line.length === 0) continue
       try {
-        const obj = JSON.parse(line) as { role: string; content: string }
+        const obj = JSON.parse(line) as {
+          role: string
+          content: string
+          swipe_id?: unknown
+          swipes?: unknown
+          swipe_info?: unknown
+        }
         if ((obj.role === 'user' || obj.role === 'assistant') && typeof obj.content === 'string') {
-          history.push({ role: obj.role, content: obj.content })
+          const message: ChatMessage = { role: obj.role, content: obj.content }
+          if (obj.role === 'assistant') {
+            if (Array.isArray(obj.swipes) && obj.swipes.every(item => typeof item === 'string')) {
+              message.swipes = [...obj.swipes]
+            }
+            if (Number.isInteger(obj.swipe_id)) message.swipe_id = Number(obj.swipe_id)
+            if (Array.isArray(obj.swipe_info)) message.swipe_info = obj.swipe_info as SwipeInfo[]
+          }
+          history.push(message)
         }
       } catch {
         // 跳过坏行,不阻塞整个会话加载。
@@ -3381,8 +3997,17 @@ async function loadSessionFromDisk(id: string): Promise<{ record: SessionRecord;
   } catch {
     // 文件不存在 = 空历史,正常情况。
   }
+  const variables = await loadSessionVariables(id)
   return {
-    record: { id: meta.id, characterId: meta.characterId, character: undefined as unknown as PreprocessedCharacter, createdAt: meta.createdAt, greetingIndex, label: meta.label },
+    record: {
+      id: meta.id,
+      characterId: meta.characterId,
+      character: undefined as unknown as PreprocessedCharacter,
+      createdAt: meta.createdAt,
+      greetingIndex,
+      label: meta.label,
+      ...variables,
+    },
     history,
   }
 }
@@ -3429,7 +4054,15 @@ async function loadPersisted(state: AppState): Promise<void> {
         continue
       }
       // 把 PreprocessedCharacter 注入 record + 重建 MemorySessionStore 内容
-      const fullRecord: SessionRecord = { ...loaded.record, character: charRec.preprocessed }
+      const fullRecord: SessionRecord = {
+        ...loaded.record,
+        character: charRec.preprocessed,
+        tavernHelperState: initializeTavernHelperState(
+          charRec.preprocessed.raw.frontend,
+          loaded.record.characterId,
+          loaded.record.tavernHelperState,
+        ),
+      }
       state.sessionRecords.set(id, fullRecord)
       for (const m of loaded.history) {
         state.sessions.appendMessage(id, m)
@@ -3482,6 +4115,7 @@ async function createSession(
     createdAt: new Date().toISOString(),
     greetingIndex,
     label,
+    tavernHelperState: initializeTavernHelperState(character.raw.frontend, characterId),
   }
   state.sessionRecords.set(id, record)
   // 持久化 meta.json(best-effort:写盘失败不阻塞会话创建,只打 warning)
@@ -3500,8 +4134,9 @@ async function createSession(
   const persona = getCurrentUserPersona(state)
   const greeting = substituteUserCharMacros(rawGreeting, persona?.name ?? null, character.name)
   if (greeting.length > 0) {
-    state.sessions.appendMessage(id, { role: 'assistant', content: greeting })
-    try { await appendHistoryJsonl(id, { role: 'assistant', content: greeting }) } catch { /* swallow */ }
+    const greetingMessage = makeAssistantMessage(greeting)
+    state.sessions.appendMessage(id, greetingMessage)
+    try { await appendHistoryJsonl(id, greetingMessage) } catch { /* swallow */ }
   }
   return id
 }
@@ -3537,6 +4172,7 @@ function serializeCharacter(character: PreprocessedCharacter): {
     regexScripts: PreprocessedCharacter['raw']['frontend']['regexScripts']
     tavernHelperScriptNames: PreprocessedCharacter['raw']['frontend']['tavernHelperScriptNames']
     tavernHelperScripts: PreprocessedCharacter['raw']['frontend']['tavernHelperScripts']
+    tavernHelperScriptTrees?: PreprocessedCharacter['raw']['frontend']['tavernHelperScriptTrees']
     tavernHelperVariables: PreprocessedCharacter['raw']['frontend']['tavernHelperVariables']
     tavernHelper?: PreprocessedCharacter['raw']['frontend']['tavernHelper']
   }
@@ -3560,6 +4196,8 @@ function serializeCharacter(character: PreprocessedCharacter): {
       regexScripts: character.raw.frontend?.regexScripts ?? [],
       tavernHelperScriptNames: character.raw.frontend?.tavernHelperScriptNames ?? [],
       tavernHelperScripts: character.raw.frontend?.tavernHelperScripts ?? [],
+      ...(character.raw.frontend?.tavernHelperScriptTrees === undefined ? {}
+        : { tavernHelperScriptTrees: character.raw.frontend.tavernHelperScriptTrees }),
       tavernHelperVariables: character.raw.frontend?.tavernHelperVariables ?? {},
       ...(character.raw.frontend?.tavernHelper === undefined ? {} : { tavernHelper: character.raw.frontend.tavernHelper }),
     },
@@ -3637,6 +4275,8 @@ function parseCharacterField(value: unknown): PreprocessedCharacter | null {
     ? frontendObject.tavernHelperScriptNames.filter((entry): entry is string => typeof entry === 'string') : []
   const helperScripts = Array.isArray(frontendObject.tavernHelperScripts)
     ? frontendObject.tavernHelperScripts as PreprocessedCharacter['raw']['frontend']['tavernHelperScripts'] : []
+  const helperScriptTrees = Array.isArray(frontendObject.tavernHelperScriptTrees)
+    ? frontendObject.tavernHelperScriptTrees as PreprocessedCharacter['raw']['frontend']['tavernHelperScriptTrees'] : undefined
   const helperVariables = frontendObject.tavernHelperVariables !== null
     && typeof frontendObject.tavernHelperVariables === 'object'
     && !Array.isArray(frontendObject.tavernHelperVariables)
@@ -3669,8 +4309,9 @@ function parseCharacterField(value: unknown): PreprocessedCharacter | null {
       frontend: {
         regexScripts: frontendScripts,
         tavernHelperScriptNames: helperNames,
-        tavernHelperScripts: helperScripts,
-        tavernHelperVariables: helperVariables,
+      tavernHelperScripts: helperScripts,
+      ...(helperScriptTrees === undefined ? {} : { tavernHelperScriptTrees: helperScriptTrees }),
+      tavernHelperVariables: helperVariables,
       },
     } as never,
   }
@@ -3695,7 +4336,13 @@ function resolveCharacterField(state: AppState, value: unknown): PreprocessedCha
 /** 把酒馆 World Info JSON 转成 `ImportedLorebook`。只解析 `entries` 字典(uid -> entry)部分。
  *  不识别的字段静默丢弃;不抛错(允许部分字段缺失)。 */
 function parseWorldInfoJson(json: string): ImportedLorebook {
-  const obj = JSON.parse(json) as { entries?: Record<string, Record<string, unknown>>; name?: string }
+  const obj = JSON.parse(json) as {
+    entries?: Record<string, Record<string, unknown>>
+    name?: string
+    /** Current ST exports `recursive`; some integrations use the expanded name. */
+    recursive?: unknown
+    recursiveScanning?: unknown
+  }
   if (obj.entries === null || typeof obj.entries !== 'object' || Array.isArray(obj.entries)) {
     throw new Error('world info JSON must have an "entries" object')
   }
@@ -3732,6 +4379,21 @@ function parseWorldInfoJson(json: string): ImportedLorebook {
     // 蓝灯(constant)本项目严格无条件注入(与 ST 的差异:ST 也会对蓝灯掷骰)。
     const probability = typeof r.probability === 'number' ? r.probability : 100
     const useProbability = r.useProbability !== false
+    const excludeRecursion = typeof ext?.exclude_recursion === 'boolean'
+      ? ext.exclude_recursion : typeof r.exclude_recursion === 'boolean' ? r.exclude_recursion : undefined
+    const preventRecursion = typeof ext?.prevent_recursion === 'boolean'
+      ? ext.prevent_recursion : typeof r.prevent_recursion === 'boolean' ? r.prevent_recursion : undefined
+    const delayRaw = ext?.delay_until_recursion ?? r.delay_until_recursion
+    const delayUntilRecursion = typeof delayRaw === 'boolean' || typeof delayRaw === 'number'
+      ? delayRaw : undefined
+    const timedNumber = (extensionKey: string, entryKey: string): number | undefined => {
+      const value = ext?.[extensionKey] ?? r[entryKey]
+      return typeof value === 'number' && Number.isFinite(value) && value >= 0
+        ? Math.trunc(value) : undefined
+    }
+    const sticky = timedNumber('sticky', 'sticky')
+    const cooldown = timedNumber('cooldown', 'cooldown')
+    const delay = timedNumber('delay', 'delay')
     // ST position 枚举原值(0-7):extensions.position ?? 数字 position ?? 字符串换算。
     const stPositionRaw = typeof ext?.position === 'number' ? ext.position : r.position
     const stPosition = typeof stPositionRaw === 'number' ? stPositionRaw
@@ -3756,6 +4418,12 @@ function parseWorldInfoJson(json: string): ImportedLorebook {
       secondaryLogic,
       position,
       ...(stPosition !== undefined ? { stPosition } : {}),
+      ...(excludeRecursion === undefined ? {} : { excludeRecursion }),
+      ...(preventRecursion === undefined ? {} : { preventRecursion }),
+      ...(delayUntilRecursion === undefined ? {} : { delayUntilRecursion }),
+      ...(sticky === undefined ? {} : { sticky }),
+      ...(cooldown === undefined ? {} : { cooldown }),
+      ...(delay === undefined ? {} : { delay }),
       ...(probability !== undefined ? { probability } : {}),
       ...(useProbability !== undefined ? { useProbability } : {}),
       ...(priority !== undefined ? { priority } : {}),
@@ -3767,7 +4435,7 @@ function parseWorldInfoJson(json: string): ImportedLorebook {
   }
   const book: ImportedLorebook = {
     ...(obj.name !== undefined ? { name: obj.name } : {}),
-    recursiveScanning: false,
+    recursiveScanning: obj.recursiveScanning === true || obj.recursive === true,
     entries,
   }
   return book
@@ -3928,7 +4596,11 @@ function safeFileName(name: string): string {
  *  ST 条目参数(constant/selectiveLogic/probability/position 等)全量透传:
  *  2.1 worldbook-match 用它们组装绿灯候选参数表,③ response 用 constant+position
  *  做独立书蓝灯常驻注入。旧存档缺省字段按 ST 默认处理(and-any / 100 / true)。 */
-function lorebookEntryToWorldbookEntry(charName: string, e: ImportedLorebookEntry): WorldbookEntry {
+function lorebookEntryToWorldbookEntry(
+  charName: string,
+  e: ImportedLorebookEntry,
+  recursion: { readonly recursiveScanning: boolean; readonly recursiveBookId: string },
+): WorldbookEntry {
   const displayName = e.name ?? `(未命名 ${e.sourceId})`
   return {
     path: `${charName}/${displayName}`,
@@ -3949,9 +4621,79 @@ function lorebookEntryToWorldbookEntry(charName: string, e: ImportedLorebookEntr
     useProbability: e.useProbability ?? true,
     position: e.stPosition ?? (e.position === 'before_char' ? 0 : 1),
     ...(e.scanDepth === undefined ? {} : { scanDepth: e.scanDepth }),
+    recursiveScanning: recursion.recursiveScanning,
+    recursiveBookId: recursion.recursiveBookId,
+    ...(e.excludeRecursion === undefined ? {} : { excludeRecursion: e.excludeRecursion }),
+    ...(e.preventRecursion === undefined ? {} : { preventRecursion: e.preventRecursion }),
+    ...(e.delayUntilRecursion === undefined ? {} : { delayUntilRecursion: e.delayUntilRecursion }),
+    ...(e.sticky === undefined ? {} : { sticky: e.sticky }),
+    ...(e.cooldown === undefined ? {} : { cooldown: e.cooldown }),
+    ...(e.delay === undefined ? {} : { delay: e.delay }),
     ignoreBudget: e.ignoreBudget,
     hasDecorators: e.hasDecorators,
   }
+}
+
+/** Convert one Tavern Helper worldbook entry into the common deterministic
+ * matcher vocabulary.  The conversion is intentionally lossless for the
+ * fields the agent loop understands; unsupported vector/injection fields stay
+ * in the session-owned source state and never get silently treated as a
+ * different book. */
+function tavernHelperWorldbookEntryToWorldbookEntry(bookName: string, entry: TavernWorldbookEntry): WorldbookEntry {
+  const logic = entry.strategy.keys_secondary.logic
+  const selectiveLogic = logic === 'and_all' ? 'and-all'
+    : logic === 'not_all' ? 'not-all'
+      : logic === 'not_any' ? 'not-any' : 'and-any'
+  const positionType = entry.position.type
+  const position = positionType === 'before_character_definition' ? 0
+    : positionType === 'after_character_definition' ? 1
+      : positionType === 'before_example_messages' ? 2
+        : positionType === 'after_example_messages' ? 3
+          : positionType === 'before_author_note' ? 2
+            : positionType === 'after_author_note' ? 3
+              : positionType === 'outlet' ? 7 : 4
+  const path = `酒馆助手/${bookName}/${entry.uid}`
+  return {
+    path,
+    comment: entry.name,
+    keywords: [...entry.strategy.keys],
+    order: entry.position.order,
+    weight: 100,
+    content: entry.content,
+    constant: entry.strategy.type === 'constant',
+    enabled: entry.enabled,
+    secondaryKeywords: [...entry.strategy.keys_secondary.keys],
+    selective: entry.strategy.type === 'selective',
+    selectiveLogic,
+    caseSensitive: false,
+    matchWholeWords: false,
+    useRegex: false,
+    probability: entry.probability,
+    useProbability: true,
+    position,
+    role: entry.position.role,
+    ...(entry.strategy.scan_depth === 'same_as_global' ? {} : { scanDepth: entry.strategy.scan_depth }),
+    ...(entry.effect.sticky === null ? {} : { sticky: entry.effect.sticky }),
+    ...(entry.effect.cooldown === null ? {} : { cooldown: entry.effect.cooldown }),
+    ...(entry.effect.delay === null ? {} : { delay: entry.effect.delay }),
+    ignoreBudget: entry.ignoreBudget === true,
+  }
+}
+
+/** Resolve the worldbooks visible to the current Tavern Helper session.
+ * Explicit bindings follow the extension's global/character/chat precedence;
+ * when a script has created books but has not written bindings yet, exposing
+ * all session-owned books is the useful and backwards-compatible fallback. */
+function tavernHelperActiveWorldbookNames(state: TavernHelperState): string[] {
+  const books = state.worldbooks ?? {}
+  const bindings = state.worldbookBindings
+  const names = new Set<string>()
+  if (bindings === undefined) return Object.keys(books)
+  for (const name of bindings.global ?? []) names.add(name)
+  for (const name of [bindings.character?.primary, ...(bindings.character?.additional ?? []), bindings.chat]) {
+    if (typeof name === 'string' && name.length > 0) names.add(name)
+  }
+  return [...names]
 }
 
 /**
@@ -3968,7 +4710,11 @@ function lorebookEntryToWorldbookEntry(charName: string, e: ImportedLorebookEntr
  * @param characterId - 该角色"启用"的独立世界书集合,决定哪些 imported 书被合并;
  *                     传 `null` 时只合并 fixture + 角色卡 dynamic(用于启动/无角色场景)
  */
-function getMergedWorldbook(state: AppState, characterId: CharacterId | null): WorldbookStore {
+function getMergedWorldbook(
+  state: AppState,
+  characterId: CharacterId | null,
+  sessionId: string | null = state.currentSessionId,
+): WorldbookStore {
   // 注意:fixture 必须从 pristine 的 `fixtureWorldbook` 读,不能从 `state.worldbook`
   // 读 —— 后者已经是"fixture+card+imported 合并结果",自引用会把旧条目每
   // rebuild 一次就累加一遍(重复膨胀)。
@@ -3980,7 +4726,14 @@ function getMergedWorldbook(state: AppState, characterId: CharacterId | null): W
     const rec = state.characters.get(characterId)
     if (rec !== undefined) {
       for (const e of rec.preprocessed.dynamicLorebookEntries) {
-        cardEntries.push(lorebookEntryToWorldbookEntry(rec.name, e))
+        cardEntries.push(lorebookEntryToWorldbookEntry(
+          rec.name,
+          e,
+          {
+            recursiveScanning: rec.preprocessed.lorebook?.recursiveScanning === true,
+            recursiveBookId: `character:${safeFileName(rec.name)}`,
+          },
+        ))
       }
     }
   }
@@ -3998,10 +4751,25 @@ function getMergedWorldbook(state: AppState, characterId: CharacterId | null): W
     //   - disabledIds 是 Set → 显式禁用的才跳过
     if (disabledIds !== null && disabledIds.has(name)) continue
     for (const e of book.entries) {
-      importedEntries.push(lorebookEntryToWorldbookEntry(`世界书/${name}`, e))
+      importedEntries.push(lorebookEntryToWorldbookEntry(
+        `世界书/${name}`,
+        e,
+        { recursiveScanning: book.recursiveScanning === true, recursiveBookId: `worldbook:${name}` },
+      ))
     }
   }
-  const store = new MemoryWorldbookStore([...fixtureEntries, ...cardEntries, ...importedEntries])
+  const helperEntries: WorldbookEntry[] = []
+  const sessionRecord = sessionId === null ? undefined : state.sessionRecords.get(sessionId)
+  const helperState = sessionRecord?.characterId === characterId ? sessionRecord.tavernHelperState : undefined
+  const deletedHelperBooks = new Set(helperState?.deletedWorldbookNames ?? [])
+  const helperBooks = helperState?.worldbooks ?? {}
+  for (const bookName of helperState === undefined ? [] : tavernHelperActiveWorldbookNames(helperState)) {
+    if (deletedHelperBooks.has(bookName)) continue
+    for (const entry of helperBooks[bookName] ?? []) {
+      helperEntries.push(tavernHelperWorldbookEntryToWorldbookEntry(bookName, entry))
+    }
+  }
+  const store = new MemoryWorldbookStore([...fixtureEntries, ...cardEntries, ...importedEntries, ...helperEntries])
   // Generate a debug/inspection artifact for the exact active combination.
   // This is a local operation: only ordinary green-light keys are written;
   // entry content stays in the authoritative store and is loaded after a hit.
@@ -4023,7 +4791,7 @@ function getMergedWorldbook(state: AppState, characterId: CharacterId | null): W
   // a character or external-worldbook switch.
   const currentKeyIndexPath = join(ABS_WORLDBOOK_INDEX_DIR, 'current_key-only.md')
   if (currentKeyIndexPath !== keyIndexPath) queueWorldbookKeyIndexWrite(currentKeyIndexPath, keyIndexMd)
-  process.stderr.write(`[getMergedWorldbook] char=${characterId ?? 'null'} imported=${state.importedWorldbooks.size} cfgDisabled=${disabledIds === null ? 'none(default enable all)' : [...disabledIds].join(',')} storeSize=${store.list().length} (fixture=${fixtureEntries.length} card=${cardEntries.length} imported=${importedEntries.length})\n`)
+  process.stderr.write(`[getMergedWorldbook] char=${characterId ?? 'null'} imported=${state.importedWorldbooks.size} helper=${helperEntries.length} cfgDisabled=${disabledIds === null ? 'none(default enable all)' : [...disabledIds].join(',')} storeSize=${store.list().length} (fixture=${fixtureEntries.length} card=${cardEntries.length} imported=${importedEntries.length})\n`)
   return store
 }
 
@@ -4145,6 +4913,9 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
   const host = options.host ?? DEFAULT_HOST
   const port = options.port ?? DEFAULT_PORT
   const state = buildState(options, process.env)
+  // Extension updates are deliberately not automatic. Loading the local
+  // registry is cheap and keeps the bundled adapters usable when offline.
+  await state.extensions.load()
   // `--mock` is an explicit test/runtime choice. Do not let the persisted
   // real-provider config silently override it during boot.
   if (options.forceMock !== true) await loadApiConfig(state)
@@ -4339,11 +5110,30 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
         }
       }
 
+      // ─── SillyTavern-compatible extension adapters / manual updates ───
+      if (method === 'GET' && url.pathname === '/api/extensions') return handleListExtensions(state, res)
+      if (method === 'POST' && url.pathname === '/api/extensions/check') return await handleCheckExtensions(state, req, res)
+      if (method === 'POST' && url.pathname === '/api/extensions/update') return await handleUpdateExtension(state, req, res)
+      if (method === 'POST' && url.pathname === '/api/extensions/activate') return await handleActivateExtension(state, req, res)
+      if (method === 'POST' && url.pathname === '/api/extensions/rollback') return await handleRollbackExtension(state, req, res)
+
       // ─── 会话管理:trace 回看 / 重命名 / 删除 / 删单条消息 ───
       {
         const m = /^\/api\/sessions\/([^/]+)\/traces$/u.exec(url.pathname)
         if (method === 'GET' && m !== null) {
           return await handleGetSessionTraces(state, decodeURIComponent(m[1] ?? ''), req, res)
+        }
+      }
+      {
+        const m = /^\/api\/sessions\/([^/]+)\/message\/([^/]+)\/swipe$/u.exec(url.pathname)
+        if (method === 'PUT' && m !== null) {
+          return await handlePutMessageSwipe(
+            state,
+            decodeURIComponent(m[1] ?? ''),
+            decodeURIComponent(m[2] ?? ''),
+            req,
+            res,
+          )
         }
       }
       {
@@ -4359,6 +5149,21 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
         const m = /^\/api\/sessions\/([^/]+)\/greeting$/u.exec(url.pathname)
         if (method === 'PUT' && m !== null) {
           return await handlePutSessionGreeting(state, decodeURIComponent(m[1] ?? ''), req, res)
+        }
+      }
+      {
+        const m = /^\/api\/sessions\/([^/]+)\/variables$/u.exec(url.pathname)
+        if (m !== null) {
+          const sid = decodeURIComponent(m[1] ?? '')
+          if (method === 'GET') return await handleGetSessionVariables(state, sid, res)
+          if (method === 'PUT' || method === 'POST') return await handlePutSessionVariables(state, sid, req, res)
+        }
+      }
+      {
+        const m = /^\/api\/sessions\/([^/]+)\/tavern-helper$/u.exec(url.pathname)
+        if (method === 'GET' && m !== null) return handleGetSessionTavernHelper(state, decodeURIComponent(m[1] ?? ''), res)
+        if (method === 'PUT' || method === 'POST') {
+          if (m !== null) return await handlePutSessionTavernHelper(state, decodeURIComponent(m[1] ?? ''), req, res)
         }
       }
       {

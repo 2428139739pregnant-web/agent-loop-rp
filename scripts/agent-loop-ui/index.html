@@ -22,8 +22,25 @@
     import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
     import { createRoot } from 'react-dom/client'
     import { marked } from 'marked'
+    import * as AgentRpZod from 'https://esm.sh/zod@4.1.12'
+    import * as AgentRpYaml from 'https://esm.sh/yaml@2.9.0'
+    import * as AgentRpVue from 'https://esm.sh/vue@3.5.20'
+    import AgentRpLodash from 'https://esm.sh/lodash@4.17.21'
 
     const h = React.createElement
+    // JS-Slash-Runner's predefine.js inherits shared browser libraries from
+    // the SillyTavern host before any card module is evaluated. Keep the same
+    // ordering here; the iframe runtime reads this synchronously during its
+    // first inline script.
+    window.__agentRpSharedLibraries = Object.freeze({ z: AgentRpZod, YAML: AgentRpYaml, Vue: AgentRpVue, _: AgentRpLodash })
+    // These are the globals that JS-Slash-Runner's predefine.js normally
+    // inherits from SillyTavern. Keep them on the host as well as in the
+    // iframe so third-party modules that explicitly read window.parent see
+    // the same dependency surface.
+    window.z = AgentRpZod
+    window.YAML = AgentRpYaml
+    window.Vue = AgentRpVue
+    window._ = AgentRpLodash
 
     // ─── Wire types ──────────────────────────────────────────────────────
     /**
@@ -38,7 +55,7 @@
      * @property {{name:string, entryCount:number, enabledCount:number} | null} lorebook
      */
     /** @typedef {{id:string, name:string, createdAt:string, updatedAt:string, hasLorebook:boolean, lorebookName:string|null, personaPreview:string, greetingCount:number}} CharacterSummary */
-    /** @typedef {{role:'user'|'assistant'|'system', content:string}} HistoryMessage */
+    /** @typedef {{role:'user'|'assistant'|'system', content:string, swipe_id?:number, swipes?:string[], swipe_info?:Array<Object>}} HistoryMessage */
     /** @typedef {{sessionId:string, label:string, characterName:string, createdAt:string, turnCount:number}} SessionInfo */
     /** @typedef {{sourceId:string, name:string|null, keys:string[], secondaryKeys:string[], content:string, enabled:boolean, insertionOrder:number, selective:boolean, constant:boolean, caseSensitive:boolean, matchWholeWords:boolean, useRegex:boolean, position:'before_char'|'after_char', priority:number|null, selectiveLogic?:string, probability?:number, useProbability?:boolean, stPosition?:number}} WBEntry */
     /** @typedef {{id:string, name:string, entryCount:number, enabledCount:number}} WBBook */
@@ -185,6 +202,120 @@
       )
     }
 
+    // ─── Extension adapters panel ─────────────────────────────────────────
+    // The upstream bundles are never auto-executed. The adapter shipped with
+    // this app remains active; this panel only checks/downloads an allowlisted
+    // upstream snapshot, matching ST's manual extension update workflow.
+    function ExtensionsPanel(/** @type {{onError?: (e:string)=>void}} */ props) {
+      const [extensions, setExtensions] = useState([])
+      const [loading, setLoading] = useState(true)
+      const [checking, setChecking] = useState(false)
+      const [actionId, setActionId] = useState(null)
+      const [error, setError] = useState(null)
+      const refresh = useCallback(async () => {
+        setLoading(true)
+        try {
+          const r = await apiGet('/api/extensions')
+          setExtensions(Array.isArray(r.extensions) ? r.extensions : [])
+        } catch (err) {
+          const message = String(err.message || err)
+          setError(message)
+          props.onError?.(message)
+        } finally { setLoading(false) }
+      }, [props])
+      useEffect(() => { void refresh() }, [refresh])
+      const check = async () => {
+        setChecking(true); setError(null)
+        try {
+          const r = await apiPost('/api/extensions/check', {})
+          if (Array.isArray(r.extensions)) setExtensions(r.extensions)
+        } catch (err) {
+          const message = String(err.message || err)
+          setError(message); props.onError?.(message)
+        } finally { setChecking(false) }
+      }
+      const update = async (id) => {
+        setActionId(id); setError(null)
+        try {
+          const r = await apiPost('/api/extensions/update', { id })
+          if (r.status) setExtensions((prev) => prev.map((item) => item.id === id ? r.status : item))
+        } catch (err) {
+          const message = String(err.message || err)
+          setError(message); props.onError?.(message)
+        } finally { setActionId(null) }
+      }
+      const activate = async (id, version) => {
+        setActionId(`${id}:${version}`); setError(null)
+        try {
+          const r = await apiPost('/api/extensions/activate', { id, version })
+          if (r.status) setExtensions((prev) => prev.map((item) => item.id === id ? r.status : item))
+        } catch (err) {
+          const message = String(err.message || err)
+          setError(message); props.onError?.(message)
+        } finally { setActionId(null) }
+      }
+      const rollback = async (id) => {
+        setActionId(`${id}:rollback`); setError(null)
+        try {
+          const r = await apiPost('/api/extensions/rollback', { id })
+          if (r.status) setExtensions((prev) => prev.map((item) => item.id === id ? r.status : item))
+        } catch (err) {
+          const message = String(err.message || err)
+          setError(message); props.onError?.(message)
+        } finally { setActionId(null) }
+      }
+      const statusLabel = (item) => item.adapterStatus === 'update-available'
+        ? '有更新' : item.adapterStatus === 'installed' ? '已安装' : item.adapterStatus === 'error' ? '检查失败' : '内置适配器'
+      return h('div', { className: 'panel extensions-panel' },
+        h('div', { className: 'panel-head' },
+          h('h2', null, '扩展兼容层'),
+          h('button', { className: 'mini', onClick: check, disabled: checking || loading }, checking ? '检查中…' : '检查更新'),
+        ),
+        h('div', { className: 'hint' }, '底层适配酒馆助手与提示词模板；更新只在你点击“手动更新”后下载，不会在启动时偷偷替换运行时代码。'),
+        loading
+          ? h('div', { className: 'list-empty' }, '加载中…')
+          : h('div', { className: 'extension-list' }, extensions.map((item) => h('div', { key: item.id, className: 'extension-card' },
+              h('div', { className: 'extension-card-head' },
+                h('div', null,
+                  h('div', { className: 'name' }, item.displayName),
+                  h('div', { className: 'sub' }, item.repository),
+                ),
+                h('span', { className: `badge extension-status-${item.adapterStatus}` }, statusLabel(item)),
+              ),
+              h('div', { className: 'extension-meta' },
+                h('span', null, `适配器 ${item.adapterVersion}`),
+                h('span', null, `上游 ${item.availableVersion || item.installedVersion || '未检查'}`),
+                item.activeVersion ? h('span', null, `当前 ${item.activeVersion}`) : null,
+              ),
+              h('div', { className: 'hint' }, (item.capabilities || []).join(' · ')),
+              h('div', { className: 'row extension-actions' },
+                h('a', { href: item.homePage, target: '_blank', rel: 'noreferrer' }, '打开上游'),
+                h('button', {
+                  className: 'mini', onClick: () => { void update(item.id) },
+                  disabled: actionId !== null || item.adapterStatus === 'installed' && item.availableVersion === item.installedVersion,
+                }, actionId === item.id ? '下载中…' : '手动更新'),
+                h('button', {
+                  className: 'mini', onClick: () => { void rollback(item.id) },
+                  disabled: actionId !== null || !Array.isArray(item.versions) || item.versions.length < 2,
+                  title: '切换到最近一次安装的其他版本',
+                }, actionId === `${item.id}:rollback` ? '回滚中…' : '回滚'),
+              ),
+              Array.isArray(item.versions) && item.versions.length > 0
+                ? h('div', { className: 'extension-versions' },
+                    h('span', { className: 'hint' }, '已保存版本：'),
+                    ...item.versions.map((version) => h('button', {
+                      key: version.version, className: `mini${item.activeVersion === version.version ? ' active' : ''}`,
+                      disabled: actionId !== null || item.activeVersion === version.version,
+                      onClick: () => { void activate(item.id, version.version) },
+                      title: `激活 ${version.version}`,
+                    }, item.activeVersion === version.version ? `${version.version}（当前）` : version.version)),
+                  )
+                : null,
+            ))),
+        error ? h('div', { className: 'error-banner' }, error) : null,
+      )
+    }
+
     // ─── API config panel ─────────────────────────────────────────────────
     function ApiConfigPanel(/** @type {{onConfigChange?: () => void}} */ props) {
       const [cfg, setCfg] = useState(/** @type {ApiConfigView} */({
@@ -224,7 +355,7 @@
             applyPpSettingsResponse(r)
           } catch { /* ignore */ }
         })()
-      }, [])
+      }, [currentSessionId])
       useEffect(() => {
         (async () => {
           try {
@@ -232,7 +363,7 @@
             if (r && typeof r === 'object') setMvuSettings((prev) => ({ ...prev, ...r }))
           } catch (err) { setError(String(err.message || err)) }
         })()
-      }, [])
+      }, [currentSessionId])
       useEffect(() => {
         (async () => {
           try {
@@ -710,15 +841,512 @@
       return doc.body.innerHTML
     }
 
-    // ─── 角色卡 HTML 前端隔离渲染 ────────────────────────────────────────
-    // 角色卡 Regex 常把 ```html ... ``` 或带 <style>/<script> 的片段作为
-    // markdownOnly 替换结果。直接交给 marked 会变成代码块，不能得到 ST
-    // 的状态栏/仪表盘效果；这里把完整前端片段放入无 same-origin 的 sandbox
-    // iframe。它可以运行卡片自己的 DOM 脚本，但不能访问宿主页面、Cookie、
-    // localStorage 或父页面 DOM。
-    const FRAME_SCRIPT_OPEN = '<scr' + 'ipt>'
-    const FRAME_SCRIPT_CLOSE = '</scr' + 'ipt>'
+    // Character-card Regex output often arrives as a Markdown fence or as a
+    // body-only document. Normalize those display forms before parsing the
+    // card into the iframe document, while the outer message remains the
+    // SillyTavern-style single scrolling surface.
+    function normalizeCardFrontendSource(value) {
+      let source = String(value || '').trim()
+      const fenced = source.match(/^ {0,3}(\x60{3,}|~{3,})[^\r\n]*[\r\n]+([\s\S]*?)[\r\n]+ {0,3}\1[ \t]*$/u)
+      if (fenced) source = String(fenced[2] || '').trim()
+      const body = source.match(/^<body(?:\s[^>]*)?>([\s\S]*)<\/body>\s*$/iu)
+      return body ? String(body[1] || '').trim() : source
+    }
 
+    // Ported from JS-Slash-Runner's iframe renderer.  SillyTavern does not
+    // invent a card layout here: it gives the frontend a clean document
+    // boundary, removes iframe-local scrollbars, and lets the card decide
+    // its own visual layout.  Only min-height values expressed in vh are
+    // redirected to the extension viewport variable, matching the upstream
+    // replaceVhInContent behavior.
+    function replaceCardViewportMinHeight(value) {
+      const source = String(value || '')
+      const hasCssMinVh = /min-height\s*:\s*[^;{}]*\d+(?:\.\d+)?vh/giu.test(source)
+      const hasInlineMinVh = /style\s*=\s*(["'])[\s\S]*?min-height\s*:\s*[^;]*?\d+(?:\.\d+)?vh[\s\S]*?\1/giu.test(source)
+      const hasJsMinVh = /(\.style\.minHeight\s*=\s*(["']))([\s\S]*?vh)(\2)/giu.test(source)
+        || /(setProperty\s*\(\s*(["'])min-height\2\s*,\s*(["']))([\s\S]*?vh)(\3\s*\))/giu.test(source)
+      if (!hasCssMinVh && !hasInlineMinVh && !hasJsMinVh) return source
+      const convert = (item) => item.replace(/(\d+(?:\.\d+)?)vh\b/giu, (match, raw) => {
+        const parsed = Number.parseFloat(raw)
+        if (!Number.isFinite(parsed)) return match
+        const viewport = 'var(--TH-viewport-height)'
+        return parsed === 100 ? viewport : `calc(${viewport} * ${parsed / 100})`
+      })
+      let result = source.replace(/(min-height\s*:\s*)([^;{}]*?\d+(?:\.\d+)?vh)(?=\s*[;}])/giu, (_m, prefix, value) => `${prefix}${convert(value)}`)
+      result = result.replace(/(style\s*=\s*(["']))([^"']*?)(\2)/giu, (match, prefix, quote, style, suffix) => {
+        if (!/min-height\s*:\s*[^;]*vh/iu.test(style)) return match
+        return `${prefix}${style.replace(/(min-height\s*:\s*)([^;]*?\d+(?:\.\d+)?vh)/giu, (_m, p1, p2) => `${p1}${convert(p2)}`)}${suffix}`
+      })
+      result = result.replace(/(\.style\.minHeight\s*=\s*(["']))([\s\S]*?)(\2)/giu, (match, prefix, quote, value, suffix) => /\b\d+(?:\.\d+)?vh\b/iu.test(value) ? `${prefix}${convert(value)}${suffix}` : match)
+      result = result.replace(/(setProperty\s*\(\s*(["'])min-height\2\s*,\s*(["']))([\s\S]*?)(\3\s*\))/giu, (match, prefix, q1, q2, value, suffix) => /\b\d+(?:\.\d+)?vh\b/iu.test(value) ? `${prefix}${convert(value)}${suffix}` : match)
+      return result
+    }
+
+    /* Legacy direct-DOM card runtime intentionally disabled.
+       The active path below is the iframe host, which mirrors Tavern Helper's
+       document boundary and prevents card CSS/scripts from resizing the chat.
+       Keep this block as history for one release while integrations migrate. */
+    /*
+    // ─── SillyTavern-style message surface helpers ──────────────────────
+    // ST keeps the formatted result inside the message text node and lets
+    // the outer chat scroller own the viewport.  The executable frontend
+    // extension used by Tavern Helper is hosted in a child document below;
+    // these helpers are retained for parsing/compatibility utilities shared
+    // by imported cards and are not allowed to mount scripts in the host DOM.
+    function cardCssSplitSelectors(value) {
+      const result = []
+      let start = 0
+      let quote = ''
+      let escaped = false
+      let parentheses = 0
+      let brackets = 0
+      for (let i = 0; i < value.length; i += 1) {
+        const char = value[i]
+        if (quote) {
+          if (escaped) escaped = false
+          else if (char === '\\') escaped = true
+          else if (char === quote) quote = ''
+          continue
+        }
+        if (char === '"' || char === "'") { quote = char; continue }
+        if (char === '(') parentheses += 1
+        else if (char === ')') parentheses = Math.max(0, parentheses - 1)
+        else if (char === '[') brackets += 1
+        else if (char === ']') brackets = Math.max(0, brackets - 1)
+        else if (char === ',' && parentheses === 0 && brackets === 0) {
+          result.push(value.slice(start, i).trim())
+          start = i + 1
+        }
+      }
+      result.push(value.slice(start).trim())
+      return result.filter(Boolean)
+    }
+
+    function cardCssRewriteSelector(selector, scope) {
+      let value = selector.trim()
+      if (!value) return ''
+      // A full card document commonly styles html/body/:root.  In the direct
+      // message surface those names refer to the card host itself.
+      if (/(^|[^\w-])(?:html|body|:root)(?=$|[^\w-])/iu.test(value)) {
+        value = value.replace(/(^|[^\w-])(?:html|body|:root)(?=$|[^\w-])/giu, (_match, prefix) => prefix + scope)
+        while (value.includes(scope + ' ' + scope)) value = value.replace(scope + ' ' + scope, scope)
+        return value
+      }
+      return `${scope} ${value}`
+    }
+
+    function cardCssScopeRules(value, scope) {
+      const source = String(value || '')
+      let output = ''
+      let cursor = 0
+      let quote = ''
+      let escaped = false
+      let comment = false
+      while (cursor < source.length) {
+        let open = -1
+        for (let i = cursor; i < source.length; i += 1) {
+          const char = source[i]
+          const next = source[i + 1]
+          if (comment) { if (char === '*' && next === '/') { comment = false; i += 1 } continue }
+          if (quote) {
+            if (escaped) escaped = false
+            else if (char === '\\') escaped = true
+            else if (char === quote) quote = ''
+            continue
+          }
+          if (char === '/' && next === '*') { comment = true; i += 1; continue }
+          if (char === '"' || char === "'") { quote = char; continue }
+          if (char === '{') { open = i; break }
+          if (char === ';') {
+            // @import/@charset declarations do not have a selector block.
+            output += source.slice(cursor, i + 1)
+            cursor = i + 1
+            open = -2
+            break
+          }
+        }
+        if (open === -2) continue
+        if (open < 0) { output += source.slice(cursor); break }
+
+        let close = -1
+        let depth = 1
+        quote = ''
+        escaped = false
+        comment = false
+        for (let i = open + 1; i < source.length; i += 1) {
+          const char = source[i]
+          const next = source[i + 1]
+          if (comment) { if (char === '*' && next === '/') { comment = false; i += 1 } continue }
+          if (quote) {
+            if (escaped) escaped = false
+            else if (char === '\\') escaped = true
+            else if (char === quote) quote = ''
+            continue
+          }
+          if (char === '/' && next === '*') { comment = true; i += 1; continue }
+          if (char === '"' || char === "'") { quote = char; continue }
+          if (char === '{') depth += 1
+          else if (char === '}' && --depth === 0) { close = i; break }
+        }
+        if (close < 0) { output += source.slice(cursor); break }
+
+        const prelude = source.slice(cursor, open)
+        const body = source.slice(open + 1, close)
+        const trimmedPrelude = prelude.trim()
+        if (/^@(media|supports|container|layer|document|scope)\b/iu.test(trimmedPrelude)) {
+          output += `${prelude}{${cardCssScopeRules(body, scope)}}`
+        } else if (/^@(keyframes|-webkit-keyframes|font-face|page|property|counter-style|starting-style)\b/iu.test(trimmedPrelude)) {
+          output += `${prelude}{${body}}`
+        } else if (/^@/u.test(trimmedPrelude)) {
+          // Unknown at-rules are safer left intact than mangled.  This keeps
+          // card-specific declarations usable while regular selectors remain
+          // isolated from the application shell.
+          output += `${prelude}{${body}}`
+        } else {
+          const selectors = cardCssSplitSelectors(prelude).map((item) => cardCssRewriteSelector(item, scope)).filter(Boolean)
+          output += `${selectors.join(',\n')}{${body}}`
+        }
+        cursor = close + 1
+      }
+      return output
+    }
+
+    function cardFrontendSourceParts(source, scope) {
+      let value = normalizeCardFrontendSource(source)
+        .replace(/(?:window\s*\.\s*)?parent\s*\.\s*document\b/giu, 'document')
+        .replace(/(?:window\s*\.\s*)?parent\s*\.\s*__qfpSetTheme\b/giu, 'window.__qfpSetTheme')
+        .replace(/<(iframe|object|embed|base)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, '')
+        .replace(/<(iframe|object|embed|base)\b[^>]*\/?>/giu, '')
+        .replace(/<script\b[^>]*\bsrc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)[^>]*>[\s\S]*?<\/script\s*>/giu, '')
+        .replace(/<script\b[^>]*\bsrc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)[^>]*\/?\s*>/giu, '')
+        .replace(/\s(?:href|src)\s*=\s*(["'])\s*javascript:[\s\S]*?\1/giu, '')
+      const doc = new DOMParser().parseFromString(value, 'text/html')
+      const styles = []
+      const scripts = []
+      const nodes = []
+      for (const style of [...doc.head.querySelectorAll('style')]) styles.push(cardCssScopeRules(style.textContent || '', scope))
+      for (const node of [...doc.body.childNodes]) {
+        if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'STYLE') {
+          styles.push(cardCssScopeRules(node.textContent || '', scope))
+        } else if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'SCRIPT') {
+          if (!node.hasAttribute('src')) scripts.push({ type: node.getAttribute('type') || '', text: node.textContent || '' })
+        } else {
+          const clone = node.cloneNode(true)
+          for (const unsafe of [...clone.querySelectorAll?.('iframe,object,embed,base,link,meta') || []]) unsafe.remove()
+          nodes.push(clone)
+        }
+      }
+      // A script may be nested inside a structural fragment.  Move it to the
+      // script list and remove it from cloned markup; it will be reinserted as
+      // a real script node after the corresponding message content exists.
+      for (const node of [...nodes]) {
+        if (node.nodeType !== Node.ELEMENT_NODE) continue
+        for (const script of [...node.querySelectorAll('script')]) {
+          if (!script.hasAttribute('src')) scripts.push({ type: script.getAttribute('type') || '', text: script.textContent || '' })
+          script.remove()
+        }
+      }
+      return { styles, nodes, scripts }
+    }
+
+    function activeCardRuntime() {
+      const root = window.__agentRpActiveCardRoot
+      return root?.__agentRpCardRuntime || null
+    }
+
+    function cardRuntimeWrapper(items) {
+      const list = Array.from(items || [])
+      const api = { length: list.length }
+      list.forEach((element, index) => { api[index] = element })
+      api.each = (fn) => { list.forEach((element, index) => fn.call(element, index, element)); return api }
+      api.find = (selector) => cardRuntimeWrapper(list.flatMap((element) => [...element.querySelectorAll(selector)]))
+      api.parent = () => cardRuntimeWrapper(list.map((element) => element.parentElement).filter(Boolean))
+      api.siblings = () => cardRuntimeWrapper(list.flatMap((element) => element.parentElement ? [...element.parentElement.children].filter((item) => item !== element) : []))
+      api.addClass = (value) => api.each((_i, element) => String(value || '').split(/\s+/u).filter(Boolean).forEach((name) => element.classList.add(name)))
+      api.removeClass = (value) => api.each((_i, element) => String(value || '').split(/\s+/u).filter(Boolean).forEach((name) => element.classList.remove(name)))
+      api.toggleClass = (value) => api.each((_i, element) => String(value || '').split(/\s+/u).filter(Boolean).forEach((name) => element.classList.toggle(name)))
+      api.hasClass = (value) => Boolean(list[0]?.classList.contains(String(value || '')))
+      api.html = (value) => value === undefined ? (list[0]?.innerHTML || '') : api.each((_i, element) => { element.innerHTML = String(value) })
+      api.text = (value) => value === undefined ? (list[0]?.textContent || '') : api.each((_i, element) => { element.textContent = String(value) })
+      api.val = (value) => value === undefined ? (list[0]?.value || '') : api.each((_i, element) => { element.value = String(value) })
+      api.attr = (key, value) => value === undefined ? list[0]?.getAttribute(key) : api.each((_i, element) => element.setAttribute(key, String(value)))
+      api.data = (key, value) => value === undefined ? list[0]?.dataset?.[key] : api.each((_i, element) => { element.dataset[key] = String(value) })
+      api.empty = () => api.each((_i, element) => element.replaceChildren())
+      api.append = (value) => api.each((_i, element) => {
+        if (typeof value === 'string') element.insertAdjacentHTML('beforeend', value)
+        else if (value?.nodeType) element.append(value)
+      })
+      api.sortable = () => api
+      return api
+    }
+
+    function createCardDocumentProxy(root) {
+      const target = document
+      return new Proxy(target, {
+        get(documentTarget, property) {
+          if (property === 'body' || property === 'documentElement' || property === 'head') return root
+          if (property === 'querySelector') return root.querySelector.bind(root)
+          if (property === 'querySelectorAll') return root.querySelectorAll.bind(root)
+          if (property === 'getElementById') return (id) => root.querySelector('#' + CSS.escape(String(id)))
+          if (property === 'getElementsByClassName') return root.getElementsByClassName.bind(root)
+          if (property === 'getElementsByTagName') return root.getElementsByTagName.bind(root)
+          if (property === 'addEventListener') return (type, listener, options) => {
+            if ((type === 'DOMContentLoaded' || type === 'load') && documentTarget.readyState !== 'loading') {
+              queueMicrotask(() => listener.call(root, new Event(type)))
+              return
+            }
+            root.addEventListener(type, listener, options)
+          }
+          if (property === 'removeEventListener') return root.removeEventListener.bind(root)
+          const value = Reflect.get(documentTarget, property, documentTarget)
+          return typeof value === 'function' ? value.bind(documentTarget) : value
+        },
+      })
+    }
+
+    function createCardRuntimeQuery(root) {
+      const query = (value) => {
+        if (typeof value === 'function') {
+          if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', value, { once: true })
+          else queueMicrotask(value)
+          return cardRuntimeWrapper([])
+        }
+        if (value?.nodeType) return cardRuntimeWrapper([value])
+        if (Array.isArray(value)) return cardRuntimeWrapper(value)
+        try { return cardRuntimeWrapper(root.querySelectorAll(String(value || ''))) } catch { return cardRuntimeWrapper([]) }
+      }
+      return query
+    }
+
+    function createCardScriptContext(root, runtime) {
+      const query = createCardRuntimeQuery(root)
+      const activate = (fn) => (...args) => {
+        window.__agentRpActiveCardRoot = root
+        return fn(...args)
+      }
+      const eventOn = activate(window.eventOn)
+      const eventOnce = activate(window.eventOnce)
+      const eventEmit = activate(window.eventEmit)
+      const getAllVariables = () => runtime.variables
+      const getVariable = (path, fallback) => window._.get(runtime.variables, path, fallback)
+      const replaceMvuData = (value) => {
+        window.__agentRpActiveCardRoot = root
+        return window.Mvu.replaceMvuData(value)
+      }
+      const mvu = {
+        events: window.Mvu.events,
+        getMvuData: getAllVariables,
+        getVariable,
+        replaceMvuData,
+        isDuringExtraAnalysis: () => false,
+      }
+      const tavernHelper = {
+        getAllVariables: () => runtime.helperVariables,
+        getVariable: (path, fallback) => window._.get(runtime.helperVariables, path, fallback),
+        replaceVariables: replaceMvuData,
+        eventOn,
+        eventOnce,
+        eventEmit,
+        waitGlobalInitialized: async () => undefined,
+      }
+      return {
+        runtime,
+        document: createCardDocumentProxy(root),
+        query,
+        $: query,
+        jQuery: query,
+        _: window._,
+        TavernHelper: tavernHelper,
+        SillyTavern: { eventSource: { on: eventOn, once: eventOnce, emit: eventEmit }, getContext: function () { return this }, chat: [] },
+        getAllVariables,
+        getVariable,
+        waitGlobalInitialized: async () => undefined,
+        eventOn,
+        eventOnce,
+        eventEmit,
+        Mvu: mvu,
+        errorCatched: window.errorCatched,
+      }
+    }
+
+    function cardFrontendScriptPrelude(contextId) {
+      const encoded = JSON.stringify(contextId)
+      return [
+        'const __agentRpCardContext=window.__agentRpCardContexts.get(' + encoded + ');',
+        'const document=__agentRpCardContext.document;',
+        'const $=__agentRpCardContext.$;',
+        'const jQuery=__agentRpCardContext.jQuery;',
+        'const _=__agentRpCardContext._;',
+        'const TavernHelper=__agentRpCardContext.TavernHelper;',
+        'const SillyTavern=__agentRpCardContext.SillyTavern;',
+        'const getAllVariables=__agentRpCardContext.getAllVariables;',
+        'const getVariable=__agentRpCardContext.getVariable;',
+        'const waitGlobalInitialized=__agentRpCardContext.waitGlobalInitialized;',
+        'const eventOn=__agentRpCardContext.eventOn;',
+        'const eventOnce=__agentRpCardContext.eventOnce;',
+        'const eventEmit=__agentRpCardContext.eventEmit;',
+        'const Mvu=__agentRpCardContext.Mvu;',
+        'const errorCatched=__agentRpCardContext.errorCatched;',
+        'let musicCtrl;',
+      ].join('\n')
+    }
+
+    function installCardRuntimeBridge() {
+      if (window.__agentRpCardBridgeInstalled) return
+      window.__agentRpCardBridgeInstalled = true
+      window.__agentRpCardListeners = new Map()
+      window.__agentRpCardContexts = new Map()
+      window.__qfpSetTheme = (theme) => {
+        const runtime = activeCardRuntime()
+        if (runtime && typeof theme === 'string' && theme) runtime.root.dataset.theme = theme
+        window.dispatchEvent(new CustomEvent('agent-rp-theme-change', { detail: { theme } }))
+      }
+      window.getAllVariables = () => activeCardRuntime()?.variables || { stat_data: {} }
+      window.getVariable = (path, fallback) => window._.get(window.getAllVariables(), path, fallback)
+      window._ = { get(object, path, fallback) {
+        const parts = Array.isArray(path) ? path : String(path || '').split('.')
+        let value = object
+        for (const part of parts) {
+          if (value === null || value === undefined) return fallback
+          value = value[part]
+        }
+        return value === undefined ? fallback : value
+      } }
+      window.eventOn = (type, listener) => {
+        const key = String(type)
+        const list = window.__agentRpCardListeners.get(key) || []
+        const entry = { listener, runtime: activeCardRuntime() }
+        list.push(entry)
+        window.__agentRpCardListeners.set(key, list)
+        const stop = () => window.__agentRpCardListeners.set(key, (window.__agentRpCardListeners.get(key) || []).filter((item) => item !== entry))
+        stop.stop = stop
+        return stop
+      }
+      window.eventOnce = (type, listener) => {
+        let stop
+        stop = window.eventOn(type, (...args) => { stop.stop(); return listener(...args) })
+        return stop
+      }
+      window.eventEmit = (type, ...args) => {
+        for (const entry of [...(window.__agentRpCardListeners.get(String(type)) || [])]) {
+          try {
+            if (entry.runtime?.root) window.__agentRpActiveCardRoot = entry.runtime.root
+            entry.listener(...args)
+          } catch (error) { console.error('[agent-rp Tavern Helper event]', error) }
+        }
+      }
+      window.Mvu = {
+        events: { VARIABLE_INITIALIZED: 'mag_variable_initialized', VARIABLE_UPDATE_STARTED: 'mag_variable_update_started', VARIABLE_UPDATE_ENDED: 'mvu-variable-update-ended' },
+        getMvuData: () => activeCardRuntime()?.variables || { stat_data: {} },
+        replaceMvuData: (value) => {
+          const runtime = activeCardRuntime()
+          if (!runtime) return Promise.resolve({ stat_data: {} })
+          runtime.variables = value?.stat_data ? value : { stat_data: value || {} }
+          runtime.onVariablesChange?.(runtime.variables)
+          window.eventEmit('mvu-variable-update-ended', runtime.variables)
+          return Promise.resolve(runtime.variables)
+        },
+        isDuringExtraAnalysis: () => false,
+      }
+      window.TavernHelper = {
+        getAllVariables: () => activeCardRuntime()?.helperVariables || {},
+        getVariable: (path, fallback) => window._.get(window.TavernHelper.getAllVariables(), path, fallback),
+        replaceVariables: window.Mvu.replaceMvuData,
+        eventOn: window.eventOn,
+        eventOnce: window.eventOnce,
+        eventEmit: window.eventEmit,
+        waitGlobalInitialized: async () => undefined,
+      }
+      window.SillyTavern = { eventSource: { on: window.eventOn, once: window.eventOnce, emit: window.eventEmit }, getContext: function () { return this }, chat: [] }
+      window.waitGlobalInitialized = async () => undefined
+      window.errorCatched = (fn) => function (...args) { try { return fn.apply(this, args) } catch (error) { console.error('[agent-rp card script]', error) } }
+      window.$ = (value) => {
+        const runtime = activeCardRuntime()
+        const root = runtime?.root || document
+        if (typeof value === 'function') { if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', value, { once: true }); else value(); return cardRuntimeWrapper([]) }
+        if (value?.nodeType) return cardRuntimeWrapper([value])
+        if (Array.isArray(value)) return cardRuntimeWrapper(value)
+        try { return cardRuntimeWrapper(root.querySelectorAll(String(value || ''))) } catch { return cardRuntimeWrapper([]) }
+      }
+      window.jQuery = window.$
+    }
+
+    function makeCardRuntime(root, mvuState, tavernHelperVariables, onVariablesChange) {
+      return {
+        root,
+        variables: mvuState?.stat_data ? mvuState : { stat_data: mvuState || {} },
+        helperVariables: tavernHelperVariables || {},
+        onVariablesChange,
+      }
+    }
+
+    function mountCardFrontend(root, source, runtime) {
+      installCardRuntimeBridge()
+      const scope = `[data-agent-rp-card="${root.dataset.agentRpCard}"]`
+      const parts = cardFrontendSourceParts(source, scope)
+      root.replaceChildren()
+      for (const cssText of parts.styles) {
+        const style = document.createElement('style')
+        style.dataset.agentRpCardStyle = 'true'
+        style.textContent = cssText
+        root.append(style)
+      }
+      window.__agentRpActiveCardRoot = root
+      for (const node of parts.nodes) root.append(node)
+      for (const [scriptIndex, scriptInfo] of parts.scripts.entries()) {
+        const contextId = root.dataset.agentRpCard + '-script-' + scriptIndex
+        window.__agentRpCardContexts.set(contextId, createCardScriptContext(root, runtime))
+        const script = document.createElement('script')
+        if (/^module$/iu.test(scriptInfo.type)) script.type = 'module'
+        const scriptText = String(scriptInfo.text || '').replace(/\bwindow\s*\.\s*document\b/gu, 'document')
+        script.textContent = cardFrontendScriptPrelude(contextId) + '\n' + scriptText
+        root.append(script)
+      }
+      window.__agentRpActiveCardRoot = root
+    }
+
+    function stabilizeCardIntrinsicLayout(root) {
+      if (!root) return
+      const isVisible = (element) => {
+        if (!element || element === root || element.tagName === 'STYLE' || element.tagName === 'SCRIPT') return false
+        const computed = getComputedStyle(element)
+        return computed.display !== 'none'
+          && computed.visibility !== 'hidden'
+          && computed.position !== 'fixed'
+          && computed.position !== 'sticky'
+      }
+      // Tavern cards often use html/body as a full-screen flex column and put
+      // the visual HUD in a flex:1 stage whose children are absolute.  In an
+      // iframe that stage borrowed the iframe viewport; in a message surface
+      // it has zero intrinsic height. Give only those zero-height flex stages
+      // a bounded minimum based on their real visual child geometry.
+      for (const element of [root, ...root.querySelectorAll('*')]) {
+        if (!isVisible(element)) continue
+        const computed = getComputedStyle(element)
+        if (Number.parseFloat(computed.flexGrow || '0') <= 0) continue
+        const rect = element.getBoundingClientRect()
+        if (rect.height > 2) continue
+        let needed = Math.max(element.scrollHeight || 0, element.offsetHeight || 0)
+        for (const child of element.querySelectorAll('*')) {
+          if (!isVisible(child)) continue
+          const childRect = child.getBoundingClientRect()
+          if (childRect.width <= 0 || childRect.height <= 0) continue
+          needed = Math.max(needed, childRect.height, childRect.bottom - rect.top)
+        }
+        if (needed > 2 && needed < 4000) {
+          const next = Math.ceil(needed) + 'px'
+          if (element.style.minHeight !== next) element.style.setProperty('min-height', next, 'important')
+        }
+      }
+    }
+
+    */
+    // ─── Tavern Helper-compatible iframe surface ────────────────────────
+    // SillyTavern itself sanitizes ordinary message HTML.  Cards that opt in
+    // to Tavern Helper/MVU, however, are extension frontends: they need a
+    // real document, their own CSS cascade and their own script realm.  Keep
+    // the message floor in the outer chat, but run this kind of frontend in
+    // one iframe per HTML segment, just like JS-Slash-Runner's iframe layer.
     function safeCardScriptJson(value) {
       try {
         return JSON.stringify(value ?? {})
@@ -730,249 +1358,501 @@
       } catch { return '{}' }
     }
 
-    function cardFrontendJqueryShim(mvuState, tavernHelperVariables = {}) {
+    function buildCardFrameRuntime(frameId, mvuState, helperVariables, helperScriptTrees = {}) {
+      const frame = safeCardScriptJson(frameId)
+      const variables = safeCardScriptJson(mvuState?.stat_data ? mvuState : { stat_data: mvuState || {} })
+      const helper = safeCardScriptJson(helperVariables || {})
+      const trees = safeCardScriptJson(helperScriptTrees || {})
       return `(function(){
-        window.__agentRpVariables={stat_data:${safeCardScriptJson(mvuState)}};
-        window.__agentRpTavernHelperVariables=${safeCardScriptJson(tavernHelperVariables)};
-        window.getAllVariables=function(){return window.__agentRpVariables};
-        // The iframe is the card's Tavern Helper surface. Keep the bridge
-        // local to this frame; no card code may reach the host page.
-        window.__qfpSetTheme=function(theme){
-          if(typeof theme==='string'&&theme)document.documentElement.dataset.theme=theme;
-          try{window.dispatchEvent(new CustomEvent('agent-rp-theme-change',{detail:{theme}}))}catch(_){/* old browsers */}
-        };
-        const __agentRpListeners=new Map();
-        const __agentRpOn=function(type,listener){
-          const key=String(type); const list=__agentRpListeners.get(key)||[]; list.push(listener); __agentRpListeners.set(key,list);
-          const stop=function(){const current=__agentRpListeners.get(key)||[];__agentRpListeners.set(key,current.filter((value)=>value!==listener))};
-          stop.stop=stop; return stop;
-        };
-        window.eventOn=__agentRpOn;
-        window.eventOnce=function(type,listener){let stop;stop=__agentRpOn(type,(...args)=>{stop.stop();return listener(...args)});return stop};
-        window.eventEmit=function(type,...args){for(const listener of [...(__agentRpListeners.get(String(type))||[])]){try{listener(...args)}catch(error){console.error('[agent-rp Tavern Helper event]',error)}}};
-        window.Mvu={
-          events:{VARIABLE_INITIALIZED:'mag_variable_initialized',VARIABLE_UPDATE_STARTED:'mag_variable_update_started',VARIABLE_UPDATE_ENDED:'mvu-variable-update-ended'},
-          getMvuData:function(){return window.__agentRpVariables},
-          replaceMvuData:function(value){window.__agentRpVariables=value?.stat_data?value:{stat_data:value||{}};window.eventEmit('mvu-variable-update-ended',{stat_data:window.__agentRpVariables.stat_data});return Promise.resolve(window.__agentRpVariables)},
-          isDuringExtraAnalysis:function(){return false},
-        };
-        window.getVariable=function(path,fallback){return window._.get(window.__agentRpVariables,path,fallback)};
-        window.TavernHelper={
-          // Card-owned Helper variables are a separate namespace from the
-          // MVU stat_data snapshot. Do not merge them: cards commonly use
-          // both APIs and an accidental merge changes lookup precedence.
-          getAllVariables:function(){return window.__agentRpTavernHelperVariables},
-          getVariable:function(path,fallback){return window._.get(window.__agentRpTavernHelperVariables,path,fallback)},
-          replaceVariables:window.Mvu.replaceMvuData,
-          eventOn:window.eventOn,
-          eventOnce:window.eventOnce,
-          eventEmit:window.eventEmit,
-          waitGlobalInitialized:async function(){return undefined},
-        };
-        window.SillyTavern={
-          eventSource:{on:window.eventOn,once:window.eventOnce,emit:window.eventEmit},
-          getContext:function(){return this},
-          chat:[],
-        };
-        window._={get:function(object,path,fallback){
-          const parts=Array.isArray(path)?path:String(path||'').split('.');
-          let value=object;
-          for(const part of parts){if(value===null||value===undefined)return fallback;value=value[part]}
-          return value===undefined?fallback:value;
-        }};
-        function wrap(items){
-          const list=Array.from(items||[]);
-          const api={length:list.length};
-          list.forEach((el,i)=>{api[i]=el});
-          api.each=function(fn){list.forEach((el,i)=>fn.call(el,i,el));return api};
-          api.find=function(sel){return wrap(list.flatMap(el=>Array.from(el.querySelectorAll(sel))))};
-          api.parent=function(){return wrap(list.map(el=>el.parentElement).filter(Boolean))};
-          api.siblings=function(){return wrap(list.flatMap(el=>el.parentElement?Array.from(el.parentElement.children).filter(x=>x!==el):[]))};
-          api.addClass=function(v){return api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.add(x)))};
-          api.removeClass=function(v){return api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.remove(x)))};
-          api.toggleClass=function(v){return api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.toggle(x)))};
-          api.hasClass=function(v){return !!list[0]?.classList.contains(String(v||''))};
-          api.html=function(v){if(v===undefined)return list[0]?.innerHTML||'';return api.each((_i,el)=>{el.innerHTML=String(v)})};
-          api.text=function(v){if(v===undefined)return list[0]?.textContent||'';return api.each((_i,el)=>{el.textContent=String(v)})};
-          api.val=function(v){if(v===undefined)return list[0]?.value||'';return api.each((_i,el)=>{el.value=String(v)})};
-          api.attr=function(k,v){if(v===undefined)return list[0]?.getAttribute(k);return api.each((_i,el)=>el.setAttribute(k,String(v)))};
-          api.data=function(k,v){if(v===undefined)return list[0]?.dataset?.[k];return api.each((_i,el)=>{el.dataset[k]=String(v)})};
-          api.empty=function(){return api.each((_i,el)=>{el.replaceChildren()})};
-          api.append=function(v){return api.each((_i,el)=>{if(typeof v==='string')el.insertAdjacentHTML('beforeend',v);else if(v?.nodeType)el.append(v)})};
-          api.sortable=function(){return api};
-          return api;
-        }
-        window.errorCatched=function(fn){return function(){try{return fn.apply(this,arguments)}catch(error){console.error('[agent-rp card script]',error)}}};
-        // Common ST/MVU lifecycle hooks used by character-card HUDs. The
-        // actual variable engine stays outside the sandbox; these no-op
-        // fallbacks let a static HUD finish its initial render instead of
-        // failing before updateHUD() when no MVU bridge is configured.
-        window.waitGlobalInitialized=async function(){return undefined};
-        window.$=function(value){
-          if(typeof value==='function'){
-            if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',value,{once:true});else value();
-            return wrap([]);
-          }
-          if(value&&value.nodeType)return wrap([value]);
-          if(Array.isArray(value))return wrap(value);
-          try{return wrap(document.querySelectorAll(String(value||'')))}catch(_){return wrap([])}
-        };
-        window.jQuery=window.$;
-      })();`
+  const __frameId=${frame};
+  let __variables=${variables};
+  let __helperVariables=${helper};
+  const __listeners=new Map();
+  const __parent=window.parent&&window.parent!==window?window.parent:null;
+  try{window.name=__frameId;if(window.frameElement&&window.frameElement.id!==__frameId)window.frameElement.id=__frameId;}catch{}
+  try{const __shared=__parent?.__agentRpSharedLibraries||{};if(__shared.z){window.z=__shared.z;globalThis.z=__shared.z;}if(__shared.YAML){window.YAML=__shared.YAML;globalThis.YAML=__shared.YAML;}if(__shared.Vue){window.Vue=__shared.Vue;globalThis.Vue=__shared.Vue;}if(__shared._){window._=__shared._;globalThis._=__shared._;}}catch{}
+  const __clone=value=>{try{return JSON.parse(JSON.stringify(value));}catch{return value;}};
+  const __scopeVariables={global:{},preset:{},character:__clone(__helperVariables),chat:__clone(__variables),message:{},script:{},extension:{}};
+  const __scriptVariables={};
+  const __messageVariablesById={};
+  const __initialScriptTrees=${trees};
+  const __scriptTrees={global:Array.isArray(__initialScriptTrees.global)?__clone(__initialScriptTrees.global):[],preset:Array.isArray(__initialScriptTrees.preset)?__clone(__initialScriptTrees.preset):[],character:Array.isArray(__initialScriptTrees.character)?__clone(__initialScriptTrees.character):[]};
+  const __get=(object,path,fallback)=>{
+    const parts=Array.isArray(path)?path:String(path||'').split('.'); let value=object;
+    for(const part of parts){if(value===null||value===undefined)return fallback; value=value[part];}
+    return value===undefined?fallback:value;
+  };
+  const __set=(object,path,value)=>{
+    const parts=Array.isArray(path)?path:String(path||'').split('.').filter(Boolean); if(!parts.length)return object;
+    let target=object; for(let i=0;i<parts.length-1;i++){if(!target[parts[i]]||typeof target[parts[i]]!=='object')target[parts[i]]={};target=target[parts[i]];}
+    target[parts[parts.length-1]]=value; return object;
+  };
+  const __emit=(type,...args)=>{for(const item of [...(__listeners.get(String(type))||[])]){try{item.fn(...args);}catch(error){console.error('[agent-rp card event]',error);}if(item.once)__listeners.get(String(type))?.delete(item);}};
+  const __on=(type,fn,once=false)=>{const key=String(type);const item={fn,once};const set=__listeners.get(key)||new Set();set.add(item);__listeners.set(key,set);return ()=>set.delete(item);};
+  const __post=(type,payload={})=>{try{window.parent.postMessage({type,id:__frameId,...payload},'*');}catch{} };
+  const __rpcPending=new Map();let __rpcSeq=0;
+  const __rpc=(method,payload={})=>new Promise((resolve,reject)=>{const requestId=__frameId+'-rpc-'+(++__rpcSeq);const timer=setTimeout(()=>{__rpcPending.delete(requestId);reject(new Error('Tavern Helper host RPC timed out: '+method));},15000);__rpcPending.set(requestId,{resolve,reject,timer});__post('agent-rp-card-rpc',{requestId,method,payload:__clone(payload)});});
+  const __serializeError=error=>({name:String(error?.name||'Error'),message:String(error?.message||error||''),stack:String(error?.stack||'').slice(0,4000)});
+  window.addEventListener('error',event=>{try{__post('agent-rp-card-script-error',{error:__serializeError(event.error||event.message),source:String(event.filename||''),line:Number(event.lineno||0),column:Number(event.colno||0)});}catch{} });
+  window.addEventListener('unhandledrejection',event=>{try{__post('agent-rp-card-script-error',{error:__serializeError(event.reason),source:'unhandledrejection'});}catch{} });
+  const __replace=value=>{
+    __variables=value?.stat_data?value:{stat_data:value||{}};
+    __scopeVariables.chat=__clone(__variables);
+    __emit('mag_variable_update_started',__variables);
+    __emit('mag_variable_update_ended',__variables);
+    __emit('mvu-variable-update-ended',__variables);
+    __post('agent-rp-card-variable-replace',{variables:__clone(__variables),option:__clone(__normalizeVariableOption())});
+    return Promise.resolve(__variables);
+  };
+  const __scopeType=option=>{
+    const type=typeof option==='string'?option:option?.type;
+    return type==='global'||type==='preset'||type==='character'||type==='chat'||type==='message'||type==='script'||type==='extension'?type:'chat';
+  };
+  const __rawVariableOption=option=>{
+    if(typeof option==='string')return {type:option};
+    return option&&typeof option==='object'&&!Array.isArray(option)?{...option}:{};
+  };
+  const __currentScriptId=()=>String(window.__agentRpCurrentScriptId||__frameId);
+  const __normalizeVariableOption=option=>{
+    const raw=__rawVariableOption(option);
+    const type=__scopeType(raw);
+    const normalized={...raw,type};
+    if(type==='message')normalized.message_id=raw.message_id===undefined?'latest':raw.message_id;
+    if(type==='script')normalized.script_id=raw.script_id===undefined?__currentScriptId():raw.script_id;
+    if(type==='extension'){
+      const extensionId=raw.extension_id;
+      if(typeof extensionId!=='string'||extensionId.trim()==='')throw new Error('Tavern Helper extension variables require extension_id');
+      normalized.extension_id=extensionId;
+    }
+    return normalized;
+  };
+  const __extensionId=option=>__normalizeVariableOption(option).extension_id;
+  const __messageVariables=option=>{
+    const source=__scopeVariables.message;
+    const messageId=option.message_id;
+    const cacheKey=messageId==='latest'?'latest':String(messageId);
+    if(Object.prototype.hasOwnProperty.call(__messageVariablesById,cacheKey))return __clone(__messageVariablesById[cacheKey]);
+    const indexed=source&&typeof source==='object'&&!Array.isArray(source)
+      ? source.__by_message_id||source.by_message_id : undefined;
+    if(indexed&&typeof indexed==='object'){
+      const key=messageId==='latest'?'latest':String(messageId);
+      return __clone(indexed[key]||{});
+    }
+    return __clone(source||{});
+  };
+  const __scopeValue=option=>{
+    const normalized=__normalizeVariableOption(option);
+    const type=normalized.type;
+    if(type==='extension')return __clone(__scopeVariables.extension[__extensionId(normalized)]||{});
+    if(type==='script')return __clone(__scriptVariables[String(normalized.script_id)]||{});
+    if(type==='message')return __messageVariables(normalized);
+    return __clone(__scopeVariables[type]||{});
+  };
+  const __applyScopeSnapshot=(scopes,mvuState,scripts)=>{
+    if(scopes&&typeof scopes==='object')for(const type of ['global','preset','character','chat','message'])if(scopes[type]&&typeof scopes[type]==='object')__scopeVariables[type]=__clone(scopes[type]);
+    if(scopes?.extension&&typeof scopes.extension==='object')__scopeVariables.extension=__clone(scopes.extension);
+    if(scripts&&typeof scripts==='object')for(const [scriptId,variables] of Object.entries(scripts))if(variables&&typeof variables==='object')__scriptVariables[String(scriptId)]=__clone(variables);
+    if(mvuState&&typeof mvuState==='object')__variables=mvuState?.stat_data?__clone(mvuState):{stat_data:__clone(mvuState)};
+    if(mvuState&&typeof mvuState==='object')__scopeVariables.chat=__clone(__variables);
+    else if(__scopeVariables.chat?.stat_data)__variables=__clone(__scopeVariables.chat);
+    if(__scopeVariables.character&&typeof __scopeVariables.character==='object')__helperVariables=__clone(__scopeVariables.character);
+    __emit('mag_variable_initialized',__variables);
+    __emit('mag_variable_update_ended',__variables);
+    __emit('mvu-variable-update-ended',__variables);
+  };
+  const __applyScriptTreeSnapshot=trees=>{
+    if(!trees||typeof trees!=='object')return;
+    for(const type of ['global','preset','character'])if(Array.isArray(trees[type]))__scriptTrees[type]=__clone(trees[type]);
+  };
+  const __scriptTreeType=option=>{
+    const type=typeof option==='string'?option:option?.type;
+    return type==='global'||type==='preset'||type==='character'?type:'character';
+  };
+  const __getScriptTrees=option=>__clone(__scriptTrees[__scriptTreeType(option)]||[]);
+  const __replaceScriptTrees=(trees,option)=>{
+    const type=__scriptTreeType(option);
+    if(!Array.isArray(trees))return Promise.reject(new Error('script trees must be an array'));
+    const next=__clone(trees); __scriptTrees[type]=next;
+    return __rpc('tavern-helper-mutation',{format:0,operation:'replace-script-trees',scope:type,trees:next}).then(()=>__clone(next));
+  };
+  const __updateScriptTreesWith=async(updater,option)=>{
+    const current=__getScriptTrees(option);
+    const next=typeof updater==='function'?await updater(current):current;
+    return __replaceScriptTrees(next,option);
+  };
+  const __variableMutationPayload=(variables,option)=>({
+    format:0,
+    scope:option.type,
+    variables:__clone(variables),
+    option:__clone(option),
+    ...(option.type==='message'?{message_id:option.message_id}:{}),
+    ...(option.type==='script'?{scriptId:option.script_id,script_id:option.script_id}:{}),
+    ...(option.type==='extension'?{extension_id:option.extension_id}:{}),
+  });
+  const __getVariables=option=>{
+    const normalized=__normalizeVariableOption(option);
+    __post('agent-rp-card-variable-read',{option:__clone(normalized)});
+    return __scopeValue(normalized);
+  };
+  const __replaceVariables=(value,option)=>{
+    const normalized=__normalizeVariableOption(option);
+    const type=normalized.type;
+    const next=value&&typeof value==='object'&&!Array.isArray(value)?__clone(value):{};
+    if(type==='extension'){
+      const extensionId=__extensionId(normalized);
+      __scopeVariables.extension[extensionId]=next;
+    }else if(type==='script')__scriptVariables[String(normalized.script_id)]=next;
+    else if(type==='message'){
+      const messageKey=normalized.message_id==='latest'?'latest':String(normalized.message_id);
+      __messageVariablesById[messageKey]=next;
+      if(messageKey==='latest')__scopeVariables.message=next;
+    }
+    else __scopeVariables[type]=next;
+    if(type==='chat')return __replace(next);
+    const payload=__variableMutationPayload(next,normalized);
+    return __rpc('tavern-helper-mutation',payload).then(()=>next);
+  };
+  const __updateVariablesWith=async(updater,option)=>{
+    const normalized=__normalizeVariableOption(option);
+    const current=__scopeValue(normalized);
+    const next=typeof updater==='function'?await updater(current):current;
+    return __replaceVariables(next,normalized);
+  };
+  const __insertOrAssignVariables=(value,option)=>__replaceVariables(__merge(__scopeValue(option),value||{}),option);
+  const __insertVariables=(value,option)=>{
+    const current=__scopeValue(option); const additions=value&&typeof value==='object'?value:{};
+    for(const [key,item] of Object.entries(additions))if(!(key in current))current[key]=__clone(item);
+    return __replaceVariables(current,option);
+  };
+  const __deleteVariable=(path,option)=>{
+    const normalized=__normalizeVariableOption(option);
+    const current=__scopeValue(normalized); const parts=String(path||'').split('.').filter(Boolean); let target=current;
+    for(const part of parts.slice(0,-1)){if(!target||typeof target!=='object'||!(part in target))return {variables:current,delete_occurred:false};target=target[part];}
+    const key=parts.at(-1); const deleted=Boolean(key&&target&&typeof target==='object'&&key in target); if(deleted)delete target[key];
+    const result={variables:current,delete_occurred:deleted}; void __replaceVariables(current,normalized); return result;
+  };
+  const __throttle=(fn,wait)=>{let last=0,timer;return(...args)=>{const now=Date.now();const run=()=>{last=Date.now();timer=undefined;fn(...args);};if(now-last>=wait)run();else if(!timer)timer=setTimeout(run,wait-(now-last));};};
+  const __debounce=(fn,wait)=>{let timer;return(...args)=>{clearTimeout(timer);timer=setTimeout(()=>fn(...args),wait);};};
+  const __merge=(target,...sources)=>{for(const source of sources){if(!source||typeof source!=='object')continue;for(const [key,value] of Object.entries(source)){if(value&&typeof value==='object'&&!Array.isArray(value)&&target[key]&&typeof target[key]==='object')__merge(target[key],value);else target[key]=__clone(value);}}return target;};
+  const __values=value=>Object.values(value||{});
+  const __entries=value=>Object.entries(value||{});
+  const __pickBy=(value,predicate)=>Object.fromEntries(Object.entries(value||{}).filter(([key,item])=>predicate(item,key)));
+  const __omit=(value,keys,...rest)=>{const blocked=new Set(Array.isArray(keys)?keys:[keys,...rest]);return Object.fromEntries(Object.entries(value||{}).filter(([key])=>!blocked.has(key)));};
+  const __maxBy=(items,path)=>__values(items).reduce((best,item)=>best===undefined||Number(__get(item,path,-Infinity))>Number(__get(best,path,-Infinity))?item:best,undefined);
+  const __sumBy=(items,path)=>__values(items).reduce((sum,item)=>sum+Number(__get(item,path,0)||0),0);
+  const __update=(object,path,updater)=>{const current=__get(object,path);return __set(object,path,typeof updater==='function'?updater(current):updater);};
+  const __unset=(object,path)=>{const parts=Array.isArray(path)?path:String(path||'').split('.').filter(Boolean);if(!parts.length)return true;let target=object;for(const part of parts.slice(0,-1)){if(!target||typeof target!=='object')return true;target=target[part];}if(target&&typeof target==='object')delete target[parts.at(-1)];return true;};
+  const __toPath=path=>Array.isArray(path)?path:String(path||'').split('.').flatMap(part=>{const open=part.indexOf('['),close=part.lastIndexOf(']');return open>0&&close>open?[part.slice(0,open),part.slice(open+1,close)]:[part];}).filter(Boolean);
+  const __isEqual=(a,b)=>{try{return JSON.stringify(a)===JSON.stringify(b);}catch{return a===b;}};
+  const __isPlainObject=value=>Boolean(value&&typeof value==='object'&&Object.getPrototypeOf(value)===Object.prototype);
+  const __chain=value=>{let current=value;const chain={entries:()=>{current=Object.entries(current||{});return chain;},takeRight:n=>{current=Array.isArray(current)?current.slice(-n):[];return chain;},fromPairs:()=>{current=Object.fromEntries(current||[]);return chain;},sortBy:iteratee=>{current=[...(current||[])].sort((a,b)=>{const av=typeof iteratee==='function'?iteratee(a):__get(a,iteratee);const bv=typeof iteratee==='function'?iteratee(b):__get(b,iteratee);return av>bv?1:av<bv?-1:0;});return chain;},flatMap:fn=>{current=(current||[]).flatMap(fn);return chain;},join:separator=>{current=(current||[]).join(separator);return chain;},map:fn=>{current=(current||[]).map(fn);return chain;},filter:fn=>{current=(current||[]).filter(fn);return chain;},last:()=>{current=Array.isArray(current)?current.at(-1):undefined;return chain;},toArray:()=>{current=Array.from(current||[]);return chain;},value:()=>current};return chain;};
+  const __lodash=value=>__chain(value);
+  const __iteratee=iteratee=>typeof iteratee==='function'?iteratee:(value=>typeof iteratee==='string'?__get(value,iteratee):value);
+  const __keyed=(value,iteratee)=>{try{return JSON.stringify(__iteratee(iteratee)(value));}catch{return String(__iteratee(iteratee)(value));}};
+  Object.assign(__lodash,{get:__get,set:__set,has:(object,path)=>__get(object,path,undefined)!==undefined,update:__update,unset:__unset,merge:__merge,mergeWith:__merge,assign:Object.assign,add:(a,b)=>Number(a)+Number(b),omit:__omit,values:__values,entries:__entries,pickBy:__pickBy,filter:(value,predicate)=>Array.isArray(value)?value.filter(__iteratee(predicate)):Object.values(value||{}).filter(__iteratee(predicate)),forEach:(value,fn)=>{Object.values(value||{}).forEach(fn);return value;},intersectionBy:(array,...rest)=>{const iteratee=typeof rest.at(-1)==='function'||typeof rest.at(-1)==='string'?rest.pop():value=>value;const keys=new Set(rest.flatMap(item=>(item||[]).map(value=>__keyed(value,iteratee))));return (array||[]).filter(value=>keys.has(__keyed(value,iteratee)));},maxBy:__maxBy,max:(values)=>Math.max(...(values||[])),sumBy:__sumBy,clamp:(value,min,max)=>Math.min(max,Math.max(min,Number(value))),throttle:__throttle,debounce:__debounce,toPath:__toPath,isEqual:__isEqual,isArray:Array.isArray,isDate:value=>value instanceof Date,isString:value=>typeof value==='string',isEmpty:value=>value==null||(Array.isArray(value)||typeof value==='string'?value.length===0:Object.keys(value).length===0),isPlainObject:__isPlainObject,isObject:value=>value!==null&&typeof value==='object',isNil:value=>value===null||value===undefined,dropRight:value=>Array.isArray(value)?value.slice(0,-1):[],last:value=>Array.isArray(value)?value.at(-1):undefined,concat:(value,...rest)=>[].concat(value||[],...rest),escape:value=>String(value??'').replace(/[&<>"']/gu,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]||char)),range:(start=0,end,step=1)=>{if(end===undefined){end=start;start=0;}const out=[];for(let value=start;step>0?value<end:value>end;value+=step)out.push(value);return out;},remove:(array,predicate)=>{const removed=(array||[]).filter(__iteratee(predicate));for(let index=(array||[]).length-1;index>=0;index-=1)if(__iteratee(predicate)(array[index]))array.splice(index,1);return removed;},size:value=>value==null?0:Array.isArray(value)||typeof value==='string'?value.length:Object.keys(value).length,times:(n,fn)=>Array.from({length:Math.max(0,Number(n)||0)},(_,index)=>fn(index)),pullAt:(array,indices)=>{for(const index of [...indices].sort((a,b)=>b-a))array.splice(Number(index),1);return array;}});
+  // Keep the real lodash inherited from the host when available (the
+  // official predefine.js exposes the host instance).  The local shim only
+  // fills gaps for cards that run without the optional dependency bundle.
+  const __hostLodash=window._;
+  if(__hostLodash&&typeof __hostLodash==='function'){
+    for(const [key,value] of Object.entries(__lodash))if(!(key in __hostLodash)){try{__hostLodash[key]=value;}catch{}}
+  }else window._=__lodash;
+  const __safeParentApis=['RawCharacter','getCurrentCharacterName','getCurrentChatId','getChatMessages','getCurrentMessageId','getLastMessageId','getFallbackContext','getScriptButtons','getButtonEvent','getLocaleMessage','substitudeMacros','substituteMacros','createChatMessages','triggerSlash','getTavernHelperVersion','tavern_events'];
+  const __parentApi={};
+  for(const __key of __safeParentApis){try{if(__parent&&__parent[__key]!==undefined){__parentApi[__key]=__parent[__key];if(window[__key]===undefined)window[__key]=__parent[__key];}}catch{}}
+  window.__agentRpParentApi=__parentApi;
+  window._th_impl=Object.assign({},__parent?(()=>{try{return __parent._th_impl||{}}catch{return{}}})():{}, {
+    iframe_id:__frameId,
+    getIframeName:()=>__frameId,
+    getIframeWindow:()=>window,
+    getIframeDocument:()=>document,
+    getAllVariables:()=>__getVariables({type:'chat'}),
+    getVariable:(path,fallback)=>__get(__variables,path,fallback),
+    getVariables:__getVariables,
+    replaceVariables:__replaceVariables,
+    updateVariablesWith:__updateVariablesWith,
+    getScriptTrees:__getScriptTrees,
+    replaceScriptTrees:__replaceScriptTrees,
+    updateScriptTreesWith:__updateScriptTreesWith,
+    eventOn:(type,fn)=>__on(type,fn,false),
+    eventOnce:(type,fn)=>__on(type,fn,true),
+    eventEmit:__emit,
+  });
+  window.__agentRpCardFrameId=__frameId;
+  window.__agentRpCardVariables=()=>__variables;
+  window.getAllVariables=()=>__variables;
+  window.getVariable=(path,fallback)=>__get(__variables,path,fallback);
+  window.getVariables=__getVariables;
+  window.replaceVariables=__replaceVariables;
+  window.updateVariablesWith=__updateVariablesWith;
+  window.insertOrAssignVariables=__insertOrAssignVariables;
+  window.insertVariables=__insertVariables;
+  window.deleteVariable=__deleteVariable;
+  window.getScriptTrees=__getScriptTrees;
+  window.replaceScriptTrees=__replaceScriptTrees;
+  window.updateScriptTreesWith=__updateScriptTreesWith;
+  window.eventOn=(type,fn)=>__on(type,fn,false);
+  window.eventOnce=(type,fn)=>__on(type,fn,true);
+  window.eventEmit=(type,...args)=>__emit(type,...args);
+  window.eventRemoveListener=(type,fn)=>{for(const item of [...(__listeners.get(String(type))||[])])if(item.fn===fn)__listeners.get(String(type))?.delete(item);};
+  window.eventClearAll=()=>__listeners.clear();
+  window.waitGlobalInitialized=async()=>undefined;
+  window.errorCatched=fn=>function(...args){try{return fn.apply(this,args);}catch(error){console.error('[agent-rp card script]',error);}};
+  window.getScriptId=()=>__currentScriptId();
+  window.getPreferredScriptId=()=>__currentScriptId();
+  window.getTavernHelperVersion=()=> '3.4.17';
+  window.getFunctionCallingApiVersionUnsupportedMessage=()=>'';
+  window.getLocaleMessage=(key)=>String(key??'');
+  window.updateVariables=value=>__replace(value);
+  window.getMvuVariable=window.getVariable;
+  window.getChatMessages=()=>__rpc('get-chat-messages',{});
+  window.getCurrentMessageId=()=>-1;
+  window.getLastMessageId=()=>-1;
+  window.getCharWorldbookNames=()=>__rpc('get-char-worldbook-names',{});
+  window.getWorldbookNames=()=>__rpc('get-worldbook-names',{});
+  window.getGlobalWorldbookNames=()=>__rpc('get-global-worldbook-names',{});
+  window.getChatWorldbookName=()=>__rpc('get-chat-worldbook-name',{});
+  window.getWorldbook=bookName=>__rpc('get-worldbook',{name:String(bookName||'')} ).then(value=>value?.entries||value||[]);
+  window.rebindGlobalWorldbooks=names=>__rpc('tavern-helper-mutation',{format:0,operation:'bind-global-worldbooks',names:Array.isArray(names)?names:[]});
+  window.rebindCharWorldbooks=(primary,additional=[])=>__rpc('tavern-helper-mutation',{format:0,operation:'bind-character-worldbooks',primary:primary??null,additional:Array.isArray(additional)?additional:[]});
+  window.rebindChatWorldbook=name=>__rpc('tavern-helper-mutation',{format:0,operation:'bind-chat-worldbook',name:name??null});
+  window.getPreset=()=>({});
+  window.getPresetNames=()=>[];
+  window.getAvailableExtraModelPresetNames=()=>[];
+  window.setChatMessage=async(messageId,message)=>__rpc('set-chat-message',{messageId,message});
+  window.setChatMessages=async(messages)=>__rpc('set-chat-messages',{messages:(Array.isArray(messages)?messages:[]).map((message,index)=>({
+    message_id:Number.isSafeInteger(message?.message_id)?message.message_id:index,
+    role:message?.role||'assistant',
+    message:typeof message?.message==='string'?message.message:String(message?.content||''),
+  }))});
+  window.setMvuVariable=(path,value)=>{__set(__variables,path,value);return __replace(__variables);};
+  window.updateChatVariables=value=>__replace(value);
+  window.updateWorldbookWith=async(bookName,updater)=>{
+    const name=String(bookName||'');
+    const current=await window.getWorldbook(name);
+    const next=typeof updater==='function'?await updater(__clone(current)):updater;
+    if(!Array.isArray(next))throw new Error('updateWorldbookWith updater must return an entry array');
+    return __rpc('tavern-helper-mutation',{format:0,operation:'replace-worldbook',name,entries:next});
+  };
+  window.getFallbackContext=()=>({chat:[],eventSource:window.SillyTavern?.eventSource});
+  window.getScriptButtons=()=>[];
+  window.getButtonEvent=()=>undefined;
+  window.registerMessageCompiler=()=>undefined;
+  window.registerMessageResolver=()=>undefined;
+  window.registerVariableSchema=(schema)=>{window.__agentRpVariableSchema=schema;return schema;};
+  window.appendInexistentScriptButtons=()=>undefined;
+  window.tavern_events={CHAT_CHANGED:'chat_changed',CHAT_COMPLETION_SETTINGS_READY:'chat_completion_settings_ready',GENERATION_STARTED:'generation_started',MESSAGE_DELETED:'message_deleted',MESSAGE_RECEIVED:'message_received',MESSAGE_SENT:'message_sent',WORLDINFO_UPDATED:'worldinfo_updated'};
+  window.toastr={success:()=>{},info:()=>{},warning:(message)=>console.warn('[agent-rp card]',message),error:(message)=>console.error('[agent-rp card]',message)};
+  if(!window.EjsTemplate)window.EjsTemplate={render:(template)=>String(template??''),compile:(template)=>()=>String(template??'')};
+if(!window.showdown)window.showdown={Converter:class{constructor(options={}){this.options=options;}makeHtml(value){return String(value??'').replace(/&/gu,'&amp;').replace(/</gu,'&lt;').replace(/>/gu,'&gt;').replace(/\\*\\*(.+?)\\*\\*/gu,'<strong>$1</strong>').replace(/\\*(.+?)\\*/gu,'<em>$1</em>').replace(/\\n/gu,'<br>');}}};
+  const __events={VARIABLE_INITIALIZED:'mag_variable_initialized',VARIABLE_UPDATE_STARTED:'mag_variable_update_started',VARIABLE_UPDATE_ENDED:'mag_variable_update_ended'};
+  window.Mvu=Object.assign({},__parent?.Mvu||{}, {events:__events,getMvuData:option=>__scopeValue(option),getVariable:window.getVariable,replaceMvuData:(value,option)=>__replaceVariables(value,option),isDuringExtraAnalysis:()=>false});
+  window.TavernHelper=Object.assign({},__parent?.TavernHelper||{}, {getAllVariables:()=>__getVariables({type:'chat'}),getVariable:(path,fallback)=>__get(__getVariables({type:'chat'}),path,fallback),getVariables:__getVariables,replaceVariables:__replaceVariables,updateVariablesWith:__updateVariablesWith,insertOrAssignVariables:__insertOrAssignVariables,insertVariables:__insertVariables,deleteVariable:__deleteVariable,getScriptTrees:__getScriptTrees,replaceScriptTrees:__replaceScriptTrees,updateScriptTreesWith:__updateScriptTreesWith,eventOn:window.eventOn,eventOnce:window.eventOnce,eventEmit:window.eventEmit,waitGlobalInitialized:window.waitGlobalInitialized});
+  window.SillyTavern=Object.assign({},__parent?.SillyTavern||{}, {eventSource:{on:window.eventOn,once:window.eventOnce,emit:window.eventEmit},getContext:()=>({eventSource:window.SillyTavern.eventSource,chat:window.SillyTavern.chat}),chat:[],characters:[],characterId:0,name2:'',extensionSettings:{},chatCompletionSettings:{},getCurrentChatId:()=>window.__agentRpCardFrameId,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),saveChat:async()=>undefined,saveSettingsDebounced:()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined});
+  const __wrap=items=>{const list=Array.from(items||[]),api={length:list.length};list.forEach((el,i)=>api[i]=el);api.toArray=()=>list.slice();api.get=index=>index===undefined?list.slice():list[index];api.each=fn=>{list.forEach((el,i)=>fn.call(el,i,el));return api;};api.clone=()=>__wrap(list.map(el=>el.cloneNode?.(true)).filter(Boolean));api.appendTo=target=>{const destination=typeof target==='string'?__query(target):target?.length!==undefined?target:__wrap([target]);destination?.each?.((_i,el)=>list.forEach(item=>el.append(item)));return api;};api.find=sel=>__wrap(list.flatMap(el=>[...el.querySelectorAll(sel)]));api.parent=()=>__wrap(list.map(el=>el.parentElement).filter(Boolean));api.siblings=()=>__wrap(list.flatMap(el=>el.parentElement?[...el.parentElement.children].filter(x=>x!==el):[]));api.addClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.add(x)));api.removeClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.remove(x)));api.toggleClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.toggle(x)));api.hasClass=v=>!!list[0]?.classList.contains(String(v||''));api.html=v=>v===undefined?(list[0]?.innerHTML||''):api.each((_i,el)=>el.innerHTML=String(v));api.text=v=>v===undefined?(list[0]?.textContent||''):api.each((_i,el)=>el.textContent=String(v));api.val=v=>v===undefined?(list[0]?.value||''):api.each((_i,el)=>el.value=String(v));api.attr=(k,v)=>v===undefined?list[0]?.getAttribute(k):api.each((_i,el)=>el.setAttribute(k,String(v)));api.data=(k,v)=>v===undefined?list[0]?.dataset?.[k]:api.each((_i,el)=>el.dataset[k]=String(v));api.empty=()=>api.each((_i,el)=>el.replaceChildren());api.append=v=>api.each((_i,el)=>typeof v==='string'?el.insertAdjacentHTML('beforeend',v):v?.nodeType&&el.append(v));api.css=(k,v)=>v===undefined?(list[0]?getComputedStyle(list[0])[k]:undefined):api.each((_i,el)=>el.style[k]=String(v));api.show=()=>api.each((_i,el)=>el.style.display='');api.hide=()=>api.each((_i,el)=>el.style.display='none');api.on=(type,fn)=>api.each((_i,el)=>el.addEventListener(type,fn));api.off=(type,fn)=>api.each((_i,el)=>el.removeEventListener(type,fn));api.trigger=type=>api.each((_i,el)=>el.dispatchEvent(new Event(type,{bubbles:true})));api.sortable=()=>api;return api;};
+  const __query=value=>{if(typeof value==='function'){if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',value,{once:true});else queueMicrotask(value);return __wrap([]);}if(value?.nodeType)return __wrap([value]);if(Array.isArray(value))return __wrap(value);try{return __wrap(document.querySelectorAll(String(value||'')));}catch{return __wrap([]);}};
+  if(!window.$){window.$=__query;window.jQuery=__query;}
+  window.addEventListener('message',event=>{if(event.source!==window.parent||!event.data||event.data.id!==__frameId)return;if(event.data.type==='agent-rp-card-rpc-result'){const pending=__rpcPending.get(event.data.requestId);if(!pending)return;__rpcPending.delete(event.data.requestId);clearTimeout(pending.timer);if(event.data.ok===false)pending.reject(new Error(String(event.data.error||'Tavern Helper host RPC failed')));else pending.resolve(event.data.value);return;}if(event.data.type==='agent-rp-card-variables'){__replace(event.data.variables||{stat_data:{}});}if(event.data.type==='agent-rp-card-helper-state'){__applyScopeSnapshot(event.data.scopes,event.data.mvuState,event.data.scripts);}if(event.data.type==='agent-rp-card-theme'&&event.data.theme)document.documentElement.dataset.theme=event.data.theme;});
+  __emit('mag_variable_initialized',__variables);
+})();`
     }
 
-    function cardFrontendModulePrelude() {
-      // ES modules do not expose window properties as bare identifiers. A
-      // number of ST cards use type="module" while still calling the
-      // globals supplied by Tavern/MVU, so provide the same lexical names
-      // inside the isolated frame. Keep this list deliberately small and
-      // limited to the public compatibility surface we actually provide.
-      return `
-        const $=window.$;
-        const jQuery=window.jQuery;
-        const _=window._;
-        const TavernHelper=window.TavernHelper;
-        const SillyTavern=window.SillyTavern;
-        const getAllVariables=window.getAllVariables;
-        const getVariable=window.getVariable;
-        const waitGlobalInitialized=window.waitGlobalInitialized;
-        const eventOn=window.eventOn;
-        const Mvu=window.Mvu;
-        const errorCatched=window.errorCatched;
-        let musicCtrl;
-      `
-    }
-
-    /**
-     * Character-card Regex replacements frequently arrive as a fenced HTML
-     * fragment (for example ```\n<body>...</body>\n```). SillyTavern removes
-     * the display fence before mounting the message; doing that after the
-     * iframe wrapper has been created produces a nested <body>, visible
-     * backticks and host-dark text/background bleeding into the card.
-     */
-    function normalizeCardFrontendSource(value) {
-      let source = String(value || '').trim()
-      const fenced = source.match(/^ {0,3}(`{3,}|~{3,})[^\r\n]*[\r\n]+([\s\S]*?)[\r\n]+ {0,3}\1[ \t]*$/u)
-      if (fenced) source = String(fenced[2] || '').trim()
-
-      // A body-only document is a fragment in ST's display pipeline. Unwrap
-      // it before placing it in our own complete iframe document.
-      const body = source.match(/^<body(?:\s[^>]*)?>([\s\S]*)<\/body>\s*$/iu)
-      return body ? String(body[1] || '').trim() : source
-    }
-
-    function buildCardFrontendDocument(source, frameId, mvuState = null, tavernHelperVariables = {}, surfaceMode = 'content') {
-      let body = normalizeCardFrontendSource(source)
-      // Do not allow an imported card to create a nested browsing context or
-      // navigate the host. Inline scripts remain available inside the sandbox
-      // because the reference cards use them for tabs, meters and toggles.
-      body = body
-        // Parent-page DOM is intentionally unavailable in the isolated
-        // frame. These two ST card idioms only need the current document / a
-        // theme callback, so route them through the local Tavern bridge.
-        .replace(/(?:window\s*\.\s*)?parent\s*\.\s*document\b/giu, 'window.document')
-        .replace(/(?:window\s*\.\s*)?parent\s*\.\s*__qfpSetTheme\b/giu, 'window.__qfpSetTheme')
+    function buildCardFrameDocument(source, frameId, mvuState = null, helperVariables = {}, helperScripts = [], helperScriptTrees = {}) {
+      let value = replaceCardViewportMinHeight(normalizeCardFrontendSource(source))
         .replace(/<(iframe|object|embed|base)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, '')
         .replace(/<(iframe|object|embed|base)\b[^>]*\/?>/giu, '')
-        .replace(/<script\b[^>]*\bsrc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)[^>]*>[\s\S]*?<\/script\s*>/giu, '')
-        .replace(/<script\b[^>]*\bsrc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)[^>]*\/?\s*>/giu, '')
         .replace(/\s(?:href|src)\s*=\s*(["'])\s*javascript:[\s\S]*?\1/giu, '')
-      // The reference card declares its HUD as an ES module, but the module
-      // still expects the classic ST globals above. Also turn its
-      // window.musicCtrl assignment into an assignment to the local module
-      // binding, because later calls use the bare name musicCtrl.
-      body = body.replace(/(<script\b[^>]*\btype\s*=\s*(["'])module\2[^>]*>)([\s\S]*?)(<\/script\s*>)/giu, (_match, open, _quote, script, close) => {
-        const moduleScript = String(script).replace(/\bwindow\.musicCtrl\s*=/u, 'musicCtrl = window.musicCtrl =')
-        return `${open}${cardFrontendModulePrelude()}${moduleScript}${close}`
-      })
-      const shim = FRAME_SCRIPT_OPEN + cardFrontendJqueryShim(mvuState, tavernHelperVariables) + FRAME_SCRIPT_CLOSE
-      const resize = `${FRAME_SCRIPT_OPEN}(function(){
-        const send=function(){
-          // Many Tavern cards set html/body{height:100%}. The document root
-          // then reports the iframe viewport (often 900px) instead of the
-          // rendered card content. Prefer body.scrollHeight so a short
-          // title/status block does not create a large dark void.
-          const root=document.documentElement;
-          const body=document.body;
-          const contentHeight=body?.scrollHeight||root?.scrollHeight||0;
-          const height=Math.max(180,Math.min(900,Math.ceil(contentHeight+8)));
-          parent.postMessage({type:'agent-rp-card-frame-height',id:${JSON.stringify(frameId)},height},'*');
-        };
-        addEventListener('load',send); addEventListener('resize',send);
-        if(window.ResizeObserver)new ResizeObserver(send).observe(document.documentElement);
-        setTimeout(send,80); setTimeout(send,600);
-      })();${FRAME_SCRIPT_CLOSE}`
-      // ST mounts a message's rendered content inside one message surface.
-      // Do the same here: fit only the card's primary surface to that host
-      // width. Never rewrite every body child, because backgrounds, panels,
-      // decorations and nested status widgets often have their own layout.
-      const surfaceAdapter = `${FRAME_SCRIPT_OPEN}(function(){
-        const mode=${JSON.stringify(surfaceMode)};
-        const preferred=mode==='status'
-          ? ['.hud-top','#ui-root','#app','.card-root','main']
-          : ['.arcane-gate-wrapper','.card-root','#app','main'];
-        const isNonSurface=function(el){
-          const key=((el.id||'')+' '+(typeof el.className==='string'?el.className:'')).toLowerCase();
-          return /(background|cursor|particle|corner-decor|nebula|grid|overlay|side-panel|music-panel|settings-panel|layer-detail|layer-roulette)/.test(key);
-        };
-        const visible=function(el){
-          if(!el||el.tagName==='SCRIPT'||el.tagName==='STYLE'||el.tagName==='LINK'||el.tagName==='META'||isNonSurface(el)) return false;
-          const computed=getComputedStyle(el);
-          if(computed.display==='none'||computed.visibility==='hidden'||computed.opacity==='0') return false;
-          const rect=el.getBoundingClientRect();
-          // A hidden ST/card drawer can still have a non-zero box while it
-          // is translated completely outside the iframe viewport.
-          return rect.width>0&&rect.height>0
-            &&rect.right>0&&rect.bottom>0
-            &&rect.left<window.innerWidth&&rect.top<window.innerHeight;
-        };
-        const apply=function(){
-          // A srcdoc document has the browser's default body margin unless
-          // the card explicitly resets it. ST mounts message HTML inside an
-          // already-reset message surface, so normalize this iframe host
-          // before comparing the card surface with its sibling surfaces.
-          const frameRoot=document.documentElement;
-          const frameBody=document.body;
-          if(frameRoot){
-            frameRoot.style.setProperty('margin','0','important');
-            frameRoot.style.setProperty('padding','0','important');
-            frameRoot.style.setProperty('width','100%','important');
-          }
-          if(frameBody){
-            frameBody.style.setProperty('margin','0','important');
-            frameBody.style.setProperty('padding','0','important');
-            frameBody.style.setProperty('width','100%','important');
-            frameBody.style.setProperty('min-width','0','important');
-            frameBody.style.setProperty('box-sizing','border-box','important');
-          }
-          let surface=null;
-          for(const selector of preferred){
-            try{surface=document.querySelector(selector)}catch(_){surface=null}
-            if(visible(surface)) break;
-            surface=null;
-          }
-          if(!surface) surface=[...document.body.children].find(visible);
-          if(!surface) return;
-          surface.dataset.agentRpSurface='primary';
-          surface.style.setProperty('width','100%','important');
-          surface.style.setProperty('max-width','none','important');
-          surface.style.setProperty('margin-left','0','important');
-          surface.style.setProperty('margin-right','0','important');
-          surface.style.setProperty('box-sizing','border-box','important');
-        };
-        addEventListener('load',apply);
-        setTimeout(apply,0); setTimeout(apply,120); setTimeout(apply,600);
-      })();${FRAME_SCRIPT_CLOSE}`
-      if (/<html(?:\s|>)/iu.test(body)) {
-        if (/<head(?:\s|>)/iu.test(body)) {
-          body = body.replace(/(<head(?:\s[^>]*)?>)/iu, `$1${shim}`)
-        } else {
-          body = `${shim}${body}`
+      const doc = new DOMParser().parseFromString(value, 'text/html')
+      // JS-Slash-Runner adds a trusted origin base for blob/srcdoc documents.
+      // Card-provided <base> tags are removed above so a card cannot escape
+      // the boundary, but relative images/fonts/stylesheets must still resolve
+      // exactly as they do in Tavern Helper.
+      const runnerBase = doc.createElement('base')
+      runnerBase.href = `${window.location.origin}/`
+      doc.head.insertBefore(runnerBase, doc.head.firstChild)
+      const runnerBaseStyle = doc.createElement('style')
+      runnerBaseStyle.textContent = '*,*::before,*::after{box-sizing:border-box;}html,body{margin:0!important;padding:0;overflow:hidden!important;max-width:100%!important;}'
+      doc.head.insertBefore(runnerBaseStyle, doc.head.firstChild)
+      // Remove card-supplied embedded browsing contexts, but keep the trusted
+      // origin base inserted above.
+      for (const node of [...doc.querySelectorAll('iframe,object,embed')]) node.remove()
+      for (const node of [...doc.querySelectorAll('[href],[src]')]) {
+        for (const attr of ['href', 'src']) {
+          const item = node.getAttribute(attr)
+          if (item && /^\s*javascript:/iu.test(item)) node.removeAttribute(attr)
         }
-        const withScripts = body.replace(/<\/body\s*>/iu, `${surfaceAdapter}${resize}</body>`)
-        return withScripts === body ? `${body}${surfaceAdapter}${resize}` : withScripts
       }
-      return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${shim}</head><body>${body}${surfaceAdapter}${resize}</body></html>`
+      const runtime = buildCardFrameRuntime(frameId, mvuState, helperVariables, helperScriptTrees)
+      // Do not inject third-party runtime scripts into the card document.
+      // The host already provides local dependency fallbacks and remote
+      // parser-blocking scripts can replace the bridge globals/protocol.
+      for (const node of [...doc.querySelectorAll('script[src]')]) node.remove()
+      const runtimeScript = doc.createElement('script')
+      runtimeScript.textContent = runtime
+      doc.head.append(runtimeScript)
+      for (const helper of (Array.isArray(helperScripts) ? helperScripts : [])) {
+        if (!helper || helper.enabled === false || typeof helper.content !== 'string' || helper.content.trim() === '') continue
+        const helperScript = doc.createElement('script')
+        const content = helper.content.trim()
+        if (/^\s*(?:import|export)\b|\bimport\s*\(/u.test(content)) helperScript.type = 'module'
+        helperScript.dataset.agentRpTavernHelper = helper.name || helper.id || 'script'
+        helperScript.textContent = content
+        doc.head.append(helperScript)
+      }
+      const measureScript = doc.createElement('script')
+      measureScript.textContent = `(function(){
+  let scheduled=false;
+  const measureAndPost=()=>{scheduled=false;try{const body=document.body;if(!body)return;const height=body.scrollHeight;if(!Number.isFinite(height)||height<=0)return;if(frameElement)frameElement.style.height=height+'px';window.parent.postMessage({type:'agent-rp-card-frame-height',id:${safeCardScriptJson(frameId)},height},'*');}catch{}};
+  const throttledMeasureAndPost=_.throttle(measureAndPost,500);
+  const postIframeHeight=()=>{if(scheduled)return;scheduled=true;if(typeof window.requestAnimationFrame==='function')window.requestAnimationFrame(measureAndPost);else throttledMeasureAndPost();};
+  const observeHeightChange=()=>{const body=document.body;if(!body)return;const resizeObserver=new ResizeObserver(()=>postIframeHeight());resizeObserver.observe(body);};
+  const updateViewport=()=>{try{document.documentElement.style.setProperty('--TH-viewport-height',window.parent.innerHeight+'px');}catch{}};
+  window.addEventListener('message',event=>{if(event.data?.type==='TH_UPDATE_VIEWPORT_HEIGHT')updateViewport();});
+  const boot=()=>{updateViewport();postIframeHeight();observeHeightChange();};
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot,{once:true});else boot();
+ })();`
+      doc.body.append(measureScript)
+      return '<!doctype html>\n' + doc.documentElement.outerHTML
+    }
+
+    function CardHtmlSurface({ source, mvuState, character, sessionId = null, surfaceKind = 'content', onVariablesChange = null }) {
+      const frameRef = useRef(null)
+      const frameId = useRef(`card-frame-${Math.random().toString(36).slice(2)}`)
+      const sessionIdRef = useRef(sessionId)
+      const initialMvuState = useRef(mvuState)
+      const latestMvuState = useRef(mvuState)
+      const onVariablesChangeRef = useRef(onVariablesChange)
+      sessionIdRef.current = sessionId
+      latestMvuState.current = mvuState
+      onVariablesChangeRef.current = onVariablesChange
+      const helperScripts = character?.frontend?.tavernHelperScripts || []
+      const [height, setHeight] = useState(1)
+      const frameDocument = useMemo(
+        () => buildCardFrameDocument(source, frameId.current, initialMvuState.current, character?.frontend?.tavernHelperVariables || {}, helperScripts, character?.frontend?.tavernHelperScriptTrees || {}),
+        [source, character?.frontend?.tavernHelperVariables, helperScripts, character?.frontend?.tavernHelperScriptTrees],
+      )
+      const syncFrameState = () => {
+        const frame = frameRef.current
+        if (!frame?.contentWindow) return
+        const state = latestMvuState.current
+        frame.contentWindow.postMessage({ type: 'agent-rp-card-variables', id: frameId.current, variables: state?.stat_data ? state : { stat_data: state || {} } }, '*')
+        frame.contentWindow.postMessage({ type: 'agent-rp-card-theme', id: frameId.current, theme: document.documentElement.dataset.theme || '' }, '*')
+        const activeSessionId = sessionIdRef.current
+        if (activeSessionId) {
+          void apiGet(`/api/sessions/${encodeURIComponent(activeSessionId)}/tavern-helper`).then((snapshot) => {
+            frame.contentWindow?.postMessage({
+              type: 'agent-rp-card-helper-state',
+              id: frameId.current,
+              scopes: snapshot.variableScopes || snapshot.tavernHelperState?.scopes || {},
+              scripts: snapshot.tavernHelperState?.scripts || {},
+              scriptTrees: snapshot.tavernHelperState?.scriptTrees || {},
+              mvuState: snapshot.mvuState,
+            }, '*')
+          }).catch(() => { /* a card may render before a session is available */ })
+        }
+      }
+      useEffect(() => {
+        const frame = frameRef.current
+        const onViewportResize = () => frame?.contentWindow?.postMessage({ type: 'TH_UPDATE_VIEWPORT_HEIGHT' }, '*')
+        const onMessage = (event) => {
+          if (!frame || event.source !== frame.contentWindow) return
+          const data = event.data
+          if (!data || data.id !== frameId.current) return
+          if (data.type === 'agent-rp-card-script-error') {
+            console.error('[agent-rp card script]', data.error || data)
+            return
+          }
+          if (data.type === 'agent-rp-card-variable-replace') {
+            const next = data.variables?.stat_data ? data.variables : { stat_data: data.variables || {} }
+            onVariablesChangeRef.current?.(next)
+            return
+          }
+          if (data.type === 'agent-rp-card-rpc') {
+            const requestId = typeof data.requestId === 'string' ? data.requestId : ''
+            const respond = (payload) => {
+              try { frame.contentWindow?.postMessage({ type: 'agent-rp-card-rpc-result', id: frameId.current, requestId, ok: true, value: payload }, '*') } catch { /* */ }
+            }
+            const fail = (error) => {
+              try { frame.contentWindow?.postMessage({ type: 'agent-rp-card-rpc-result', id: frameId.current, requestId, ok: false, error: String(error?.message || error) }, '*') } catch { /* */ }
+            }
+            const activeSessionId = sessionIdRef.current
+            if (!requestId || !activeSessionId) { fail(new Error('no active session for Tavern Helper RPC')); return }
+            const runRpc = async () => {
+              const endpoint = `/api/sessions/${encodeURIComponent(activeSessionId)}/tavern-helper`
+              if (data.method === 'get-chat-messages') {
+                const result = await apiGet(`/api/history?sessionId=${encodeURIComponent(activeSessionId)}`)
+                return (result.history || []).map((message, index) => ({
+                  message_id: index,
+                  role: message.role || 'assistant',
+                  message: String(message.content || ''),
+                  content: String(message.content || ''),
+                }))
+              }
+              const state = data.method === 'get-worldbook' || data.method === 'get-char-worldbook-names' || data.method === 'get-worldbook-names'
+                || data.method === 'get-global-worldbook-names' || data.method === 'get-chat-worldbook-name'
+                || data.method === 'get-variable-scopes'
+                ? await apiGet(endpoint) : null
+              if (data.method === 'get-variable-scopes') return state?.variableScopes || state?.tavernHelperState?.scopes || {}
+              if (data.method === 'get-worldbook') {
+                const name = String(data.payload?.name || '')
+                return state?.tavernHelperState?.worldbooks?.[name] || []
+              }
+              if (data.method === 'get-char-worldbook-names') {
+                const bindings = state?.tavernHelperState?.worldbookBindings?.character
+                return bindings || { primary: null, additional: [] }
+              }
+              if (data.method === 'get-global-worldbook-names') return state?.tavernHelperState?.worldbookBindings?.global || []
+              if (data.method === 'get-chat-worldbook-name') return state?.tavernHelperState?.worldbookBindings?.chat ?? null
+              if (data.method === 'get-worldbook-names') return Object.keys(state?.tavernHelperState?.worldbooks || {})
+              if (data.method === 'set-chat-message') {
+                const messageId = Number(data.payload?.messageId)
+                if (!Number.isSafeInteger(messageId) || messageId < 0) throw new Error('chat message id must be a non-negative integer')
+                return apiPut(`/api/sessions/${encodeURIComponent(sessionId)}/message/${messageId}`, { content: String(data.payload?.message ?? '') })
+              }
+              if (data.method === 'set-chat-messages') {
+                return apiPut(endpoint, { format: 0, operation: 'set-chat-messages', messages: data.payload?.messages || [] })
+              }
+              if (data.method === 'tavern-helper-mutation') return apiPut(endpoint, data.payload || {})
+              throw new Error(`unsupported Tavern Helper RPC: ${String(data.method || '')}`)
+            }
+            void runRpc().then(respond).catch(fail)
+            return
+          }
+          if (data.type !== 'agent-rp-card-frame-height') return
+          const next = Number(data.height)
+          if (!Number.isFinite(next)) return
+          setHeight((previous) => Math.abs(previous - next) > 1 ? Math.max(1, Math.min(12000, Math.ceil(next))) : previous)
+        }
+        window.addEventListener('message', onMessage)
+        window.addEventListener('resize', onViewportResize)
+        frame?.addEventListener('load', onViewportResize)
+        onViewportResize()
+        return () => {
+          window.removeEventListener('message', onMessage)
+          window.removeEventListener('resize', onViewportResize)
+          frame?.removeEventListener('load', onViewportResize)
+        }
+      }, [])
+      useEffect(() => {
+        syncFrameState()
+      }, [mvuState])
+      return h('iframe', {
+        ref: frameRef,
+        id: frameId.current,
+        name: frameId.current,
+        className: 'msg-card-html-frame',
+        title: '角色卡 HTML 美化内容',
+        // Tavern Helper's predefine/parent_jquery layer is a same-origin
+        // parent bridge. Keep scripts sandboxed, but allow same-origin so
+        // the parent can perform the same height-observer fallback when a
+        // card's first postMessage happens before React subscribes.
+        sandbox: 'allow-scripts allow-same-origin',
+        scrolling: 'no',
+        srcDoc: frameDocument,
+        'data-card-surface': surfaceKind,
+        onLoad: syncFrameState,
+        style: { height: `${height}px` },
+      })
     }
 
     function displaySourceLines(value) {
@@ -1043,78 +1923,23 @@
       return segments.length > 0 ? segments : [{ kind: 'markdown', source: value }]
     }
 
-    function CardHtmlFrame({ source, mvuState, character, surfaceKind = 'content' }) {
-      const frameRef = useRef(null)
-      const frameId = useRef(`card-frame-${Math.random().toString(36).slice(2)}`)
-      const [height, setHeight] = useState(420)
-      useEffect(() => {
-        const onMessage = (event) => {
-          if (event.source !== frameRef.current?.contentWindow) return
-          const data = event.data
-          if (!data || data.type !== 'agent-rp-card-frame-height' || data.id !== frameId.current) return
-          if (Number.isFinite(data.height)) setHeight(Math.max(180, Math.min(900, Number(data.height))))
-        }
-        window.addEventListener('message', onMessage)
-        return () => window.removeEventListener('message', onMessage)
-      }, [])
-      return h('iframe', {
-        ref: frameRef,
-        className: 'msg-card-html-frame',
-        title: '角色卡 HTML 美化内容',
-        sandbox: 'allow-scripts',
-        scrolling: 'auto',
-        srcDoc: buildCardFrontendDocument(
-          source,
-          frameId.current,
-          mvuState,
-          character?.frontend?.tavernHelperVariables || {},
-          surfaceKind,
-        ),
-        style: { height: `${height}px` },
-      })
-    }
-
     /** 消息内容渲染:角色卡 display Regex → HTML/Markdown 分段 → 安全渲染。
      * 角色卡的 markdownOnly 脚本只影响显示，promptOnly 脚本不会污染显示；
-     * 普通 Markdown 继续走 marked + 白名单净化，完整 HTML/状态栏进入 sandbox。 */
-    function MessageContent({ content, role, character, depth = 0, userName = '用户', mvuState = null, liveStatusSource = null }) {
+     * 普通 Markdown 继续走 marked + 白名单净化，角色卡前端进入独立
+     * iframe；iframe 只负责自身排版，滚动仍由外层 .chat 统一负责。 */
+    function MessageContent({ content, role, character, sessionId = null, depth = 0, userName = '用户', mvuState = null, onVariablesChange = null }) {
       const processed = applyDisplayRegex(content, role === 'user' ? 1 : 2, character, depth, userName)
       const segments = compileDisplaySegments(processed)
-      const rendered = segments.map((segment, index) => {
+      const rendered = segments.flatMap((segment, index) => {
         if (segment.kind === 'html') {
-          return h('div', { key: `html-surface-${index}`, className: 'msg-html-surface', 'data-surface-kind': 'content' },
-            h(CardHtmlFrame, { source: segment.source, mvuState, character, surfaceKind: 'content' }),
-          )
+          return [h('div', { key: `html-surface-${index}`, className: 'msg-html-surface', 'data-surface-kind': 'content' },
+            h(CardHtmlSurface, { source: segment.source, mvuState, character, sessionId, surfaceKind: 'content', onVariablesChange }),
+          )]
         }
         const markdownHtml = marked.parse(segment.source, { gfm: true, breaks: true })
-        return h('div', { key: `md-${index}`, className: 'msg-markdown', dangerouslySetInnerHTML: { __html: sanitizeHtml(markdownHtml) } })
+        return [h('div', { key: `md-${index}`, className: 'msg-markdown', dangerouslySetInnerHTML: { __html: sanitizeHtml(markdownHtml) } })]
       })
-      if (liveStatusSource) {
-        rendered.push(h('div', { key: 'live-card-status', className: 'msg-live-card-status' },
-          h('div', { className: 'msg-html-surface', 'data-surface-kind': 'status' },
-            h(CardHtmlFrame, { source: liveStatusSource, mvuState, character, surfaceKind: 'status' }),
-          ),
-        ))
-      }
       return h('div', { className: 'msg-text msg-content-stack' }, rendered)
-    }
-
-    // A number of ST cards put the live HUD only in the opening greeting via
-    // <StatusPlaceHolderImpl/>. Keep that card-owned frontend available inside
-    // the newest assistant floor, so its own tabs and interactions remain
-    // intact after the chat has scrolled past the opening message.
-    function findLiveStatusSource(history, character, userName) {
-      if (!Array.isArray(history) || !character) return null
-      for (let i = 0; i < history.length; i += 1) {
-        const message = history[i]
-        if (!message || message.role !== 'assistant') continue
-        const depth = Math.max(0, history.length - i - 1)
-        const processed = applyDisplayRegex(message.content, 2, character, depth, userName)
-        const statusSegment = compileDisplaySegments(processed).find((segment) => segment.kind === 'html'
-          && /(?:class\s*=\s*["'][^"']*\bhud-top\b|id\s*=\s*["']ui-name["'])/iu.test(segment.source))
-        if (statusSegment) return statusSegment.source
-      }
-      return null
     }
 
     /**
@@ -1124,8 +1949,8 @@
      * corrected without losing them to the renderer.
      */
     function MessageFloor({
-      message, index, total, character, userName, mvuState, liveStatusSource,
-      disabled = false, onReroll = null, onSaveEdit, onDelete,
+      message, index, total, character, sessionId, userName, mvuState, onVariablesChange,
+      disabled = false, onReroll = null, onSwipe = null, onSaveEdit, onDelete,
     }) {
       const [collapsed, setCollapsed] = useState(false)
       const [editing, setEditing] = useState(false)
@@ -1151,6 +1976,9 @@
       const roleLabel = message.role === 'assistant' ? 'ASSISTANT' : message.role === 'user' ? 'USER' : 'SYSTEM'
       const preview = String(message.content || '').replace(/\s+/gu, ' ').trim().slice(0, 180)
       const floorStatus = collapsed ? ' floor-collapsed' : ''
+      const swipes = Array.isArray(message.swipes) ? message.swipes : []
+      const swipeId = Number.isInteger(message.swipe_id) ? message.swipe_id : 0
+      const hasSwipes = message.role === 'assistant' && swipes.length > 1
 
       return h('div', { className: `msg floor-${message.role}${floorStatus}` },
         h('div', { className: 'floor-head' },
@@ -1163,6 +1991,19 @@
           h('span', { className: 'floor-role' }, roleLabel),
           collapsed ? h('span', { className: 'floor-preview', title: preview }, preview || '(空消息)') : null,
           h('div', { className: 'floor-actions' },
+            hasSwipes
+              ? h('span', { className: 'swipe-controls', role: 'group', 'aria-label': '切换本层回复' },
+                  h('button', {
+                    className: 'floor-action swipe-control', title: '上一条回复', disabled: disabled || swipeId <= 0,
+                    onClick: () => { if (onSwipe) void onSwipe(index, swipeId - 1) },
+                  }, '‹'),
+                  h('span', { className: 'swipe-counter', 'aria-live': 'polite' }, `${swipeId + 1}/${swipes.length}`),
+                  h('button', {
+                    className: 'floor-action swipe-control', title: '下一条回复', disabled: disabled || swipeId >= swipes.length - 1,
+                    onClick: () => { if (onSwipe) void onSwipe(index, swipeId + 1) },
+                  }, '›'),
+                )
+              : null,
             h('button', {
               className: 'floor-action', title: editing ? '取消编辑' : '编辑本层', disabled: disabled || saving,
               onClick: () => { setEditing((value) => !value); setCollapsed(false) },
@@ -1198,8 +2039,7 @@
             ? h('div', { className: 'floor-collapsed-body' }, preview || '(空消息)')
             : h(MessageContent, {
                 content: message.content, role: message.role, character,
-                depth: Math.max(0, total - index - 1), userName, mvuState,
-                liveStatusSource: isLatestAssistant && total > 1 ? liveStatusSource : null,
+                sessionId, depth: Math.max(0, total - index - 1), userName, mvuState, onVariablesChange,
               }),
       )
     }
@@ -1434,30 +2274,71 @@
     // ─── 全局正则脚本(酒馆 Regex 扩展) ────────────────────────────────────
     // display 位在前端渲染时应用(不落库);user_input/ai_output 位由服务端应用。
     // 应用逻辑与 src/agent-loop/regex-scripts.ts 保持一致(前端无法 import ts,双实现)。
-    let displayRegexScripts = /** @type {{id:string,scriptName:string,findRegex:string,replaceString:string,trimStrings:string[],placement:string[],disabled:boolean}[]} */([])
+    let displayRegexScripts = /** @type {{id:string,scriptName:string,findRegex:string,replaceString:string,trimStrings:string[],placement:string[],disabled:boolean,markdownOnly:boolean,promptOnly:boolean,runOnEdit:boolean,substituteRegex:number,minDepth:number|null,maxDepth:number|null}[]} */([])
     function regexFromStringUI(input) {
       try {
-        const m = input.match(/(\/?)(.+)\1([a-z]*)/i)
-        if (m === null) return null
-        if (m[3] && !/^(?!.*?(.).*?\1)[gmixXsuUAJ]+$/.test(m[3])) return new RegExp(input)
-        return new RegExp(m[2], m[3] || '')
+        const literal = String(input).match(/^\/([\s\S]*)\/([a-z]*)$/iu)
+        if (literal === null) return new RegExp(String(input))
+        const flags = literal[2] || ''
+        if (flags && !/^(?!.*?(.).*?\1)[dgimsuvy]+$/u.test(flags)) return new RegExp(String(input))
+        return new RegExp(literal[1] || '', flags)
       } catch { return null }
     }
-    function runRegexScriptUI(script, rawString) {
+    function regexDepthUI(script, depth) {
+      if (depth === undefined || depth === null) return true
+      if (script.minDepth !== null && script.minDepth !== undefined && Number(script.minDepth) >= -1 && depth < Number(script.minDepth)) return false
+      if (script.maxDepth !== null && script.maxDepth !== undefined && Number(script.maxDepth) >= 0 && depth > Number(script.maxDepth)) return false
+      return true
+    }
+    function regexEscapeUI(value) {
+      return String(value || '').replace(/[\\^$.*+?()\[\]{}|/\-]/g, '\\$&')
+    }
+    function expandRegexReplacementUI(template, match, captures, groups, offset, input, trimStrings, character, userName) {
+      const prefix = input.slice(0, offset)
+      const suffix = input.slice(offset + match.length)
+      let replacement = String(template || '').replace(/\{\{match\}\}/giu, match)
+      replacement = replacement.replace(/\$\$|\$&|\$`|\$'|\$\d{1,2}|\$<([^>]+)>/gu, (token, named) => {
+        if (token === '$$') return '$'
+        if (token === '$&') return match
+        if (token === '$`') return prefix
+        if (token === "$'") return suffix
+        if (named !== undefined) {
+          const captured = groups && groups[named]
+          if (captured === undefined || captured === null) return ''
+          let out = String(captured)
+          for (const trim of (trimStrings || [])) if (trim) out = out.split(cardMacro(trim, character, userName)).join('')
+          return out
+        }
+        const number = Number(token.slice(1))
+        if (number === 0) return match
+        const captured = captures[number - 1]
+        if (captured === undefined || captured === null) return ''
+        let out = String(captured)
+        for (const trim of (trimStrings || [])) if (trim) out = out.split(cardMacro(trim, character, userName)).join('')
+        return out
+      })
+      return cardMacro(replacement, character, userName)
+    }
+    function runRegexScriptUI(script, rawString, character = null, userName = '用户', depth = undefined) {
       if (script.disabled || !script.findRegex || !rawString) return rawString
-      const find = regexFromStringUI(script.findRegex)
+      if (script.promptOnly && !script.markdownOnly) return rawString
+      if (!regexDepthUI(script, depth)) return rawString
+      const mode = Number(script.substituteRegex || 0)
+      let findSource = String(script.findRegex)
+      if (mode !== 0) {
+        findSource = cardMacro(findSource, character, userName)
+        if (mode === 2) findSource = regexEscapeUI(findSource)
+      }
+      const find = regexFromStringUI(findSource)
       if (!find) return rawString
       try {
         return rawString.replace(find, (...args) => {
-          const groups = args[args.length - 1]
-          const template = script.replaceString.replace(/\{\{match\}\}/gi, '$0')
-          return template.replace(/\$(\d+)|\$<([^>]+)>/g, (_m, num, name) => {
-            let captured = num !== undefined ? args[Number(num)] : (groups && typeof groups === 'object' ? groups[name] : undefined)
-            if (captured === undefined || captured === null) return ''
-            let out = String(captured)
-            for (const t of (script.trimStrings || [])) { if (t) out = out.split(t).join('') }
-            return out
-          })
+          const last = args[args.length - 1]
+          const groups = last && typeof last === 'object' ? last : undefined
+          const input = String(groups === undefined ? last : args[args.length - 2] || rawString)
+          const offsetIndex = groups === undefined ? args.length - 2 : args.length - 3
+          const offset = typeof args[offsetIndex] === 'number' ? args[offsetIndex] : 0
+          return expandRegexReplacementUI(script.replaceString, String(args[0] || ''), args.slice(1, offsetIndex), groups, offset, input, script.trimStrings, character, userName)
         })
       } catch { return rawString }
     }
@@ -1480,16 +2361,12 @@
       if (!find) return rawString
       try {
         return rawString.replace(find, (...args) => {
-          const groups = args[args.length - 1]
-          let replacement = String(script.replaceString || '').replace(/\{\{match\}\}/giu, '$0')
-          replacement = replacement.replace(/\$(\d+)|\$<([^>]+)>/gu, (_m, num, name) => {
-            let captured = num !== undefined ? args[Number(num)] : (groups && typeof groups === 'object' ? groups[name] : undefined)
-            if (captured === undefined || captured === null) return ''
-            let out = String(captured)
-            for (const trim of (script.trimStrings || [])) if (trim) out = out.split(cardMacro(trim, character, userName)).join('')
-            return out
-          })
-          return cardMacro(replacement, character, userName)
+          const last = args[args.length - 1]
+          const groups = last && typeof last === 'object' ? last : undefined
+          const input = String(groups === undefined ? last : args[args.length - 2] || rawString)
+          const offsetIndex = groups === undefined ? args.length - 2 : args.length - 3
+          const offset = typeof args[offsetIndex] === 'number' ? args[offsetIndex] : 0
+          return expandRegexReplacementUI(script.replaceString, String(args[0] || ''), args.slice(1, offsetIndex), groups, offset, input, script.trimStrings, character, userName)
         })
       } catch { return rawString }
     }
@@ -1501,19 +2378,18 @@
     function applyDisplayRegex(text, placement = 2, character = null, depth = undefined, userName = '用户') {
       let out = text
       for (const s of displayRegexScripts) {
-        if (s.disabled || !s.placement.includes('display')) continue
-        out = runRegexScriptUI(s, out)
+        const markdownPlacement = s.markdownOnly && s.placement.includes(placement === 1 ? 'user_input' : 'ai_output')
+        if (s.disabled || (!s.placement.includes('display') && !markdownPlacement)) continue
+        out = runRegexScriptUI(s, out, character, userName, depth)
       }
       const scoped = character && character.frontend && Array.isArray(character.frontend.regexScripts)
         ? character.frontend.regexScripts : []
       const eligible = scoped.filter((s) => !s.disabled && Array.isArray(s.placement)
         && s.placement.includes(placement) && cardRegexInDepth(s, depth))
-      // SillyTavern first runs scripts without an ephemerality flag, then
-      // runs the surface-specific pass. This matters when a normal script
-      // creates a placeholder that a later markdownOnly script expands.
-      for (const s of eligible) {
-        if (!s.markdownOnly && !s.promptOnly) out = runCardRegexScriptUI(s, out, character, userName)
-      }
+      // In SillyTavern's messageFormatting(..., isMarkdown: true) pass,
+      // ordinary scoped scripts and promptOnly scripts do not run again.
+      // They belong to the stored/prompt pipeline.  Running them here made
+      // placeholders expand twice and was one source of misplaced HUD HTML.
       for (const s of eligible) {
         if (s.markdownOnly) out = runCardRegexScriptUI(s, out, character, userName)
       }
@@ -1531,6 +2407,12 @@
       const [replace, setReplace] = useState('')
       const [trims, setTrims] = useState('')
       const [placements, setPlacements] = useState(['display'])
+      const [markdownOnly, setMarkdownOnly] = useState(false)
+      const [promptOnly, setPromptOnly] = useState(false)
+      const [runOnEdit, setRunOnEdit] = useState(false)
+      const [substituteRegex, setSubstituteRegex] = useState(0)
+      const [minDepth, setMinDepth] = useState('')
+      const [maxDepth, setMaxDepth] = useState('')
       const [loading, setLoading] = useState(false)
       const [testIn, setTestIn] = useState('')
       const [testOut, setTestOut] = useState(null)
@@ -1544,8 +2426,15 @@
       }, [props])
       useEffect(() => { refresh() }, [refresh])
 
-      const startCreate = () => { setEditingId(''); setName(''); setFind(''); setReplace(''); setTrims(''); setPlacements(['display']); setTestOut(null) }
-      const startEdit = (s) => { setEditingId(s.id); setName(s.scriptName); setFind(s.findRegex); setReplace(s.replaceString); setTrims((s.trimStrings || []).join('\n')); setPlacements(s.placement || ['display']); setTestOut(null) }
+      const startCreate = () => {
+        setEditingId(''); setName(''); setFind(''); setReplace(''); setTrims(''); setPlacements(['display'])
+        setMarkdownOnly(false); setPromptOnly(false); setRunOnEdit(false); setSubstituteRegex(0); setMinDepth(''); setMaxDepth(''); setTestOut(null)
+      }
+      const startEdit = (s) => {
+        setEditingId(s.id); setName(s.scriptName); setFind(s.findRegex); setReplace(s.replaceString); setTrims((s.trimStrings || []).join('\n')); setPlacements(s.placement || ['display'])
+        setMarkdownOnly(s.markdownOnly === true); setPromptOnly(s.promptOnly === true); setRunOnEdit(s.runOnEdit === true); setSubstituteRegex(Number(s.substituteRegex || 0))
+        setMinDepth(s.minDepth === null || s.minDepth === undefined ? '' : String(s.minDepth)); setMaxDepth(s.maxDepth === null || s.maxDepth === undefined ? '' : String(s.maxDepth)); setTestOut(null)
+      }
       const cancelEdit = () => { setEditingId(null); setTestOut(null) }
       const togglePlacement = (p) => setPlacements((prev) => prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p])
 
@@ -1558,6 +2447,12 @@
           trimStrings: trims.split('\n').map((s) => s.trim()).filter((s) => s.length > 0),
           placement: placements.length > 0 ? placements : ['display'],
           disabled: false,
+          markdownOnly,
+          promptOnly,
+          runOnEdit,
+          substituteRegex,
+          minDepth: minDepth.trim() === '' ? null : Number(minDepth),
+          maxDepth: maxDepth.trim() === '' ? null : Number(maxDepth),
         }
         setLoading(true)
         try {
@@ -1565,7 +2460,7 @@
           else if (editingId !== null) await apiPut(`/api/regex/${encodeURIComponent(editingId)}`, body)
           cancelEdit(); await refresh()
         } catch (err) { props.onError(String(err.message || err)) } finally { setLoading(false) }
-      }, [editingId, name, find, replace, trims, placements, refresh, props])
+      }, [editingId, name, find, replace, trims, placements, markdownOnly, promptOnly, runOnEdit, substituteRegex, minDepth, maxDepth, refresh, props])
 
       const toggleDisabled = useCallback(async (s) => {
         try {
@@ -1604,6 +2499,18 @@
                   h('input', { type: 'checkbox', checked: placements.includes(p), onChange: () => togglePlacement(p) }),
                   PLACEMENT_LABELS[p],
                 ))),
+              h('div', { className: 'row', style: { flexWrap: 'wrap' } },
+                h('label', { className: 'compact-check' }, h('input', { type: 'checkbox', checked: markdownOnly, onChange: (e) => setMarkdownOnly(e.target.checked) }), '仅显示（markdownOnly）'),
+                h('label', { className: 'compact-check' }, h('input', { type: 'checkbox', checked: promptOnly, onChange: (e) => setPromptOnly(e.target.checked) }), '仅提示词（promptOnly）'),
+                h('label', { className: 'compact-check' }, h('input', { type: 'checkbox', checked: runOnEdit, onChange: (e) => setRunOnEdit(e.target.checked) }), '编辑时执行'),
+              ),
+              h('div', { className: 'row', style: { flexWrap: 'wrap' } },
+                h('label', { className: 'compact-field' }, '查找宏', h('select', { value: substituteRegex, onChange: (e) => setSubstituteRegex(Number(e.target.value)) },
+                  h('option', { value: 0 }, '不替换'), h('option', { value: 1 }, '原样替换'), h('option', { value: 2 }, '转义替换'),
+                )),
+                h('label', { className: 'compact-field' }, '最小深度', h('input', { type: 'number', min: -1, value: minDepth, placeholder: '不限', onChange: (e) => setMinDepth(e.target.value) })),
+                h('label', { className: 'compact-field' }, '最大深度', h('input', { type: 'number', min: 0, value: maxDepth, placeholder: '不限', onChange: (e) => setMaxDepth(e.target.value) })),
+              ),
               h('div', { className: 'row' },
                 h('button', { onClick: save, disabled: loading }, loading ? '保存中…' : '保存'),
                 h('button', { onClick: cancelEdit }, '取消'),
@@ -2238,6 +3145,7 @@
       { id: 'sessions', label: '会话', icon: '☷', side: 'right' },
       { id: 'ui', label: '界面', icon: '▣', side: 'left' },
       { id: 'api', label: '模型', icon: '⚙', side: 'left' },
+      { id: 'extensions', label: '扩展', icon: '◇', side: 'left' },
       { id: 'persona', label: 'Persona', icon: '☺', side: 'left' },
       { id: 'worldbooks', label: '世界书', icon: '▤', side: 'left' },
       { id: 'regex', label: '正则', icon: '⌁', side: 'left' },
@@ -2270,6 +3178,7 @@
       const [uiSettings, setUiSettings] = useState(() => readUiSettings())
       const fileRef = useRef(null)
       const chatRef = useRef(null)
+      const cardVariableWriteRef = useRef(Promise.resolve())
       const changeChatWidth = useCallback((value) => {
         setUiSettings((previous) => {
           const next = { ...previous, chatWidth: clampChatWidth(value) }
@@ -2277,11 +3186,29 @@
           return next
         })
       }, [])
-      const liveStatusSource = useMemo(
-        () => findLiveStatusSource(history, currentCharacter, currentUserName),
-        [history, currentCharacter, currentUserName],
-      )
-
+      // 角色卡 iframe 里的 Tavern Helper/MVU 更新先回到宿主状态，再由
+      // 后端持久化层决定是否写回当前 session。这样同一轮里所有楼层的
+      // 状态栏会立即看到一致快照，不再只显示卡片初始化时的变量。
+      const onCardVariablesChange = useCallback((next) => {
+        const normalized = next?.stat_data ? next : { stat_data: next || {} }
+        setMvuState(normalized)
+        if (currentSessionId === null) return
+        const sessionId = currentSessionId
+        // Card scripts can emit several variable updates in one turn. Keep
+        // their order, otherwise a slower HTTP request could overwrite a
+        // newer snapshot after the card already rendered it.
+        cardVariableWriteRef.current = cardVariableWriteRef.current
+          .catch(() => undefined)
+          .then(async () => {
+            const response = await apiPut(`/api/sessions/${encodeURIComponent(sessionId)}/variables`, {
+              format: 0,
+              scope: 'chat',
+              variables: normalized,
+            })
+            if (response?.mvuState !== undefined) setMvuState({ stat_data: response.mvuState })
+          })
+          .catch((err) => setError(`保存角色卡变量失败: ${String(err?.message || err)}`))
+      }, [currentSessionId])
       useEffect(() => {
         (async () => {
           try {
@@ -2479,7 +3406,13 @@
               if (ev.event === 'stage') {
                 let payload; try { payload = JSON.parse(ev.data) } catch { continue }
                 if (payload.name === 'final') {
-                  setHistory((prev) => [...prev, { role: 'assistant', content: payload.result.displayReply || payload.result.reply }])
+                  const rawMessage = payload.result && typeof payload.result.message === 'object'
+                    ? payload.result.message
+                    : null
+                  const message = rawMessage === null
+                    ? { role: 'assistant', content: payload.result.displayReply || payload.result.reply }
+                    : { ...rawMessage, content: payload.result.displayReply || rawMessage.content || payload.result.reply }
+                  setHistory((prev) => [...prev, message])
                   setMvuState(payload.result.mvuState ?? null)
                   setLastTokenStats(payload.result.tokenStats || null)
                   setProgressStages((prev) => ({ ...prev, [payload.name]: payload.status }))
@@ -2508,7 +3441,9 @@
                     const next = [...prev]
                     for (let i = next.length - 1; i >= 0; i--) {
                       if (next[i]?.role === 'assistant') {
-                        next[i] = { ...next[i], content: patchedReply }
+                        next[i] = payload.message && typeof payload.message === 'object'
+                          ? { ...payload.message, content: patchedReply }
+                          : { ...next[i], content: patchedReply }
                         return next
                       }
                     }
@@ -2586,6 +3521,17 @@
           throw err
         }
       }, [currentSessionId, refreshCharacterSessions])
+
+      const switchSwipe = useCallback(async (index, swipeId) => {
+        if (currentSessionId === null || loading) return
+        try {
+          const r = await apiPut(`/api/sessions/${encodeURIComponent(currentSessionId)}/message/${index}/swipe`, { swipeId })
+          setHistory(r.history || [])
+          setMvuState(r.mvuState ?? null)
+        } catch (err) {
+          setError(String(err.message || err))
+        }
+      }, [currentSessionId, loading])
 
       const deleteMessage = useCallback(async (index) => {
         if (currentSessionId === null || loading) return
@@ -2742,7 +3688,9 @@
             ? h(UiSettingsPanel, { chatWidth: uiSettings.chatWidth, onChatWidthChange: changeChatWidth })
           : activeTool === 'api'
             ? h(ApiConfigPanel, { onConfigChange: refreshHealth })
-            : activeTool === 'persona'
+          : activeTool === 'extensions'
+            ? h(ExtensionsPanel, { onError: setError })
+          : activeTool === 'persona'
               ? h(PersonaPanel, { onError: setError, onPersonaChange: refreshCurrentUserName })
               : activeTool === 'worldbooks'
                 ? h(WorldbooksPanel, { currentCharacterId, onWorldbookChange: refreshHealth, onError: setError })
@@ -2814,10 +3762,11 @@
                 : history.map((m, i) => h(MessageFloor, {
                     key: `${m.role}-${i}`,
                     message: m, index: i, total: history.length,
-                    character: currentCharacter, userName: currentUserName, mvuState,
-                    liveStatusSource,
+                    character: currentCharacter, sessionId: currentSessionId, userName: currentUserName, mvuState,
+                    onVariablesChange: onCardVariablesChange,
                     disabled: currentSessionId === null || loading,
                     onReroll: i === history.length - 1 && m.role === 'assistant' ? reroll : null,
+                    onSwipe: switchSwipe,
                     onSaveEdit: saveMessageEdit,
                     onDelete: deleteMessage,
                   })),

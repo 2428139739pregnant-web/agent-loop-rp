@@ -14,7 +14,7 @@
 - 读取角色卡的描述、性格、场景、示例对话、系统提示词、历史后指令、主开场白和多个备选开场白。
 - 兼容角色卡内嵌世界书，以及独立的 SillyTavern World Info JSON。
 - 提供三种普通绿灯匹配模式：`ST strict`、`ST enhanced`、`Agent native`。
-- 支持角色卡自带的部分 EJS、ST-Prompt-Template 注入指令、Tavern Helper 状态和 MVU 变量处理。
+- 支持角色卡自带的部分 EJS、ST-Prompt-Template 注入指令、Tavern Helper 状态和 MVU 变量处理；HTML 前端边界按 JS-Slash-Runner 的 iframe 规则运行。
 - 支持 SillyTavern 风格的 Regex 脚本，区分用户输入、AI 输出、显示文本和世界书位置。
 - 支持角色卡 Regex 的 `markdownOnly`/`promptOnly`、宏替换、捕获组清理和深度限制；角色卡生成的 HTML/CSS/内联脚本会在会话区域全宽 sandbox iframe 中显示。
 - 支持多个开场白在聊天区域内切换；重 roll 时保留原始用户输入。
@@ -237,10 +237,15 @@ PNG 中同时存在 `ccv3` 和旧 `chara` 元数据时，优先使用 `ccv3`。�
 - `[GENERATE:BEFORE/AFTER]` 和常见 `@@generate_*` 别名。
 - `[RENDER:BEFORE/AFTER]` 和常见 `@@render_*` 别名。
 - 受限 EJS：条件、循环、输出、角色/用户名、近期消息读取、变量读取、YAML/JSON 辅助等。
-- Tavern Helper 的 Session 变量、脚本树和世界书访问的安全子集。
+- Tavern Helper 的 Session 变量、脚本树和世界书访问的安全子集；变量作用域包含 `global`、`preset`、`character`、`chat`、`message`、`script` 和按 `extension_id` 隔离的 `extension`。
+- iframe 变量 API 兼容官方 option：省略 option 时默认为 `chat`，`message` 的 `message_id` 默认为 `latest`，`script` 的 `script_id` 默认为当前 iframe 脚本 ID；`extension` 必须显式传入 `extension_id`。option 会原样随宿主 bridge 传递，message 作用域不会回退为 chat。
 - MVU 的初始化、状态读取和变量更新路径。
 
-以下能力目前会保留但不执行，或只执行确定性安全子集：复杂 decorator、动态递归世界书、任意网络请求、文件访问、父页面 DOM 操作、未批准的模块导入、复杂变量写入和依赖宿主 UI 的功能。具体原因会记录为 skipped/inactive，避免静默地产生错误结果。
+以下能力目前会保留但不执行，或只执行确定性安全子集：复杂 decorator、动态向量匹配、任意网络请求、文件访问、父页面 DOM 操作、未批准的模块导入、复杂变量写入和依赖宿主 UI 的功能。世界书 `sticky/cooldown/delay` 已按 SillyTavern 的消息计数接入会话级确定性状态机；普通递归、条目级 scan depth、exclude/prevent/delay recursion 也按确定性规则执行。未支持的部分会记录为 skipped/inactive，避免静默地产生错误结果。
+
+项目底层有两个独立 adapter：`TavernHelperAdapter` 负责角色卡前端 iframe、脚本树、MVU 事件/变量和世界书桥；`PromptTemplateAdapter` 负责 EJS、`[GENERATE:*]`、`[RENDER:*]`、`@INJECT` 和 `[InitialVariables]`。两者都在发送正文前的本地兼容层运行，不会因为适配插件增加 LLM 调用；世界书匹配 Agent 与上下文 Agent 仍然并行。
+
+左侧“扩展”面板提供手动更新、版本激活和回滚。系统只从两个官方仓库的固定 manifest 和 allowlist 文件下载上游快照，写入根目录 `extensions/`，更新时通过临时目录原子替换；上游 bundle 用于版本追踪和后续适配，当前实际执行的仍是项目内审计过的 adapter，不会直接 `eval` 远程代码。可用接口为 `GET /api/extensions`、`POST /api/extensions/check`、`POST /api/extensions/update`、`POST /api/extensions/activate` 和 `POST /api/extensions/rollback`。
 
 ### Regex
 
@@ -255,7 +260,7 @@ PNG 中同时存在 `ccv3` 和旧 `chara` 元数据时，优先使用 `ccv3`。�
 
 Regex 执行失败时保留原文，不让单个脚本阻断整轮回复。
 
-角色卡显示结果中的完整 HTML，或包含 `<style>`/`<script>` 的 HTML 片段，会进入无同源权限的 sandbox iframe；外部脚本、嵌套 iframe 和父页面访问会被隔离。普通 Markdown 仍按 Markdown 渲染，存档正文不会被显示层美化改写。
+角色卡显示结果中的完整 HTML，或包含 `<style>`/`<script>` 的 HTML 片段，会进入独立 sandbox iframe；外部脚本、嵌套 iframe 和父页面访问不属于稳定兼容契约，父层只提供酒馆助手桥接和高度测量。由于布局测量采用同源 iframe fallback，这个兼容运行时应只在本机使用，不要直接暴露到公网。普通 Markdown 仍按 Markdown 渲染，存档正文不会被显示层美化改写。
 
 ## 目录结构
 
@@ -307,6 +312,7 @@ ui-server-state.json     # 当前角色、会话等 UI 状态
 ```powershell
 pnpm typecheck
 pnpm test:agents
+node scripts/agent-loop-ui/variable-bridge.unit.test.mjs
 ```
 
 只运行演示脚本：
@@ -343,6 +349,11 @@ node --experimental-transform-types scripts/agent-loop-demo.mjs
 | `GET/PUT/POST` | `/api/mvu-settings` | MVU 模型、温度和预设 |
 | `GET/PUT` | `/api/response-settings` | 正文人称与字数设置 |
 | `GET/POST` | `/api/regex` | Regex 脚本管理 |
+| `GET` | `/api/extensions` | 查看两个扩展 adapter 和上游版本状态 |
+| `POST` | `/api/extensions/check` | 并行检查官方扩展更新 |
+| `POST` | `/api/extensions/update` | 手动下载指定扩展的 allowlist bundle |
+| `POST` | `/api/extensions/activate` | 激活已下载并校验过的指定版本 |
+| `POST` | `/api/extensions/rollback` | 回滚到最近一次安装的其他版本 |
 
 `/api/run` 的 SSE 事件主要包括：
 

@@ -7,6 +7,7 @@ import {
   constantWorldbookDoc,
   renderTemplate,
   responseAgent,
+  splitWorldbookMatches,
   type ResponseInput,
 } from './response.ts'
 import { DEFAULT_RESPONSE_PERSPECTIVES } from '../response-settings.ts'
@@ -57,6 +58,29 @@ test('buildWorldbookBlock sorts by order asc, weight desc', () => {
 
 test('buildWorldbookBlock handles empty', () => {
   assert.equal(buildWorldbookBlock({ matches: [] }), '')
+})
+
+test('splitWorldbookMatches preserves all SillyTavern insertion positions', () => {
+  const buckets = splitWorldbookMatches([
+    { path: 'before', order: 1, weight: 0, content: '0', position: 0 },
+    { path: 'after', order: 2, weight: 0, content: '1', position: 1 },
+    { path: 'examples-before', order: 3, weight: 0, content: '2', position: 2 },
+    { path: 'examples-after', order: 4, weight: 0, content: '3', position: 3 },
+    { path: 'depth', order: 5, weight: 0, content: '4', position: 4, depth: 2 },
+    { path: 'author-before', order: 6, weight: 0, content: '5', position: 5 },
+    { path: 'author-after', order: 7, weight: 0, content: '6', position: 6 },
+    { path: 'outlet', order: 8, weight: 0, content: '7', position: 7 },
+    { path: 'legacy', order: 9, weight: 0, content: 'legacy' },
+  ])
+  assert.deepEqual(buckets.beforeCharacter.map(item => item.path), ['before'])
+  assert.deepEqual(buckets.afterCharacter.map(item => item.path), ['after'])
+  assert.deepEqual(buckets.beforeExamples.map(item => item.path), ['examples-before'])
+  assert.deepEqual(buckets.afterExamples.map(item => item.path), ['examples-after'])
+  assert.deepEqual(buckets.atDepth.map(item => item.path), ['depth'])
+  assert.deepEqual(buckets.beforeAuthorNote.map(item => item.path), ['author-before'])
+  assert.deepEqual(buckets.afterAuthorNote.map(item => item.path), ['author-after'])
+  assert.deepEqual(buckets.outlet.map(item => item.path), ['outlet'])
+  assert.deepEqual(buckets.unplaced.map(item => item.path), ['legacy'])
 })
 
 // ─── buildContextBlock ─────────────────────────────────────────────────────
@@ -524,6 +548,22 @@ test('buildConstantWorldbookBlocks keeps enabled constants only, sorted order DE
   assert.ok(blocks.style.includes('BLUE_S2'))
   assert.ok(!blocks.persona.includes('GREEN'), '绿灯不常驻')
   assert.ok(!blocks.persona.includes('OFF') && !blocks.worldview.includes('OFF'), '禁用条目跳过')
+})
+
+test('constant worldbook entries honor ST probability after activation', () => {
+  const store = {
+    list: () => [
+      { path: 'book/zero', keywords: [], order: 1, weight: 0, content: 'ZERO', constant: true, probability: 0 },
+      { path: 'book/half', keywords: [], order: 2, weight: 0, content: 'HALF', constant: true, probability: 50 },
+      { path: 'book/off', keywords: [], order: 3, weight: 0, content: 'OFF', constant: true, probability: 0, useProbability: false },
+    ],
+  }
+  const blocked = buildConstantWorldbookBlocks(store, text => text, { random: () => 0.99 })
+  assert.ok(!blocked.persona.includes('ZERO'))
+  assert.ok(!blocked.persona.includes('HALF'))
+  assert.ok(blocked.persona.includes('OFF'))
+  const passed = buildConstantWorldbookBlocks(store, text => text, { random: () => 0.01 })
+  assert.ok(passed.persona.includes('HALF'))
 })
 
 test('responseAgent.run appends standalone constant worldbook blocks into the doc sections', async () => {

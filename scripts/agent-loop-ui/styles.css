@@ -428,6 +428,17 @@ button.mini {
   border-radius: 4px;
 }
 button.mini:hover { color: var(--text); border-color: var(--text-dim); }
+.extension-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.extension-card { padding: 9px; border: 1px solid var(--border); border-radius: 7px; background: rgba(20,23,28,.72); }
+.extension-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.extension-card .name { font-weight: 650; color: var(--text); }
+.extension-card .sub { margin-top: 2px; color: var(--text-dim); font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; }
+.extension-meta { display: flex; justify-content: space-between; gap: 8px; margin: 8px 0 5px; color: var(--text-dim); font-size: 10px; }
+.extension-actions { align-items: center; justify-content: space-between; margin-top: 8px; }
+.extension-actions a { color: var(--accent-2); font-size: 11px; }
+.extension-versions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 7px; }
+.extension-status-update-available { color: var(--accent-2); border-color: rgba(214,154,98,.55); }
+.extension-status-error { color: var(--error); border-color: rgba(208,95,95,.55); }
 
 /* ── Character greeting head ─────────────────────────────────────────── */
 .greeting-head {
@@ -875,9 +886,28 @@ button.mini:hover { color: var(--text); border-color: var(--text-dim); }
 .floor-preview { min-width: 0; overflow: hidden; flex: 1; color: var(--text-dim); text-overflow: ellipsis; white-space: nowrap; }
 .floor-actions { display: flex; gap: 4px; margin-left: auto; }
 .floor-action { padding: 3px 6px; white-space: nowrap; }
+.swipe-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 2px;
+  border: 1px solid rgba(214,154,98,.24);
+  border-radius: 4px;
+  padding: 1px 2px;
+}
+.swipe-control { width: 20px; padding: 2px 0; line-height: 1; }
+.swipe-counter {
+  min-width: 34px;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 18px;
+  text-align: center;
+  white-space: nowrap;
+}
 .floor-action-primary { border-color: rgba(214,154,98,.45); color: var(--accent-2); }
 .floor-action-danger:hover:not(:disabled) { border-color: var(--error); color: var(--error); }
 .floor-action:disabled, .floor-toggle:disabled { cursor: not-allowed; opacity: .45; }
+.compact-check { display: inline-flex; align-items: center; gap: 4px; color: var(--text-dim); font-size: 11px; }
 .floor-collapsed-body {
   overflow: hidden;
   color: var(--text-dim);
@@ -1065,7 +1095,7 @@ body { overflow: hidden; background: var(--bg); }
 .msg .role { color: #aeb7c4; }
 .msg.system { align-self: center; max-width: 620px; padding: 14px 18px; background: rgba(255,255,255,.025); border-color: var(--border); text-align: center; }
 .msg-text { width: 100%; max-width: 100%; box-sizing: border-box; }
-.msg-content-stack { display: flex; flex-direction: column; gap: 10px; }
+.msg-content-stack { display: flex; flex-direction: column; gap: 0; }
 .msg-markdown { white-space: normal; overflow-wrap: anywhere; }
 .msg-markdown p { margin: 0 0 1em; }
 .msg-markdown p:last-child { margin-bottom: 0; }
@@ -1088,11 +1118,12 @@ body { overflow: hidden; background: var(--bg); }
   min-width: 0;
   box-sizing: border-box;
   margin: 0;
-  min-height: 180px;
-  border: 1px solid rgba(214,154,98,.18);
-  border-radius: 8px;
-  background: rgba(12,15,20,.72);
-  overflow: auto;
+  min-height: 1px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: hidden;
+  vertical-align: top;
 }
 .msg-html-surface { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; }
 .msg-html-surface > .msg-card-html-frame { width: 100%; max-width: 100%; }

@@ -9,9 +9,11 @@ import type {
   ImportedCharacterFrontend,
   ImportedLorebook,
   ImportedLorebookEntry,
+  ImportedTavernHelperScript,
+  ImportedTavernHelperScriptTree,
 } from './types.ts'
 import { parseRegexScript } from './regex-script.ts'
-import { parseTavernHelperScripts, tavernHelperExtension, tavernHelperVariables } from './tavern-helper.ts'
+import { tavernHelperExtension, tavernHelperVariables } from './tavern-helper.ts'
 
 /** Maximum decoded card definition accepted independently from transport media. */
 export const MAX_CHARACTER_CARD_JSON_BYTES = 8 * 1024 * 1024
@@ -130,6 +132,98 @@ function optionalFiniteNumber(value: JsonValue | undefined, path: string): numbe
   return value
 }
 
+function scriptTreeText(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback
+}
+
+function parseTavernHelperScriptTrees(values: readonly unknown[], path: string): readonly ImportedTavernHelperScriptTree[] {
+  const ids = new Set<string>()
+  let nodeCount = 0
+
+  const parseNode = (value: unknown, nodePath: string): ImportedTavernHelperScriptTree => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new Error(`${nodePath} must be an object`)
+    }
+    const item = value as Record<string, unknown>
+    nodeCount += 1
+    if (nodeCount > 512) throw new Error('Tavern Helper script tree is too large')
+
+    const isFolder = item.type === 'folder' || Array.isArray(item.scripts)
+    const name = scriptTreeText(item.name)
+    const rawId = scriptTreeText(item.id)
+    const id = rawId === '' ? `${nodePath}:${name}` : rawId
+    if (ids.has(id)) throw new Error(`Tavern Helper script tree id '${id}' is duplicated`)
+    ids.add(id)
+    const enabled = item.enabled !== false
+
+    if (isFolder) {
+      const children = Array.isArray(item.scripts) ? item.scripts : []
+      return {
+        type: 'folder',
+        enabled,
+        name,
+        id,
+        icon: scriptTreeText(item.icon, 'fa-solid fa-folder'),
+        color: scriptTreeText(item.color),
+        scripts: children.map((child, index) => parseNode(child, `${nodePath}.scripts[${index}]`)),
+      }
+    }
+
+    const button = typeof item.button === 'object' && item.button !== null && !Array.isArray(item.button)
+      ? item.button as Record<string, unknown> : {}
+    const rawButtons = Array.isArray(button.buttons) ? button.buttons : []
+    const buttons = rawButtons.flatMap(value => {
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) return []
+      const candidate = value as Record<string, unknown>
+      const buttonName = scriptTreeText(candidate.name)
+      if (buttonName === '') return []
+      return [{ name: buttonName, visible: candidate.visible !== false }]
+    })
+    const data = tavernHelperVariables(item.data)
+    const exportWith = typeof item.export_with === 'object' && item.export_with !== null && !Array.isArray(item.export_with)
+      ? item.export_with as Record<string, unknown> : {}
+    return {
+      type: 'script',
+      enabled,
+      name,
+      id,
+      content: scriptTreeText(item.content),
+      info: scriptTreeText(item.info),
+      button: {
+        enabled: button.enabled !== false,
+        buttons,
+      },
+      data,
+      export_with: {
+        data: exportWith.data !== false,
+        button: exportWith.button !== false,
+      },
+    }
+  }
+
+  return values.map((value, index) => parseNode(value, `${path}[${index}]`))
+}
+
+function flattenTavernHelperScriptTrees(
+  trees: readonly ImportedTavernHelperScriptTree[],
+  parentEnabled = true,
+): readonly ImportedTavernHelperScript[] {
+  return trees.flatMap(tree => {
+    const enabled = parentEnabled && tree.enabled
+    if (tree.type === 'folder') return flattenTavernHelperScriptTrees(tree.scripts, enabled)
+    return [{
+      id: tree.id,
+      name: tree.name,
+      content: tree.content,
+      info: tree.info,
+      enabled,
+      buttonEnabled: tree.button.enabled,
+      buttons: tree.button.buttons,
+      data: tree.data,
+    }]
+  })
+}
+
 function stringArray(value: JsonValue | undefined, path: string, fallback: readonly string[] = []): string[] {
   if (value === undefined) return [...fallback]
   if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) {
@@ -147,16 +241,18 @@ function parseFrontend(data: JsonObject): ImportedCharacterFrontend {
   })()
   const helper = extensions?.tavern_helper
   const parsedHelper = helper === undefined ? undefined : tavernHelperExtension(helper, 'data.extensions.tavern_helper')
-  const helperScripts = parsedHelper === undefined ? [] : (() => {
+  const helperScriptTrees = parsedHelper === undefined ? [] : (() => {
     if (parsedHelper.value.scripts === undefined) return []
     if (!Array.isArray(parsedHelper.value.scripts)) throw new Error('data.extensions.tavern_helper.scripts must be an array')
-    return parseTavernHelperScripts(parsedHelper.value.scripts, 'data.extensions.tavern_helper.scripts')
+    return parseTavernHelperScriptTrees(parsedHelper.value.scripts, 'data.extensions.tavern_helper.scripts')
   })()
+  const helperScripts = flattenTavernHelperScriptTrees(helperScriptTrees)
   const helperVariables = tavernHelperVariables(parsedHelper?.value.variables)
   return {
     regexScripts,
     tavernHelperScriptNames: helperScripts.filter(script => script.enabled).map(script => script.name),
     tavernHelperScripts: helperScripts,
+    tavernHelperScriptTrees: helperScriptTrees,
     tavernHelperVariables: helperVariables,
     ...(parsedHelper === undefined ? {} : { tavernHelper: {
       format: parsedHelper.format,
@@ -225,6 +321,23 @@ function parseLorebookEntry(value: JsonValue, index: number, version: CharacterC
   const probability = lenientNumber(extensions.probability)
   const useProbability = lenientBool(extensions.useProbability)
   const scanDepth = lenientNumber(extensions.scan_depth ?? entry.scan_depth)
+  // V2/V3 cards in the wild put these flags either in `extensions` (the
+  // current export shape) or directly on the entry. Accept both so importing
+  // a card does not silently change its recursion semantics.
+  const excludeRecursion = lenientBool(extensions.exclude_recursion ?? entry.exclude_recursion)
+  const preventRecursion = lenientBool(extensions.prevent_recursion ?? entry.prevent_recursion)
+  const delayRecursionRaw = extensions.delay_until_recursion ?? entry.delay_until_recursion
+  const delayUntilRecursion = typeof delayRecursionRaw === 'boolean'
+    || typeof delayRecursionRaw === 'number'
+    ? delayRecursionRaw : undefined
+  const timedNumber = (extensionKey: string, entryKey: string): number | undefined => {
+    const value = extensions[extensionKey] ?? entry[entryKey]
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0
+      ? Math.trunc(value) : undefined
+  }
+  const sticky = timedNumber('sticky', 'sticky')
+  const cooldown = timedNumber('cooldown', 'cooldown')
+  const delay = timedNumber('delay', 'delay')
   // ST position 枚举原值:extensions.position ?? (position==='before_char' ? 0 : 1)
   // (换算与 ST world-info.js:5517 一致)。
   const stPosition = lenientNumber(extensions.position) ?? (position === 'before_char' ? 0 : 1)
@@ -243,6 +356,12 @@ function parseLorebookEntry(value: JsonValue, index: number, version: CharacterC
     matchWholeWords: optionalBoolean(entry.match_whole_words, `${path}.match_whole_words`) ?? false,
     secondaryLogic,
     ...(scanDepth === undefined ? {} : { scanDepth }),
+    ...(excludeRecursion === undefined ? {} : { excludeRecursion }),
+    ...(preventRecursion === undefined ? {} : { preventRecursion }),
+    ...(delayUntilRecursion === undefined ? {} : { delayUntilRecursion }),
+    ...(sticky === undefined ? {} : { sticky }),
+    ...(cooldown === undefined ? {} : { cooldown }),
+    ...(delay === undefined ? {} : { delay }),
     position,
     stPosition,
     ...(probability === undefined ? {} : { probability }),

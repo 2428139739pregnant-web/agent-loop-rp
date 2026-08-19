@@ -5,7 +5,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-session'
 /** Character Card generation selected at the import boundary. */
 export type CharacterCardVersion = 1 | 2 | 3
 
-/** One feature preserved from a card but deliberately not executed. */
+/** One feature preserved from a card but not fully represented or executed. */
 export const CHARACTER_IMPORT_DEGRADATIONS = [
   'character-assets',
   'future-card-version',
@@ -55,6 +55,40 @@ export interface ImportedTavernHelperScript {
   readonly data: Readonly<Record<string, JsonValue>>
 }
 
+/** One normalized script node retained in the original Tavern Helper tree. */
+export interface ImportedTavernHelperScriptTreeScript {
+  readonly type: 'script'
+  /** The script's own switch; parent-folder switches are applied when flattened. */
+  readonly enabled: boolean
+  readonly name: string
+  readonly id: string
+  readonly content: string
+  readonly info: string
+  readonly button: {
+    readonly enabled: boolean
+    readonly buttons: readonly ImportedTavernHelperButton[]
+  }
+  readonly data: Readonly<Record<string, JsonValue>>
+  readonly export_with: { readonly data: boolean; readonly button: boolean }
+}
+
+/** One normalized folder node retained in the original Tavern Helper tree. */
+export interface ImportedTavernHelperScriptTreeFolder {
+  readonly type: 'folder'
+  /** The folder's own switch; descendants inherit it when flattened. */
+  readonly enabled: boolean
+  readonly name: string
+  readonly id: string
+  readonly icon: string
+  readonly color: string
+  readonly scripts: readonly ImportedTavernHelperScriptTree[]
+}
+
+/** Lossless normalized Tavern Helper script tree used by card compatibility APIs. */
+export type ImportedTavernHelperScriptTree =
+  | ImportedTavernHelperScriptTreeScript
+  | ImportedTavernHelperScriptTreeFolder
+
 /** Non-sensitive Tavern Helper counts shown by reusable-library interfaces. */
 export interface TavernHelperLibrarySummary {
   readonly format?: 'object' | 'entries'
@@ -77,6 +111,8 @@ export interface ImportedCharacterFrontend {
   readonly regexScripts: readonly ImportedRegexScript[]
   readonly tavernHelperScriptNames: readonly string[]
   readonly tavernHelperScripts: readonly ImportedTavernHelperScript[]
+  /** Original card tree, including disabled folders and scripts. */
+  readonly tavernHelperScriptTrees?: readonly ImportedTavernHelperScriptTree[]
   readonly tavernHelperVariables: Readonly<Record<string, JsonValue>>
   readonly tavernHelper?: TavernHelperImportSummary
 }
@@ -108,6 +144,18 @@ export interface ImportedLorebookEntry {
   readonly matchWholeWords: boolean
   readonly secondaryLogic: 'and-any' | 'and-all' | 'not-any' | 'not-all'
   readonly scanDepth?: number
+  /** ST `extensions.exclude_recursion`: this entry may activate normally, but not from recursive text. */
+  readonly excludeRecursion?: boolean
+  /** ST `extensions.prevent_recursion`: this entry activates normally, but its content is not scanned recursively. */
+  readonly preventRecursion?: boolean
+  /** ST `extensions.delay_until_recursion`: false/0 means normal; true maps to recursion level 1. */
+  readonly delayUntilRecursion?: boolean | number
+  /** ST/Tavern Helper timed effect: keep active for N subsequent messages. */
+  readonly sticky?: number
+  /** ST/Tavern Helper timed effect: block activation for N subsequent messages. */
+  readonly cooldown?: number
+  /** ST/Tavern Helper timed effect: require N chat messages before activation. */
+  readonly delay?: number
   readonly position: 'before_char' | 'after_char'
   /**
    * SillyTavern position 枚举原值(0=before,1=after,2=ANTop,3=ANBottom,
@@ -143,7 +191,7 @@ export interface ImportedLorebook {
   readonly entries: readonly ImportedLorebookEntry[]
 }
 
-/** One SillyTavern World Info feature retained in raw JSON but not executed. */
+/** One SillyTavern World Info feature retained in raw JSON but not fully executed. */
 export const WORLD_INFO_IMPORT_DEGRADATIONS = [
   'entry-advanced-matching',
   'entry-decorators',

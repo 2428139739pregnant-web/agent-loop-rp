@@ -1,5 +1,39 @@
 # 更新日志
 
+## Unreleased
+
+### 修复
+
+- 对齐 ST-Prompt-Template 的世界书查询：EJS `getwi()`/`getWorldInfo()` 现在读取当前会话实际可见的角色卡、外部世界书和酒馆助手世界书，不再因为 renderer 未绑定书目而静默返回空内容。
+- 实现 `[InitialVariables]` 与 `@@initial_variables`：按 JSON 优先、YAML 回退解析对象，按条目顺序深度合并，并暴露给 EJS 的 `initial` 变量作用域；保留原有 `<initvar>`/`[initvar]` 兼容。
+- 保留 Tavern Helper 原始脚本树和父文件夹开关；禁用父文件夹时子脚本不会执行，同时补齐 `getScriptTrees`、`replaceScriptTrees`、`updateScriptTreesWith` 兼容 API。
+- 修正 ST 世界书 fallback：secondary key 不能脱离 primary key 独立触发；enhanced 模式同一条目每轮只进行一次概率判定；蓝灯无 key 条目仍可在空扫描文本时激活。
+- 按提示词模板官方规则处理 `@INJECT`：它属于扩展特殊条目，不再被普通蓝绿灯 matcher 错误拦截；继续由本地无 LLM 的插件 lane 完成注入。
+- 角色卡 iframe 同步脚本树快照，让卡片脚本在宿主会话内可以查询和替换当前 scope 的 ScriptTree。
+- 补齐酒馆助手 `extension` 变量作用域，按官方 `extension_id` 隔离读写，并兼容没有该字段的旧会话快照。
+- iframe 变量 bridge 对齐 Tavern Helper option：补齐 `message_id`（默认 `latest`）、`script_id`（默认当前脚本）和 `extension_id` 的原样透传；`message` 读写保持独立作用域，不再误写入 chat。
+- 补齐 Tavern Helper 注入的 `injectPrompts`、`uninjectPrompts`、`once`、`order`、`should_scan`、筛选和生成后消费逻辑，防止一次性注入误删新替换内容。
+- 世界书激活支持条目级 `scanDepth`、累计递归缓冲、`exclude_recursion`、`prevent_recursion` 和 `delay_until_recursion`，并把角色卡/独立世界书字段映射到执行层。
+- 按 SillyTavern 消息计数接入世界书 `sticky`、`cooldown`、`delay`；定时效果按会话持久化，重 roll 不推进计数，分支回退会清理未来状态。
+- response 阶段保留 ST 世界书 0–7 插入位置，将角色定义、示例、Author Note、atDepth 和 outlet 分配到对应提示词锚点，旧版无 position 的条目继续进入兼容 worldbook block。
+- 扩大回归命令覆盖范围，加入 EJS、Tavern Helper、角色卡导入和 lorebook 测试。
+- 重构角色卡前端宿主：消息楼层继续由外层对话区统一滚动，卡片 HTML/CSS/JS 改在独立 iframe 文档中运行，避免 `html/body`、固定定位、全局 ID 和脚本污染宿主页面。
+- 对齐 JS-Slash-Runner 的 iframe 规则：使用 `body.scrollHeight`、`requestAnimationFrame`/throttle、`ResizeObserver` 和 `--TH-viewport-height` 同步；移除项目自定义的绝对定位测量与 flex stage 高度补偿，避免宿主擅自改写角色卡布局。
+- 移除旧版宿主侧的绝对定位/折叠内容高度推断；高度只由 iframe 内部按上游 `body.scrollHeight` 规则报告，宿主不再扫描或重排角色卡节点。
+- iframe 运行时补齐 Tavern Helper/MVU 的变量、事件、lodash 常用方法、jQuery 轻量 fallback，并执行角色卡内置的启用 Tavern Helper 脚本。
+- iframe 保留酒馆助手的稳定 iframe id、可信 origin 和父子桥接边界；不执行卡片自带的远程 `script[src]`，由宿主提供已审计的兼容 API，避免远程脚本覆盖酒馆助手桥接。
+- 角色卡 iframe 增加酒馆助手同款可信 origin `<base>`，并修正第三方依赖的实际加载顺序，保证卡片相对图片、字体、样式和 jQuery UI 依赖按预期解析。
+- 角色卡 iframe 的 `replaceVariables` 更新接入楼层宿主和会话变量 API，变量快照按序写入 `sessions/<id>/variables.json`，重启后仍可恢复并供模板、状态栏读取。
+- 消息内容容器取消宿主额外的 segment 间距，HTML 卡片与 Markdown 正文按酒馆单一消息文本容器的边界衔接。
+- 新增底层扩展适配注册表：酒馆助手与提示词模板分别拥有稳定的本地 adapter contract，运行时不再把扩展兼容逻辑散落在 response/UI 代码中。
+- 新增“扩展”面板与手动更新 API：固定读取两个官方仓库的 manifest，检查和 bundle 下载并行执行，更新文件原子写入 `extensions/`；不自动执行远程 bundle，当前回复链仍使用项目内审计适配器。
+- 扩展面板支持已下载版本的手动激活和回滚；旧版 registry 也会保留可见的已安装版本状态。
+- Tavern Helper iframe 补齐 `getVariables`、`replaceVariables`、`updateVariablesWith`、插入/删除变量、聊天消息读写和世界书绑定 RPC；会话变量快照会在 iframe 加载后同步，避免状态栏只拿到空的初始变量。
+- response 阶段改由 Prompt Template adapter 统一应用 `[GENERATE]`、`[RENDER]`、`@INJECT` 计划，不增加额外 LLM 调用；世界书与上下文 agent 继续并行。
+- 删除旧消息状态栏搬运逻辑；每个楼层只渲染自己的原始消息，避免重复状态栏、重复脚本和错位。
+- 显示阶段遵循 SillyTavern 的 Markdown 过滤原则：角色卡普通正则和 promptOnly 正则不在显示时二次执行，只执行 markdownOnly 脚本。
+- 回复楼层改为 SillyTavern 风格的 swipe 数据：重 roll 追加到同一 assistant 楼层，楼层内显示上一条/下一条和计数，编辑、删除、切换及重启均保留候选回复。
+
 ## 2026-08-19
 
 ### 新增
@@ -19,4 +53,4 @@
 ### 验证
 
 - `pnpm typecheck`
-- `pnpm test:agents`：133 项测试全部通过。
+- `pnpm test:agents`：137 项测试全部通过。

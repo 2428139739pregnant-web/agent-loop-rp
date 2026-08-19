@@ -4,7 +4,7 @@ import { runMvuUpdate, type MvuRuntimeSettings } from './mvu-update.ts'
 import { InMemoryPromptLoader, type AgentContext } from './types.ts'
 import type { ChatMessage, ChatOptions, LLMProvider } from '../provider.ts'
 import type { PreprocessedCharacter } from '../character-loader.ts'
-import { applyMvuReply, readMvuStateFromMessages } from '../../mvu.ts'
+import { applyMvuReply, readInitialMvuState, readMvuStateFromMessages } from '../../mvu.ts'
 
 function makeCharacter(): PreprocessedCharacter {
   return {
@@ -118,4 +118,65 @@ test('MVU state applies user and character macros before HUD/template consumptio
   const state = readMvuStateFromMessages(card, [], { user: '艾云浮', char: '英妮缇雅' })
   assert.equal((state?.statData as { 主角: { 姓名: string; 称号: string } }).主角.姓名, '艾云浮')
   assert.equal((state?.statData as { 主角: { 姓名: string; 称号: string } }).主角.称号, '英妮缇雅 的旅伴')
+})
+
+test('MVU initial variables supports Prompt Template markers and ordered deep merge', () => {
+  const card = {
+    lorebook: {
+      entries: [
+        {
+          name: '@@initial_variables should not be a title marker',
+          comment: '',
+          content: '@@preload\n@@initial_variables\nplayer:\n  hp: 20\n  mood: calm\nmode: yaml',
+          insertionOrder: 1,
+        },
+        {
+          name: '[InitialVariables]',
+          comment: '',
+          content: '{"player":{"name":"Lina","hp":10},"mode":"json"}',
+          insertionOrder: 2,
+        },
+        {
+          name: '[initvar]',
+          comment: '',
+          content: '<initvar>\nplayer:\n  mood: brave\nlegacy: true\n</initvar>',
+          insertionOrder: 3,
+        },
+      ],
+    },
+  } as unknown as Parameters<typeof readInitialMvuState>[0]
+
+  assert.deepEqual(readInitialMvuState(card), {
+    player: { hp: 10, mood: 'brave', name: 'Lina' },
+    mode: 'json',
+    legacy: true,
+  })
+})
+
+test('MVU initial variables uses YAML only after JSON parsing fails', () => {
+  const card = {
+    lorebook: {
+      entries: [{
+        name: '[InitialVariables]',
+        content: 'settings:\n  greeting: "hello: world"\n  enabled: true',
+        insertionOrder: 1,
+      }],
+    },
+  } as unknown as Parameters<typeof readInitialMvuState>[0]
+
+  assert.deepEqual(readInitialMvuState(card), {
+    settings: { greeting: 'hello: world', enabled: true },
+  })
+})
+
+test('MVU initial variables rejects valid non-object JSON and YAML values', () => {
+  const jsonCard = {
+    lorebook: { entries: [{ name: '[InitialVariables]', content: '[]', insertionOrder: 1 }] },
+  } as unknown as Parameters<typeof readInitialMvuState>[0]
+  assert.throws(() => readInitialMvuState(jsonCard), /must contain one JSON-compatible object/u)
+
+  const yamlCard = {
+    lorebook: { entries: [{ name: '[InitialVariables]', content: '- one\n- two', insertionOrder: 1 }] },
+  } as unknown as Parameters<typeof readInitialMvuState>[0]
+  assert.throws(() => readInitialMvuState(yamlCard), /must contain one JSON-compatible object/u)
 })

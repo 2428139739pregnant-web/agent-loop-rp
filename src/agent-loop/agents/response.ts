@@ -24,6 +24,7 @@ import {
   type ContextSegmentOutput,
   type IntentOutput,
   type ReplyResult,
+  type WorldbookMatch,
   type WorldbookMatchOutput,
 } from '../schema.ts'
 import {
@@ -34,7 +35,7 @@ import {
   type ResponseGenerationSettings,
 } from '../response-settings.ts'
 import type { Agent, AgentContext } from './types.ts'
-import { applyWorldbookPromptInjections } from '../worldbook-plugin.ts'
+import { applyPromptTemplateInjections } from '../../extensions/prompt-template-adapter.ts'
 import { classifyWorldbookEntry } from '../worldbook-compat.ts'
 
 /** Input contract for {@link responseAgent}. */
@@ -121,15 +122,32 @@ export interface ConstantWorldbookTraceEntry {
   readonly content: string
 }
 
+export interface ConstantWorldbookOptions {
+  /** ST applies probability after constant/keyword activation.  Trace callers
+   * can disable the random draw and show all eligible constants. */
+  readonly applyProbability?: boolean
+  readonly random?: () => number
+}
+
+function passesWorldbookProbability(entry: WorldbookEntry, random: () => number): boolean {
+  if (entry.useProbability === false) return true
+  const probability = entry.probability ?? 100
+  if (probability >= 100) return true
+  if (probability <= 0) return false
+  return random() * 100 <= probability
+}
+
 export function listConstantWorldbookEntries(
   worldbook: { list(): readonly WorldbookEntry[] },
   macro: (text: string) => string,
+  options: ConstantWorldbookOptions = {},
 ): readonly ConstantWorldbookTraceEntry[] {
   return worldbook
     .list()
     .filter(e => e.constant === true
       && e.enabled !== false
-      && classifyWorldbookEntry(e).owner !== 'plugin')
+      && classifyWorldbookEntry(e).owner !== 'plugin'
+      && (options.applyProbability === false || passesWorldbookProbability(e, options.random ?? Math.random)))
     .sort((a, b) => b.order - a.order)
     .map(e => ({
       path: e.path,
@@ -148,11 +166,12 @@ export function listConstantWorldbookEntries(
 export function buildConstantWorldbookBlocks(
   worldbook: { list(): readonly WorldbookEntry[] },
   macro: (text: string) => string,
+  options: ConstantWorldbookOptions = {},
 ): { persona: string; worldview: string; style: string } {
   const buckets: Record<'persona' | 'worldview' | 'style', string[]> = {
     persona: [], worldview: [], style: [],
   }
-  const constants = listConstantWorldbookEntries(worldbook, macro)
+  const constants = listConstantWorldbookEntries(worldbook, macro, options)
   for (const e of constants) {
     buckets[constantWorldbookDoc(e.position)].push(
       `### ${e.path} (常驻条目,order=${e.order})\n${e.content}`,
@@ -246,6 +265,79 @@ export function buildWorldbookBlock(
     .join('\n\n')
 }
 
+/**
+ * Split activated World Info entries according to ST's eight insertion
+ * positions.  The response prompt is intentionally still one configurable
+ * template, so the buckets map onto its closest stable anchors (persona,
+ * examples, author-note/post-history, atDepth and the legacy worldbook
+ * block).  Keeping the split here prevents every caller from silently
+ * flattening positions back into one undifferentiated paragraph.
+ */
+export interface WorldbookMatchPlacementBuckets {
+  beforeCharacter: WorldbookMatch[]
+  afterCharacter: WorldbookMatch[]
+  beforeExamples: WorldbookMatch[]
+  afterExamples: WorldbookMatch[]
+  beforeAuthorNote: WorldbookMatch[]
+  afterAuthorNote: WorldbookMatch[]
+  atDepth: WorldbookMatch[]
+  outlet: WorldbookMatch[]
+  unplaced: WorldbookMatch[]
+}
+
+function sortedWorldbookMatches(matches: readonly WorldbookMatch[]): WorldbookMatch[] {
+  return [...matches].sort((a, b) => a.order - b.order || b.weight - a.weight || a.path.localeCompare(b.path))
+}
+
+export function splitWorldbookMatches(
+  matches: readonly WorldbookMatch[],
+): WorldbookMatchPlacementBuckets {
+  const buckets: WorldbookMatchPlacementBuckets = {
+    beforeCharacter: [],
+    afterCharacter: [],
+    beforeExamples: [],
+    afterExamples: [],
+    beforeAuthorNote: [],
+    afterAuthorNote: [],
+    atDepth: [],
+    outlet: [],
+    unplaced: [],
+  }
+  for (const match of sortedWorldbookMatches(matches)) {
+    switch (match.position) {
+      case 0: buckets.beforeCharacter.push(match); break
+      case 1: buckets.afterCharacter.push(match); break
+      case 2: buckets.beforeExamples.push(match); break
+      case 3: buckets.afterExamples.push(match); break
+      case 4: buckets.atDepth.push(match); break
+      case 5: buckets.beforeAuthorNote.push(match); break
+      case 6: buckets.afterAuthorNote.push(match); break
+      case 7: buckets.outlet.push(match); break
+      default: buckets.unplaced.push(match); break
+    }
+  }
+  return buckets
+}
+
+function formatWorldbookFragments(
+  entries: readonly WorldbookMatch[],
+  card: PreprocessedCharacter,
+  userName: string | undefined,
+  label: string,
+): string {
+  if (entries.length === 0) return ''
+  const body = sortedWorldbookMatches(entries)
+    .map(match => `### ${match.path} (order=${match.order}, weight=${match.weight})\n${renderCharacterPromptView(
+      match.content,
+      regexCharacter(card),
+      5,
+      undefined,
+      userName,
+    )}`)
+    .join('\n\n')
+  return `\n\n---\n\n## ${label}\n\n${body}`
+}
+
 export const responseAgent: Agent<ResponseInput, ReplyResult> = {
   name: 'response',
 
@@ -283,11 +375,13 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
       input.character,
       userName ?? undefined,
     )
+    const resolvedWorldbookMatches = input.worldbook.matches.map(match => ({
+      ...match,
+      content: renderEjs(ctx, match.content),
+    }))
+    const worldbookPlacement = splitWorldbookMatches(resolvedWorldbookMatches)
     const worldbookBlock = buildWorldbookBlock({
-      matches: input.worldbook.matches.map(match => ({
-        ...match,
-        content: renderEjs(ctx, match.content),
-      })),
+      matches: worldbookPlacement.unplaced.concat(worldbookPlacement.outlet),
     }, input.character, userName ?? undefined)
 
     // 用户人设段:有 persona 且带描述时注入;只有名字时也注入名字段(角色至少
@@ -307,20 +401,57 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     const mesExample = macro(input.character.mesExample ?? '')
     const cardSystemPrompt = macro(input.character.systemPrompt ?? '')
     const postHistoryInstructions = macro(input.character.postHistoryInstructions ?? '')
+      + formatWorldbookFragments(
+        worldbookPlacement.beforeAuthorNote,
+        input.character,
+        userName ?? undefined,
+        '世界书 Before Author Note',
+      )
+      + formatWorldbookFragments(
+        worldbookPlacement.afterAuthorNote,
+        input.character,
+        userName ?? undefined,
+        '世界书 After Author Note',
+      )
+    const exampleDialogue = formatWorldbookFragments(
+      worldbookPlacement.beforeExamples,
+      input.character,
+      userName ?? undefined,
+      '世界书 Before Example Messages',
+    ) + (mesExample.length > 0 ? mesExample : NO_EXAMPLE_DIALOGUE) + formatWorldbookFragments(
+      worldbookPlacement.afterExamples,
+      input.character,
+      userName ?? undefined,
+      '世界书 After Example Messages',
+    )
+    const atDepthWorldbook = (input.character.atDepthLorebookEntries ?? []).map(entry =>
+      `### ${entry.name ?? `世界书 #${entry.insertionOrder}`} (atDepth=${entry.stPosition ?? 4})\n${macro(entry.content)}`,
+    )
+    const dynamicAtDepth = worldbookPlacement.atDepth.map(entry =>
+      `### ${entry.path} (atDepth=${entry.depth ?? 4}, order=${entry.order})\n${macro(entry.content)}`,
+    )
 
     const responseSettingsInstruction = buildResponseSettingsInstruction(responseSettings)
     const renderedSystemPrompt = renderTemplate(template, {
       character_name: macro(input.character.name),
-      persona: macro(input.character.persona) + constantBlocks.persona,
-      worldview: macro(input.character.worldview) + constantBlocks.worldview,
+      persona: macro(input.character.persona) + constantBlocks.persona + formatWorldbookFragments(
+        worldbookPlacement.beforeCharacter,
+        input.character,
+        userName ?? undefined,
+        '世界书 Before Character Definition',
+      ),
+      worldview: macro(input.character.worldview) + constantBlocks.worldview + formatWorldbookFragments(
+        worldbookPlacement.afterCharacter,
+        input.character,
+        userName ?? undefined,
+        '世界书 After Character Definition',
+      ),
       style: macro(input.character.style) + constantBlocks.style,
-      at_depth_worldbook: (input.character.atDepthLorebookEntries ?? []).map(entry =>
-        `### ${entry.name ?? `世界书 #${entry.insertionOrder}`} (atDepth=${entry.stPosition ?? 4})\n${macro(entry.content)}`,
-      ).join('\n\n') || '(无 atDepth 条目)',
+      at_depth_worldbook: atDepthWorldbook.concat(dynamicAtDepth).join('\n\n') || '(无 atDepth 条目)',
       mvu_state: statData === undefined ? '(未启用 MVU)' : JSON.stringify(statData, null, 2),
       user_persona: macro(userPersonaBlock),
       card_system_prompt: cardSystemPrompt.length > 0 ? cardSystemPrompt : NO_CARD_SYSTEM_PROMPT,
-      example_dialogue: mesExample.length > 0 ? mesExample : NO_EXAMPLE_DIALOGUE,
+      example_dialogue: exampleDialogue,
       post_history_instructions: postHistoryInstructions.length > 0 ? postHistoryInstructions : NO_POST_HISTORY,
       user_narration: input.intent.userNarration,
       meta_commands: metaCommandsBlock,
@@ -351,9 +482,13 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
       { role: 'system', content: systemPrompt },
       { role: 'user', content: promptUserInput },
     ]
-    const promptMessages = applyWorldbookPromptInjections(
+    const promptMessages = applyPromptTemplateInjections(
       baseMessages,
-      input.worldbook.plugin?.promptInjections ?? [],
+      input.worldbook.plugin ?? {
+        promptInjections: [],
+        renderDirectives: [],
+        skipped: [],
+      },
     )
 
     // 3. Call the LLM. Plain text — no response_format.

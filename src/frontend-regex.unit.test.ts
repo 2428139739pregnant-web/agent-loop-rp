@@ -77,6 +77,11 @@ test('scripts respect placement, depth, macros and trimStrings', () => {
   assert.equal(renderCharacterPromptView('foo', captures, AI_OUTPUT_PLACEMENT), 'f')
 })
 
+test('replacement tokens follow JavaScript/ST semantics', () => {
+  const current = card([script({ findRegex: '(foo)', replaceString: '$&|$1|$$|$`|$\'' })])
+  assert.equal(renderCharacterPromptView('foo', current, AI_OUTPUT_PLACEMENT), 'foo|foo|$||')
+})
+
 test('normal placeholder and markdownOnly expansion preserve card frontend HTML', () => {
   const current = card([
     script({

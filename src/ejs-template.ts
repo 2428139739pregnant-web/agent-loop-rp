@@ -84,7 +84,7 @@ export interface EjsTemplateContext {
   readonly messages: readonly string[]
   readonly transcript?: readonly EjsTemplateMessage[]
   readonly variables?: Readonly<Record<string, JsonValue>>
-  readonly variableScopes?: Readonly<Partial<Record<'global' | 'preset' | 'character' | 'chat' | 'message', Readonly<Record<string, JsonValue>>>>>
+  readonly variableScopes?: Readonly<Partial<Record<'global' | 'preset' | 'character' | 'chat' | 'message' | 'initial', Readonly<Record<string, JsonValue>>>>>
   readonly statData?: JsonValue
   readonly worldInfoBooks?: readonly EjsTemplateWorldInfoBook[]
 }
@@ -372,7 +372,7 @@ function compileTemplate(template: string, context: EjsTemplateContext): string 
     const YAML = Object.freeze({ stringify: value => value === undefined ? undefined : __yamlLines(value).join('\\n') + '\\n' });
     const variables = [
       variableScopes.global, variableScopes.preset, variableScopes.character,
-      variableScopes.chat, variableScopes.message, __input.variables,
+      variableScopes.initial, variableScopes.chat, variableScopes.message, __input.variables,
     ].reduce((result, record) => __merge(result, record), Object.create(null));
     if (stat_data !== undefined) __set(variables, 'stat_data', stat_data);
     const __read = (record, name, fallback) => {
@@ -400,7 +400,7 @@ function compileTemplate(template: string, context: EjsTemplateContext): string 
       if (requested === 'character') return variableScopes.character ?? {};
       if (requested === 'local' || requested === 'chat') return variableScopes.chat ?? {};
       if (requested === 'message') return variableScopes.message ?? {};
-      if (requested === 'initial') return {};
+      if (requested === 'initial') return variableScopes.initial ?? {};
       return variables;
     };
     const getvar = (name, options = undefined) => __read(__scope(options), name, __fallback(options));
@@ -588,11 +588,21 @@ export class EjsTemplateEngine implements LorebookRegexEngine {
         const args = handles.map(handle => vm.dump(handle) as unknown)
         const books = context.worldInfoBooks ?? []
         const explicitEntry = typeof args[1] === 'string' || typeof args[1] === 'number'
+        const targetBook = target.worldInfoBookId
+        const matchesBook = (book: EjsTemplateWorldInfoBook, value: unknown) => {
+          if (value === undefined) return false
+          const text = String(value)
+          return book.id === text || book.name === text
+            || text.startsWith(`${book.id}/`) || (book.name !== undefined && text.startsWith(`${book.name}/`))
+        }
+        const targetBooks = targetBook === undefined ? books : books.filter(book => matchesBook(book, targetBook))
+        // A plugin candidate may identify the current entry by its full path
+        // rather than by the normalized book id. In that case preserve the
+        // extension's useful same-book fallback instead of returning empty.
+        const currentBooks = targetBooks.length > 0 ? targetBooks : books
         const selectedBooks = explicitEntry
-          ? books.filter(book => book.id === String(args[0]) || book.name === args[0])
-          : target.worldInfoBookId === undefined
-            ? books
-            : books.filter(book => book.id === target.worldInfoBookId)
+          ? books.filter(book => matchesBook(book, args[0]))
+          : currentBooks
         const query = explicitEntry ? args[1] : args[0]
         const entry = (typeof query === 'string' || typeof query === 'number')
           ? selectedBooks.flatMap(book => book.entries).find(item =>

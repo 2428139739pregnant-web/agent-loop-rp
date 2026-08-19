@@ -1,7 +1,11 @@
 /** Session-owned Tavern Helper variable compatibility. */
 
 import { snapshotJsonValue, type JsonValue, type SessionEvent } from '@deepseek-ai/dsh-session'
-import type { ImportedCharacterFrontend, ImportedTavernHelperScript } from './import/types.ts'
+import type {
+  ImportedCharacterFrontend,
+  ImportedTavernHelperScript,
+  ImportedTavernHelperScriptTree,
+} from './import/types.ts'
 
 /** DSH's command package extends SessionEventMap; keep this compatibility
  * reader usable without pulling the command registry into the standalone app. */
@@ -12,9 +16,10 @@ type CommandDoneEvent = {
 type CompatibleSessionEvent = SessionEvent | CommandDoneEvent
 
 /** Tavern Helper variable namespaces supported by the isolated runtime. */
-export type TavernVariableScope = 'global' | 'preset' | 'character' | 'chat' | 'message' | 'script'
+export type TavernVariableScope = 'global' | 'preset' | 'character' | 'chat' | 'message' | 'script' | 'extension'
 
 type JsonRecord = Readonly<Record<string, JsonValue>>
+type TavernExtensionVariables = Readonly<Record<string, JsonRecord>>
 
 /** One normalized Tavern Helper script retained in a Session-owned script tree. */
 export interface TavernScript {
@@ -32,7 +37,7 @@ export interface TavernScript {
   readonly export_with: { readonly data: boolean; readonly button: boolean }
 }
 
-/** One normalized Tavern Helper folder containing direct child scripts. */
+/** One normalized Tavern Helper folder containing child script-tree nodes. */
 export interface TavernScriptFolder {
   readonly type: 'folder'
   readonly enabled: boolean
@@ -40,7 +45,7 @@ export interface TavernScriptFolder {
   readonly id: string
   readonly icon: string
   readonly color: string
-  readonly scripts: readonly TavernScript[]
+  readonly scripts: readonly TavernScriptTree[]
 }
 
 /** One public Tavern Helper script-tree node. */
@@ -153,6 +158,8 @@ export interface TavernHelperState {
     readonly character: JsonRecord
     readonly chat: JsonRecord
     readonly message: JsonRecord
+    /** Extension variables are namespaced by the official extension_id. */
+    readonly extension: TavernExtensionVariables
   }
   readonly scripts: Readonly<Record<string, JsonRecord>>
   /** Session-local script-tree replacements; imported source files remain unchanged. */
@@ -172,7 +179,14 @@ export interface TavernHelperState {
   }
 }
 
-/** One validated model prompt owned by an isolated Tavern Helper script. */
+/**
+ * One validated model prompt owned by an isolated Tavern Helper script.
+ *
+ * `filter` is deliberately a boolean in the durable state. The official
+ * Tavern Helper type accepts a function, but functions cannot safely cross
+ * the iframe/JSON/session boundary. Runtime predicates are accepted by the
+ * generation-selection helpers below instead.
+ */
 export interface TavernInjectedPrompt {
   readonly id: string
   readonly scriptId: string
@@ -182,6 +196,51 @@ export interface TavernInjectedPrompt {
   readonly content: string
   readonly shouldScan: boolean
   readonly once: boolean
+  readonly order: number
+  readonly filter?: boolean
+}
+
+/** JSON-safe prompt input shared by injectPrompts and mutation requests. */
+export type TavernInjectedPromptInput = Omit<TavernInjectedPrompt, 'scriptId' | 'once' | 'order' | 'shouldScan'> & {
+  readonly once?: boolean
+  readonly order?: number
+  /** Official Tavern Helper spelling; `shouldScan` remains accepted too. */
+  readonly shouldScan?: boolean
+  readonly should_scan?: boolean
+}
+
+/** A host-side filter equivalent to the official function-valued filter. */
+export type TavernInjectionPredicate = (
+  prompt: TavernInjectedPrompt,
+) => boolean | PromiseLike<boolean>
+
+export type TavernInjectionSyncPredicate = (prompt: TavernInjectedPrompt) => boolean
+
+/** Options for the pure injectPrompts state transform. */
+export interface TavernInjectPromptsOptions {
+  readonly once?: boolean
+}
+
+/** A generation snapshot used to consume once-only prompts after generation. */
+export interface TavernInjectedPromptSelection {
+  readonly prompts: readonly TavernInjectedPrompt[]
+  readonly oncePrompts: readonly Pick<TavernInjectedPrompt, 'id' | 'scriptId' | 'content'>[]
+}
+
+export interface TavernInjectedPromptSelectionOptions {
+  /** Optional synchronous runtime predicate. */
+  readonly filter?: TavernInjectionSyncPredicate
+}
+
+function isTavernInjectedPromptSelection(
+  value: TavernInjectedPromptSelection | readonly string[],
+): value is TavernInjectedPromptSelection {
+  return !Array.isArray(value)
+}
+
+export interface TavernInjectedPromptAsyncSelectionOptions {
+  /** Optional predicate matching the official sync/async filter contract. */
+  readonly filter?: TavernInjectionPredicate
 }
 
 /** Browser request replacing one Tavern Helper variable namespace. */
@@ -189,6 +248,7 @@ export interface TavernHelperVariableMutationRequest {
   readonly format: 0
   readonly scope: TavernVariableScope
   readonly scriptId?: string
+  readonly extensionId?: string
   readonly variables: JsonRecord
 }
 
@@ -209,12 +269,32 @@ export interface TavernScriptTreeMutationRequest {
 }
 
 /** Browser request replacing every prompt currently owned by one script. */
-export interface TavernInjectionMutationRequest {
+export interface TavernReplaceInjectionMutationRequest {
   readonly format: 0
   readonly operation: 'replace-script-injections'
   readonly scriptId: string
-  readonly prompts: readonly Omit<TavernInjectedPrompt, 'scriptId'>[]
+  readonly prompts: readonly TavernInjectedPromptInput[]
 }
+
+/** Browser request adding prompts without removing other prompts. */
+export interface TavernInjectPromptsMutationRequest {
+  readonly format: 0
+  readonly operation: 'inject-prompts'
+  readonly scriptId: string
+  readonly prompts: readonly TavernInjectedPromptInput[]
+  readonly once?: boolean
+}
+
+/** Browser request removing prompts by their globally unique ids. */
+export interface TavernUninjectPromptsMutationRequest {
+  readonly format: 0
+  readonly operation: 'uninject-prompts'
+  readonly ids: readonly string[]
+}
+
+export type TavernInjectionMutationRequest = TavernReplaceInjectionMutationRequest
+  | TavernInjectPromptsMutationRequest
+  | TavernUninjectPromptsMutationRequest
 
 /** One validated mutation sent by an isolated Tavern Helper script. */
 export type TavernHelperMutationRequest = TavernHelperVariableMutationRequest | TavernWorldbookMutationRequest
@@ -371,18 +451,16 @@ function tavernScriptTrees(value: unknown, label = 'Tavern Helper script trees')
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`)
   const ids = new Set<string>()
   let count = 0
-  const trees = value.map((candidate, index): TavernScriptTree => {
+  const parseTree = (candidate: unknown, treeLabel: string): TavernScriptTree => {
     const tree = nested(candidate)
-    const treeLabel = `${label}[${index}]`
     count++
+    if (count > MAX_SCRIPT_TREES) throw new Error('Tavern Helper script tree is too large')
     if (tree.type !== 'folder') return tavernScript(candidate, treeLabel, ids)
     const id = scriptTreeId(tree.id, `${treeLabel}.id`)
     if (ids.has(id)) throw new Error(`Tavern Helper script tree id '${id}' is duplicated`)
     ids.add(id)
     const children = tree.scripts ?? []
     if (!Array.isArray(children)) throw new Error(`${treeLabel}.scripts must be an array`)
-    count += children.length
-    if (count > MAX_SCRIPT_TREES) throw new Error('Tavern Helper script tree is too large')
     return {
       type: 'folder',
       enabled: scriptTreeBoolean(tree.enabled, `${treeLabel}.enabled`, false),
@@ -390,15 +468,53 @@ function tavernScriptTrees(value: unknown, label = 'Tavern Helper script trees')
       id,
       icon: text(tree.icon, `${treeLabel}.icon`, 'fa-solid fa-folder'),
       color: text(tree.color, `${treeLabel}.color`),
-      scripts: children.map((script, scriptIndex) => tavernScript(script, `${treeLabel}.scripts[${scriptIndex}]`, ids)),
+      scripts: children.map((child, childIndex) => parseTree(child, `${treeLabel}.scripts[${childIndex}]`)),
     }
-  })
-  if (count > MAX_SCRIPT_TREES) throw new Error('Tavern Helper script tree is too large')
-  return trees
+  }
+  return value.map((candidate, index) => parseTree(candidate, `${label}[${index}]`))
+}
+
+function extensionVariables(value: unknown, name: string): TavernExtensionVariables {
+  const source = record(value ?? {}, name)
+  return Object.fromEntries(Object.entries(source).map(([extensionId, variables]) => [
+    extensionId,
+    record(variables, `${name}.${extensionId}`),
+  ]))
 }
 
 function flattenedTavernScripts(trees: readonly TavernScriptTree[]): readonly TavernScript[] {
-  return trees.flatMap(tree => tree.type === 'folder' ? tree.scripts : [tree])
+  return trees.flatMap(tree => {
+    if (tree.type === 'folder') return tree.enabled ? flattenedTavernScripts(tree.scripts) : []
+    return tree.enabled ? [tree] : []
+  })
+}
+
+function importedTavernHelperScriptTree(tree: ImportedTavernHelperScriptTree): TavernScriptTree {
+  if (tree.type === 'folder') {
+    return {
+      type: 'folder',
+      enabled: tree.enabled,
+      name: tree.name,
+      id: tree.id,
+      icon: tree.icon,
+      color: tree.color,
+      scripts: tree.scripts.map(importedTavernHelperScriptTree),
+    }
+  }
+  return {
+    type: 'script',
+    enabled: tree.enabled,
+    name: tree.name,
+    id: tree.id,
+    content: tree.content,
+    info: tree.info,
+    button: {
+      enabled: tree.button.enabled,
+      buttons: tree.button.buttons,
+    },
+    data: tree.data,
+    export_with: tree.export_with,
+  }
 }
 
 function tavernScriptScopeIds(state: TavernHelperState, scope: TavernScriptTreeScope): Set<string> {
@@ -479,7 +595,12 @@ function worldbookEntries(value: unknown): readonly TavernWorldbookEntry[] {
   return value.map((entry, index) => worldbookEntry(entry, index, used))
 }
 
-function injectedPrompt(value: unknown, index: number, scriptId?: string): TavernInjectedPrompt {
+function injectedPrompt(
+  value: unknown,
+  index: number,
+  scriptId?: string,
+  onceOverride?: boolean,
+): TavernInjectedPrompt {
   const prompt = nested(value)
   const id = text(prompt.id, `injected prompt[${index}].id`).trim()
   if (id === '' || id.length > 512) throw new Error(`injected prompt[${index}].id is invalid`)
@@ -498,9 +619,13 @@ function injectedPrompt(value: unknown, index: number, scriptId?: string): Taver
   if (owner === '') throw new Error(`injected prompt[${index}].scriptId is invalid`)
   if ((prompt.shouldScan !== undefined && typeof prompt.shouldScan !== 'boolean')
     || (prompt.should_scan !== undefined && typeof prompt.should_scan !== 'boolean')
-    || (prompt.once !== undefined && typeof prompt.once !== 'boolean')) {
+    || (prompt.once !== undefined && typeof prompt.once !== 'boolean')
+    || (prompt.filter !== undefined && typeof prompt.filter !== 'boolean')) {
     throw new Error(`injected prompt[${index}] flags are invalid`)
   }
+  const order = finite(prompt.order, `injected prompt[${index}].order`, 100)
+  if (Math.abs(order) > 1_000_000) throw new Error(`injected prompt[${index}].order is too large`)
+  const once = onceOverride === undefined ? prompt.once === true : onceOverride
   return {
     id,
     scriptId: owner,
@@ -509,15 +634,21 @@ function injectedPrompt(value: unknown, index: number, scriptId?: string): Taver
     role: prompt.role,
     content,
     shouldScan: prompt.shouldScan === undefined ? prompt.should_scan === true : prompt.shouldScan === true,
-    once: prompt.once === true,
+    once,
+    order,
+    ...(prompt.filter === undefined ? {} : { filter: prompt.filter }),
   }
 }
 
-function injectedPrompts(value: unknown, scriptId?: string): readonly TavernInjectedPrompt[] {
+function injectedPrompts(
+  value: unknown,
+  scriptId?: string,
+  onceOverride?: boolean,
+): readonly TavernInjectedPrompt[] {
   if (!Array.isArray(value) || value.length > MAX_INJECTED_PROMPTS) {
     throw new Error('Tavern Helper injected prompts are invalid')
   }
-  const prompts = value.map((prompt, index) => injectedPrompt(prompt, index, scriptId))
+  const prompts = value.map((prompt, index) => injectedPrompt(prompt, index, scriptId, onceOverride))
   if (new Set(prompts.map(prompt => prompt.id)).size !== prompts.length) {
     throw new Error('Tavern Helper injected prompt ids must be unique')
   }
@@ -532,8 +663,11 @@ export function initializeTavernHelperState(
 ): TavernHelperState {
   const sameCharacter = previous?.characterSourceId === characterSourceId
   const characterOverride = sameCharacter ? previous?.scriptTrees?.character : undefined
+  const importedCharacterTrees = (frontend.tavernHelperScriptTrees ?? [])
+    .map(importedTavernHelperScriptTree)
+  const characterScriptTrees = characterOverride ?? importedCharacterTrees
   const activeCharacterScripts = characterOverride === undefined
-    ? frontend.tavernHelperScripts : flattenedTavernScripts(characterOverride)
+    ? frontend.tavernHelperScripts.filter(script => script.enabled) : flattenedTavernScripts(characterOverride)
   const activeGlobalScripts = flattenedTavernScripts(previous?.scriptTrees?.global ?? [])
   const globalScripts = Object.fromEntries(activeGlobalScripts.map(script => [
     script.id,
@@ -553,11 +687,10 @@ export function initializeTavernHelperState(
   }
   const scriptIds = new Set(Object.keys(scripts))
   const prompts = previous?.injectedPrompts?.filter(prompt => scriptIds.has(prompt.scriptId))
-  const scriptTrees = previous?.scriptTrees === undefined ? undefined : {
-    ...(previous.scriptTrees.global === undefined ? {} : { global: previous.scriptTrees.global }),
-    ...(previous.scriptTrees.preset === undefined ? {} : { preset: previous.scriptTrees.preset }),
-    ...(!sameCharacter || previous.scriptTrees.character === undefined
-      ? {} : { character: previous.scriptTrees.character }),
+  const scriptTrees = {
+    ...(previous?.scriptTrees?.global === undefined ? {} : { global: previous.scriptTrees.global }),
+    ...(previous?.scriptTrees?.preset === undefined ? {} : { preset: previous.scriptTrees.preset }),
+    character: characterScriptTrees,
   }
   return {
     format: 0,
@@ -571,9 +704,10 @@ export function initializeTavernHelperState(
       character: sameCharacter ? previous.scopes.character : frontend.tavernHelperVariables,
       chat: previous?.scopes.chat ?? {},
       message: sameCharacter ? previous.scopes.message : {},
+      extension: previous?.scopes.extension ?? {},
     },
     scripts,
-    ...(scriptTrees === undefined ? {} : { scriptTrees }),
+    scriptTrees,
     ...(prompts === undefined ? {} : { injectedPrompts: prompts }),
     ...(previous?.worldbooks === undefined ? {} : { worldbooks: previous.worldbooks }),
     ...(previous?.deletedWorldbookNames === undefined ? {} : { deletedWorldbookNames: previous.deletedWorldbookNames }),
@@ -594,7 +728,8 @@ export function initializeTavernHelperPresetState(
   const characterScripts = Object.fromEntries(Object.entries(state.scripts)
     .filter(([id]) => !previousPresetIds.has(id)))
   const presetOverride = samePreset ? state.scriptTrees?.preset : undefined
-  const activePresetScripts = presetOverride === undefined ? scripts : flattenedTavernScripts(presetOverride)
+  const activePresetScripts = presetOverride === undefined
+    ? scripts.filter(script => script.enabled) : flattenedTavernScripts(presetOverride)
   const nextScripts = {
     ...characterScripts,
     ...Object.fromEntries(activePresetScripts.map(script => [
@@ -615,6 +750,217 @@ export function initializeTavernHelperPresetState(
     ...(scriptTrees === undefined ? {} : { scriptTrees }),
     ...(state.injectedPrompts === undefined
       ? {} : { injectedPrompts: state.injectedPrompts.filter(prompt => scriptIds.has(prompt.scriptId)) }),
+  }
+}
+
+/** Options shared by the local equivalents of Tavern Helper script-tree APIs. */
+export interface TavernScriptTreesOptions {
+  readonly type: TavernScriptTreeScope
+}
+
+function cloneTavernScriptTree(tree: TavernScriptTree): TavernScriptTree {
+  if (tree.type === 'folder') {
+    return {
+      ...tree,
+      scripts: tree.scripts.map(cloneTavernScriptTree),
+    }
+  }
+  return {
+    ...tree,
+    button: {
+      ...tree.button,
+      buttons: tree.button.buttons.map(button => ({ ...button })),
+    },
+  }
+}
+
+/** Get a snapshot of one Tavern Helper script tree scope. */
+export function getScriptTrees(
+  state: TavernHelperState,
+  option: TavernScriptTreesOptions,
+): TavernScriptTree[] {
+  return (state.scriptTrees?.[option.type] ?? []).map(cloneTavernScriptTree)
+}
+
+/** Replace one Tavern Helper script tree scope and recompute active scripts. */
+export function replaceScriptTrees(
+  state: TavernHelperState,
+  scriptTrees: readonly TavernScriptTree[],
+  option: TavernScriptTreesOptions,
+): TavernHelperState {
+  const trees = tavernScriptTrees(scriptTrees, `Tavern Helper ${option.type} script trees`)
+  return applyTavernHelperMutation(state, {
+    format: 0,
+    operation: 'replace-script-trees',
+    scope: option.type,
+    trees,
+  })
+}
+
+/** Update one script tree scope with either a synchronous or asynchronous updater. */
+export function updateScriptTreesWith(
+  state: TavernHelperState,
+  updater: (scriptTrees: TavernScriptTree[]) => readonly TavernScriptTree[] | PromiseLike<readonly TavernScriptTree[]>,
+  option: TavernScriptTreesOptions,
+): TavernHelperState | Promise<TavernHelperState> {
+  const result = updater(getScriptTrees(state, option))
+  if (isPromiseLike(result)) {
+    return Promise.resolve(result).then(trees => replaceScriptTrees(state, trees, option))
+  }
+  return replaceScriptTrees(state, result, option)
+}
+
+function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+  return typeof value === 'object' && value !== null && 'then' in value && typeof value.then === 'function'
+}
+
+function assertInjectionScript(state: TavernHelperState, scriptId: string): void {
+  if (scriptId.trim() === '' || !(scriptId in state.scripts)) {
+    throw new Error('Tavern Helper injected prompts have an unknown scriptId')
+  }
+}
+
+function normalizeInjectionInput(
+  prompts: readonly TavernInjectedPromptInput[],
+  scriptId: string,
+  once?: boolean,
+): readonly TavernInjectedPrompt[] {
+  return injectedPrompts(prompts, scriptId, once)
+}
+
+/**
+ * Pure equivalent of the official `injectPrompts` state operation.
+ *
+ * Prompt ids are global, so injecting an existing id replaces that prompt;
+ * unrelated prompts (including prompts owned by other scripts) are retained.
+ * `options.once` is applied to every prompt when supplied, matching the
+ * official call-level option.
+ */
+export function injectPrompts(
+  state: TavernHelperState,
+  scriptId: string,
+  prompts: readonly TavernInjectedPromptInput[],
+  options: TavernInjectPromptsOptions = {},
+): TavernHelperState {
+  assertInjectionScript(state, scriptId)
+  const normalized = normalizeInjectionInput(prompts, scriptId, options.once)
+  if (normalized.length === 0) return state
+  const ids = new Set(normalized.map(prompt => prompt.id))
+  const retained = (state.injectedPrompts ?? []).filter(prompt => !ids.has(prompt.id))
+  return {
+    ...state,
+    revision: state.revision + 1,
+    injectedPrompts: [...retained, ...normalized],
+    lastMutation: { scope: 'injection', scriptId },
+  }
+}
+
+/** Pure equivalent of the official `uninjectPrompts(ids)` operation. */
+export function uninjectPrompts(
+  state: TavernHelperState,
+  ids: readonly string[],
+): TavernHelperState {
+  const requested = new Set(ids)
+  if (requested.size === 0 || state.injectedPrompts === undefined) return state
+  const retained = state.injectedPrompts.filter(prompt => !requested.has(prompt.id))
+  if (retained.length === state.injectedPrompts.length) return state
+  return {
+    ...state,
+    revision: state.revision + 1,
+    injectedPrompts: retained,
+    lastMutation: { scope: 'injection' },
+  }
+}
+
+function sortInjectedPrompts(prompts: readonly TavernInjectedPrompt[]): readonly TavernInjectedPrompt[] {
+  return [...prompts].sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+}
+
+function injectionIsEligible(
+  prompt: TavernInjectedPrompt,
+  filter?: (prompt: TavernInjectedPrompt) => boolean,
+): boolean {
+  return prompt.filter !== false && (filter === undefined || filter(prompt))
+}
+
+function selectionFromPrompts(prompts: readonly TavernInjectedPrompt[]): TavernInjectedPromptSelection {
+  const sorted = sortInjectedPrompts(prompts)
+  return {
+    prompts: sorted,
+    oncePrompts: sorted
+      .filter(prompt => prompt.once)
+      .map(({ id, scriptId, content }) => ({ id, scriptId, content })),
+  }
+}
+
+/**
+ * Select the prompts for one generation without mutating durable state.
+ * The returned snapshot is the only set that should be consumed after the
+ * generation completes; prompts rejected by a filter remain available.
+ */
+export function selectTavernInjectedPrompts(
+  state: TavernHelperState | undefined,
+  options: TavernInjectedPromptSelectionOptions = {},
+): TavernInjectedPromptSelection {
+  return selectionFromPrompts((state?.injectedPrompts ?? []).filter(prompt =>
+    injectionIsEligible(prompt, options.filter),
+  ))
+}
+
+/** Async counterpart for the official promise-valued filter function. */
+export async function selectTavernInjectedPromptsAsync(
+  state: TavernHelperState | undefined,
+  options: TavernInjectedPromptAsyncSelectionOptions = {},
+): Promise<TavernInjectedPromptSelection> {
+  const prompts = [] as TavernInjectedPrompt[]
+  for (const prompt of state?.injectedPrompts ?? []) {
+    if (prompt.filter === false) continue
+    if (options.filter !== undefined && !(await options.filter(prompt))) continue
+    prompts.push(prompt)
+  }
+  return selectionFromPrompts(prompts)
+}
+
+/**
+ * Consume the once-only prompts that were actually selected for a completed
+ * generation. Matching the script id and content prevents a late completion
+ * from deleting a newer replacement that reused the same prompt id.
+ *
+ * When no selection is supplied, all currently eligible once prompts are
+ * consumed. This keeps the helper convenient for hosts that selected the
+ * default prompt set directly.
+ */
+export function consumeTavernInjectedPromptsAfterGeneration(
+  state: TavernHelperState | undefined,
+  selection?: TavernInjectedPromptSelection | readonly string[],
+): TavernHelperState | undefined {
+  if (state === undefined || state.injectedPrompts === undefined) return state
+  let leases: readonly Pick<TavernInjectedPrompt, 'id' | 'scriptId' | 'content'>[]
+  if (selection === undefined) {
+    leases = state.injectedPrompts.filter(prompt => prompt.once && prompt.filter !== false)
+      .map(({ id, scriptId, content }) => ({ id, scriptId, content }))
+  } else if (isTavernInjectedPromptSelection(selection)) {
+    leases = selection.oncePrompts
+  } else {
+    leases = state.injectedPrompts
+      .filter(prompt => prompt.once && selection.includes(prompt.id))
+      .map(({ id, scriptId, content }) => ({ id, scriptId, content }))
+  }
+  if (leases.length === 0) return state
+  const leaseById = new Map(leases.map(lease => [lease.id, lease]))
+  const retained = state.injectedPrompts.filter(prompt => {
+    const lease = leaseById.get(prompt.id)
+    return lease === undefined
+      || !prompt.once
+      || prompt.scriptId !== lease.scriptId
+      || prompt.content !== lease.content
+  })
+  if (retained.length === state.injectedPrompts.length) return state
+  return {
+    ...state,
+    revision: state.revision + 1,
+    injectedPrompts: retained,
+    lastMutation: { scope: 'injection' },
   }
 }
 
@@ -696,29 +1042,54 @@ export function parseTavernHelperMutationRequest(raw: string): TavernHelperMutat
   if (value.format === 0 && value.operation === 'bind-chat-worldbook') {
     return { format: 0, operation: value.operation, name: value.name === null ? null : worldbookName(value.name) }
   }
-  if (value.format === 0 && value.operation === 'replace-script-injections') {
+  if (value.format === 0 && (value.operation === 'replace-script-injections' || value.operation === 'inject-prompts')) {
     if (typeof value.scriptId !== 'string' || value.scriptId === '') {
       throw new Error('Tavern Helper injected prompts require a scriptId')
     }
-    return {
-      format: 0,
-      operation: value.operation,
-      scriptId: value.scriptId,
-      prompts: injectedPrompts(value.prompts, value.scriptId).map(({ scriptId: _scriptId, ...prompt }) => prompt),
+    if (value.operation === 'inject-prompts'
+      && value.once !== undefined && typeof value.once !== 'boolean') {
+      throw new Error('Tavern Helper injectPrompts once must be a boolean')
     }
+    const operationOnce = value.operation === 'inject-prompts' && typeof value.once === 'boolean'
+      ? value.once : undefined
+    const prompts = injectedPrompts(
+      value.prompts,
+      value.scriptId,
+      operationOnce,
+    ).map(({ scriptId: _scriptId, ...prompt }) => prompt)
+    if (value.operation === 'inject-prompts') {
+      return {
+        format: 0,
+        operation: 'inject-prompts',
+        scriptId: value.scriptId,
+        prompts,
+        ...(operationOnce === undefined ? {} : { once: operationOnce }),
+      }
+    }
+    return { format: 0, operation: 'replace-script-injections', scriptId: value.scriptId, prompts }
+  }
+  if (value.format === 0 && value.operation === 'uninject-prompts') {
+    return { format: 0, operation: value.operation, ids: stringArray(value.ids, 'Tavern Helper injected prompt ids') }
   }
   if (value.format !== 0 || (value.scope !== 'global' && value.scope !== 'preset'
     && value.scope !== 'character' && value.scope !== 'chat' && value.scope !== 'message'
-    && value.scope !== 'script')) {
+    && value.scope !== 'script' && value.scope !== 'extension')) {
     throw new Error('Tavern Helper variable update has an unsupported scope')
   }
   if (value.scriptId !== undefined && typeof value.scriptId !== 'string') {
     throw new Error('Tavern Helper scriptId must be a string')
   }
+  if (value.extension_id !== undefined && typeof value.extension_id !== 'string') {
+    throw new Error('Tavern Helper extension_id must be a string')
+  }
+  if (value.scope === 'extension' && (typeof value.extension_id !== 'string' || value.extension_id.trim() === '')) {
+    throw new Error('Tavern Helper extension variables require an extension_id')
+  }
   return {
     format: 0,
     scope: value.scope,
     ...(value.scriptId === undefined ? {} : { scriptId: value.scriptId }),
+    ...(value.extension_id === undefined ? {} : { extensionId: value.extension_id }),
     variables: record(value.variables, 'Tavern Helper variables'),
   }
 }
@@ -761,15 +1132,24 @@ export function applyTavernHelperMutation(
         lastMutation: { scope: 'script-tree' },
       }
     }
+    if (request.operation === 'inject-prompts') {
+      return request.once === undefined
+        ? injectPrompts(state, request.scriptId, request.prompts)
+        : injectPrompts(state, request.scriptId, request.prompts, { once: request.once })
+    }
+    if (request.operation === 'uninject-prompts') {
+      return uninjectPrompts(state, request.ids)
+    }
     if (request.operation === 'replace-script-injections') {
       if (!(request.scriptId in state.scripts)) throw new Error('Tavern Helper injected prompts have an unknown scriptId')
-      const replacedIds = new Set(request.prompts.map(prompt => prompt.id))
+      const normalized = normalizeInjectionInput(request.prompts, request.scriptId)
+      const replacedIds = new Set(normalized.map(prompt => prompt.id))
       return {
         ...state,
         revision: state.revision + 1,
         injectedPrompts: [
           ...(state.injectedPrompts ?? []).filter(prompt => prompt.scriptId !== request.scriptId && !replacedIds.has(prompt.id)),
-          ...request.prompts.map(prompt => ({ ...prompt, scriptId: request.scriptId })),
+          ...normalized,
         ],
         lastMutation: { scope: 'injection', scriptId: request.scriptId },
       }
@@ -815,6 +1195,21 @@ export function applyTavernHelperMutation(
       lastMutation: { scope: 'script', scriptId },
     }
   }
+  if (request.scope === 'extension') {
+    const extensionId = request.extensionId?.trim()
+    if (extensionId === undefined || extensionId === '') {
+      throw new Error('Tavern Helper extension variable update requires an extensionId')
+    }
+    return {
+      ...state,
+      revision: state.revision + 1,
+      scopes: {
+        ...state.scopes,
+        extension: { ...state.scopes.extension, [extensionId]: request.variables },
+      },
+      lastMutation: { scope: 'extension' },
+    }
+  }
   return {
     ...state,
     revision: state.revision + 1,
@@ -841,8 +1236,14 @@ export function decodeTavernHelperState(text: string | undefined): TavernHelperS
   const required = ['global', 'preset', 'character', 'chat', 'message'] as const
   const parsedScopes = Object.fromEntries(required.map(key => [
     key,
-    record(scopes[key], `Tavern Helper ${key} variables`),
-  ])) as TavernHelperState['scopes']
+    record(scopes[key] ?? {}, `Tavern Helper ${key} variables`),
+  ])) as Omit<TavernHelperState['scopes'], 'extension'>
+  const parsedScopeSet = {
+    ...parsedScopes,
+    // Older v0 snapshots did not have extension variables; decode them as an
+    // empty namespace so existing sessions remain readable.
+    extension: extensionVariables(scopes.extension, 'Tavern Helper extension variables'),
+  } satisfies TavernHelperState['scopes']
   const parsedScripts = Object.fromEntries(Object.entries(scripts).map(([id, value]) => [
     id,
     record(value, `Tavern Helper script ${id} variables`),
@@ -918,6 +1319,7 @@ export function decodeTavernHelperState(text: string | undefined): TavernHelperS
     const value = mutation as Record<string, unknown>
     if (value.scope !== 'global' && value.scope !== 'preset' && value.scope !== 'character'
       && value.scope !== 'chat' && value.scope !== 'message' && value.scope !== 'script'
+      && value.scope !== 'extension'
       && value.scope !== 'worldbook' && value.scope !== 'injection' && value.scope !== 'script-tree') {
       throw new Error('Tavern Helper last mutation scope is invalid')
     }
@@ -932,7 +1334,7 @@ export function decodeTavernHelperState(text: string | undefined): TavernHelperS
     ...(parsed.presetSourceId === undefined ? {} : { presetSourceId: parsed.presetSourceId }),
     ...(parsed.presetScriptIds === undefined ? {} : { presetScriptIds: parsed.presetScriptIds as string[] }),
     revision: parsed.revision,
-    scopes: parsedScopes,
+    scopes: parsedScopeSet,
     scripts: parsedScripts,
     ...(parsedScriptTrees === undefined ? {} : { scriptTrees: parsedScriptTrees }),
     ...(parsedInjectedPrompts === undefined ? {} : { injectedPrompts: parsedInjectedPrompts }),
@@ -945,20 +1347,26 @@ export function decodeTavernHelperState(text: string | undefined): TavernHelperS
 }
 
 /** Project durable script injections into the existing in-chat prompt inserter. */
-export function tavernInjectedInChatPrompts(state: TavernHelperState | undefined): readonly {
+export function tavernInjectedInChatPrompts(
+  state: TavernHelperState | undefined,
+  options: TavernInjectedPromptSelectionOptions = {},
+): readonly {
   readonly role: 'system' | 'assistant' | 'user'
   readonly content: string
   readonly depth: number
   readonly order: number
 }[] {
-  return (state?.injectedPrompts ?? []).flatMap(prompt => prompt.position === 'in_chat' && prompt.content.trim() !== ''
-    ? [{ role: prompt.role, content: prompt.content, depth: prompt.depth, order: 100 }]
+  return selectTavernInjectedPrompts(state, options).prompts.flatMap(prompt => prompt.position === 'in_chat' && prompt.content.trim() !== ''
+    ? [{ role: prompt.role, content: prompt.content, depth: prompt.depth, order: prompt.order }]
     : [])
 }
 
 /** Return script prompt text that participates in the next lorebook scan. */
-export function tavernInjectedScanText(state: TavernHelperState | undefined): readonly string[] {
-  return (state?.injectedPrompts ?? []).flatMap(prompt => prompt.shouldScan && prompt.content.trim() !== ''
+export function tavernInjectedScanText(
+  state: TavernHelperState | undefined,
+  options: TavernInjectedPromptSelectionOptions = {},
+): readonly string[] {
+  return selectTavernInjectedPrompts(state, options).prompts.flatMap(prompt => prompt.shouldScan && prompt.content.trim() !== ''
     ? [prompt.content]
     : [])
 }

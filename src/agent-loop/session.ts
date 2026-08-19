@@ -75,8 +75,26 @@ export interface WorldbookEntry {
   useProbability?: boolean
   /** ST position 枚举原值(0=before_char,1=after_char,2-7 其他)。蓝灯常驻注入的文档映射用。 */
   position?: number
+  /** Optional message role supplied by Tavern Helper's position descriptor. */
+  role?: 'system' | 'user' | 'assistant'
   /** ST entry-level scan depth override. */
   scanDepth?: number
+  /** Whether the source worldbook may scan newly activated entry content. */
+  recursiveScanning?: boolean
+  /** Stable source-book identity used to isolate recursive buffers. */
+  recursiveBookId?: string
+  /** ST `extensions.exclude_recursion`: this entry cannot activate from recursive text. */
+  excludeRecursion?: boolean
+  /** ST `extensions.prevent_recursion`: this entry's content is not scanned recursively. */
+  preventRecursion?: boolean
+  /** ST `extensions.delay_until_recursion`: true = level 1, number = that level. */
+  delayUntilRecursion?: boolean | number
+  /** ST/Tavern Helper timed effect: keep active for N subsequent messages. */
+  sticky?: number
+  /** ST/Tavern Helper timed effect: block activation for N subsequent messages. */
+  cooldown?: number
+  /** ST/Tavern Helper timed effect: require N chat messages before activation. */
+  delay?: number
   /** Preserve ST's budget bypass flag for deterministic activation. */
   ignoreBudget?: boolean
   /** Decorated/template entries are retained but not activated by the Harness. */

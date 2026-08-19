@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   buildWorldbookMatchInput,
+  deterministicWorldbookMatch,
   exactKeywordMatch,
   formatCandidates,
   formatRecentMessages,
@@ -72,17 +73,18 @@ function makeCandidate(overrides: Partial<WorldbookMatchCandidate> = {}): Worldb
   }
 }
 
-test('exactKeywordMatch matches case-insensitive on primary and secondary keys', () => {
+test('exactKeywordMatch requires the primary key before applying secondary keys', () => {
   const candidates = [
     makeCandidate({ path: 'a.md', keys: ['火系', '水系'] }),
-    makeCandidate({ path: 'b.md', keys: ['历史'], secondaryKeys: ['古代'] }),
+    makeCandidate({
+      path: 'b.md', keys: ['历史'], secondaryKeys: ['古代'], selective: true,
+    }),
   ]
   const byPrimary = exactKeywordMatch(['火系'], candidates)
   assert.equal(byPrimary.length, 1)
   assert.equal(byPrimary[0]?.path, 'a.md')
-  const bySecondary = exactKeywordMatch(['古代'], candidates)
-  assert.equal(bySecondary.length, 1)
-  assert.equal(bySecondary[0]?.path, 'b.md')
+  assert.deepEqual(exactKeywordMatch(['古代'], candidates), [])
+  assert.equal(exactKeywordMatch(['历史', '古代'], candidates)[0]?.path, 'b.md')
 })
 
 test('exactKeywordMatch returns empty for no match / empty keyword list', () => {
@@ -138,6 +140,61 @@ test('rollProbability: boundary is inclusive (ST: random*100 <= probability)', (
   // rng=0.5 → 50 <= 50 ✓(与 ST world-info.js:4907-4925 同款含等号边界)
   assert.equal(rollProbability(50, () => 0.5), true)
   assert.equal(rollProbability(50, () => 0.51), false)
+})
+
+test('deterministicWorldbookMatch activates a keyless blue entry without chat text', () => {
+  const matches = deterministicWorldbookMatch({
+    intent: makeIntent(),
+    scanDepth: 2,
+    recentMessages: [],
+    candidates: [
+      makeCandidate({ path: 'blue.md', keys: [], constant: true }),
+      makeCandidate({ path: 'green.md', keys: ['火系'] }),
+    ],
+  })
+  assert.deepEqual(matches.map(candidate => candidate.path), ['blue.md'])
+})
+
+test('deterministicWorldbookMatch applies recursive scanning and all four recursion gates', () => {
+  const book = 'card:recursive'
+  const matches = deterministicWorldbookMatch({
+    intent: makeIntent({ keywords: ['start'] }),
+    scanDepth: 2,
+    recentMessages: [],
+    candidates: [
+      makeCandidate({
+        path: 'root.md', keys: ['start'], recursiveScanning: true, recursiveBookId: book,
+        recursiveContent: 'next',
+      }),
+      makeCandidate({
+        path: 'delayed-one.md', keys: ['next'], recursiveScanning: true, recursiveBookId: book,
+        delayUntilRecursion: true, recursiveContent: 'late',
+      }),
+      makeCandidate({
+        path: 'delayed-two.md', keys: ['late'], recursiveScanning: true, recursiveBookId: book,
+        delayUntilRecursion: 2,
+      }),
+      makeCandidate({
+        path: 'excluded.md', keys: ['next'], recursiveScanning: true, recursiveBookId: book,
+        excludeRecursion: true,
+      }),
+      makeCandidate({
+        path: 'prevent-source.md', keys: ['start'], recursiveScanning: true, recursiveBookId: book,
+        preventRecursion: true, recursiveContent: 'blocked',
+      }),
+      makeCandidate({
+        path: 'prevent-target.md', keys: ['blocked'], recursiveScanning: true, recursiveBookId: book,
+      }),
+      makeCandidate({
+        path: 'other-book.md', keys: ['next'], recursiveScanning: true, recursiveBookId: 'other-book',
+      }),
+      makeCandidate({ path: 'non-recursive.md', keys: ['next'] }),
+    ],
+  }, { rollProbability: false })
+
+  assert.deepEqual(matches.map(candidate => candidate.path), [
+    'root.md', 'delayed-one.md', 'delayed-two.md', 'prevent-source.md',
+  ])
 })
 
 // ─── buildWorldbookMatchInput(蓝灯/绿灯分类 + 扫描深度 + 宏替换入参) ─────────
@@ -253,6 +310,29 @@ test('buildWorldbookMatchInput carries ST entry params (logic/probability/flags)
   assert.equal(c?.useProbability, false)
 })
 
+test('buildWorldbookMatchInput carries recursive source metadata and macro-expanded content', () => {
+  const store = new MemoryWorldbookStore([{
+    path: 'card/root.md', keywords: ['start'], order: 1, weight: 1,
+    content: '{{user}} reveals the next-key',
+    recursiveScanning: true,
+    recursiveBookId: 'card:book',
+    excludeRecursion: true,
+    preventRecursion: true,
+    delayUntilRecursion: 2,
+  }])
+  const input = buildWorldbookMatchInput(
+    makeIntent(),
+    makeCtx({ store, macros: { user: '小明', char: '晓' } }),
+  )
+  const candidate = input.candidates[0]
+  assert.equal(candidate?.recursiveScanning, true)
+  assert.equal(candidate?.recursiveBookId, 'card:book')
+  assert.equal(candidate?.excludeRecursion, true)
+  assert.equal(candidate?.preventRecursion, true)
+  assert.equal(candidate?.delayUntilRecursion, 2)
+  assert.equal(candidate?.recursiveContent, '小明 reveals the next-key')
+})
+
 test('buildWorldbookMatchInput carries deterministic activation for special green entries', () => {
   const store = new MemoryWorldbookStore([
     {
@@ -314,6 +394,40 @@ test('worldbookMatchAgent emits plugin plans locally and never sends special ent
   assert.equal(providerCalled, true)
   assert.equal(result.plugin?.promptInjections[0]?.content, 'SPECIAL_ONLY')
   assert.deepEqual(result.matches.map(match => match.path), ['ordinary.md'])
+})
+
+test('worldbookMatchAgent uses one semantic call and recursively activates content from its seed', async () => {
+  let providerCalls = 0
+  const provider: LLMProvider = {
+    name: 'one-call-seed',
+    async chat() {
+      providerCalls += 1
+      return { content: JSON.stringify({ matches: [{ path: 'semantic-seed.md' }] }) }
+    },
+  }
+  const store = new MemoryWorldbookStore([
+    {
+      path: 'semantic-seed.md', keywords: ['not-in-chat'], order: 1, weight: 1,
+      content: 'recursive-key', recursiveScanning: true, recursiveBookId: 'external:book',
+    },
+    {
+      path: 'recursive-target.md', keywords: ['recursive-key'], order: 2, weight: 1,
+      content: 'target-content', recursiveScanning: true, recursiveBookId: 'external:book',
+    },
+    {
+      path: 'other-book-target.md', keywords: ['recursive-key'], order: 3, weight: 1,
+      content: 'wrong-book', recursiveScanning: true, recursiveBookId: 'other-book',
+    },
+  ])
+  const ctx = makeCtx({ provider, store, history: [{ role: 'user', content: 'ordinary' }] })
+  const built = buildWorldbookMatchInput(makeIntent({ keywords: ['ordinary'] }), ctx)
+  const result = await worldbookMatchAgent.run({ ...built, mode: 'native' }, ctx)
+
+  assert.equal(providerCalls, 1)
+  assert.deepEqual(result.matches.map(match => match.path), [
+    'semantic-seed.md', 'recursive-target.md',
+  ])
+  assert.equal(result.matches[1]?.content, 'target-content')
 })
 
 test('worldbookMatchAgent.run returns empty when scan text is empty (no LLM call)', async () => {
@@ -522,6 +636,39 @@ test('enhanced mode keeps ST matches and adds agent matches in one LLM call', as
     ['a.md', 'st+agent'],
     ['b.md', 'agent'],
   ])
+})
+
+test('enhanced mode rolls an agent-owned ST-key match only once', async () => {
+  const store = new MemoryWorldbookStore([
+    { path: 'a.md', keywords: ['火系'], order: 1, weight: 5, content: 'A', probability: 50 },
+  ])
+  const provider: LLMProvider = {
+    name: 'enhanced-probability-spy',
+    async chat() {
+      return { content: JSON.stringify({ matches: [{ path: 'a.md' }] }) }
+    },
+  }
+  const ctx = makeCtx({ provider, store, history: [{ role: 'user', content: '火系' }] })
+  const originalRandom = Math.random
+  const rolls = [0.1, 0.9]
+  let calls = 0
+  Math.random = () => {
+    calls += 1
+    return rolls.shift() ?? 0.9
+  }
+  try {
+    const result = await worldbookMatchAgent.run({
+      intent: makeIntent({ userNarration: '火系', keywords: ['火系'] }),
+      scanDepth: 2,
+      recentMessages: [{ role: 'user', content: '火系' }],
+      candidates: [makeCandidate({ path: 'a.md', owner: 'agent', probability: 50 })],
+      mode: 'enhanced',
+    }, ctx)
+    assert.equal(calls, 1)
+    assert.deepEqual(result.matches.map(match => match.path), ['a.md'])
+  } finally {
+    Math.random = originalRandom
+  }
 })
 
 test('native mode lets the agent decide ordinary green entries', async () => {

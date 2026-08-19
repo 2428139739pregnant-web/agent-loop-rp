@@ -2,9 +2,20 @@
 
 export type ChatRole = 'system' | 'user' | 'assistant' | 'tool'
 
+export interface SwipeInfo {
+  readonly send_date?: number
+  readonly gen_started?: number
+  readonly gen_finished?: number
+  readonly extra?: Readonly<Record<string, unknown>>
+}
+
 export interface ChatMessage {
   role: ChatRole
   content: string
+  /** SillyTavern-compatible assistant alternatives. User/system messages do not use swipes. */
+  swipe_id?: number
+  swipes?: string[]
+  swipe_info?: SwipeInfo[]
 }
 
 export interface ChatOptions {

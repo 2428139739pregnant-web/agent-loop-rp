@@ -36,6 +36,11 @@ import { classifyWorldbookEntry, type WorldbookEntryOwner, type WorldbookPluginK
 import { resolveWorldbookMatches } from '../worldbook-resolver.ts'
 import { buildWorldbookPluginOutput } from '../worldbook-plugin.ts'
 import { renderWorldbookKeyOnlyMd } from '../worldbook-key-index.ts'
+import {
+  canEvaluateTimedEffect,
+  isTimedEffectStickyActive,
+  type TimedEffectState,
+} from '../worldbook-timed-effects.ts'
 
 /** 扫描文本里的单条消息(ST:最近 world_info_depth 条聊天消息,user/assistant 都算)。 */
 export interface WorldbookScanMessage {
@@ -71,6 +76,25 @@ export interface WorldbookMatchCandidate {
   constant?: boolean
   /** ST entry-level scan depth override. */
   scanDepth?: number
+  /** Whether the source worldbook may scan newly activated entry content. */
+  recursiveScanning?: boolean
+  /** Stable source-book identity used to isolate recursive buffers. */
+  recursiveBookId?: string
+  /** ST `extensions.exclude_recursion`: this entry cannot activate from recursive text. */
+  excludeRecursion?: boolean
+  /** ST `extensions.prevent_recursion`: this entry's content is not scanned recursively. */
+  preventRecursion?: boolean
+  /** ST `extensions.delay_until_recursion`: true = level 1, number = that level. */
+  delayUntilRecursion?: boolean | number
+  sticky?: number
+  cooldown?: number
+  delay?: number
+  /** Macro-expanded authoritative content used only by the local recursive scanner. */
+  recursiveContent?: string
+  /** ST prompt insertion metadata retained after activation. */
+  position?: number
+  depth?: number
+  role?: 'system' | 'user' | 'assistant'
   /** Decorated entries are preserved for export but are not executable here. */
   hasDecorators?: boolean
   order: number
@@ -104,6 +128,10 @@ export interface WorldbookMatchInput {
   keyIndexMarkdown?: string
   /** Explicit worldbook mode; omitted callers use the context setting. */
   mode?: WorldbookMatchMode
+  /** Session-local World Info timed effects; rerolls reuse this snapshot. */
+  timedEffects?: TimedEffectState
+  /** Model-visible message count before this generation starts. */
+  messageCount?: number
 }
 
 /** 单条消息文本超长时的截断上限(字符数近似 token,§8 差异之 4:无 tokenizer 依赖)。 */
@@ -166,6 +194,19 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
       useProbability: e.useProbability !== false,
       ...(e.constant === undefined ? {} : { constant: e.constant }),
       ...(e.scanDepth === undefined ? {} : { scanDepth: e.scanDepth }),
+      ...(e.recursiveScanning === undefined ? {} : { recursiveScanning: e.recursiveScanning }),
+      ...(e.recursiveBookId === undefined ? {} : { recursiveBookId: e.recursiveBookId }),
+      ...(e.excludeRecursion === undefined ? {} : { excludeRecursion: e.excludeRecursion }),
+      ...(e.preventRecursion === undefined ? {} : { preventRecursion: e.preventRecursion }),
+      ...(e.delayUntilRecursion === undefined ? {} : { delayUntilRecursion: e.delayUntilRecursion }),
+      ...(e.sticky === undefined ? {} : { sticky: e.sticky }),
+      ...(e.cooldown === undefined ? {} : { cooldown: e.cooldown }),
+      ...(e.delay === undefined ? {} : { delay: e.delay }),
+      ...(e.recursiveScanning === true
+        ? { recursiveContent: macro(ctx.worldbook.getContent(e.path) ?? '') }
+        : {}),
+      ...(e.position === undefined ? {} : { position: e.position }),
+      ...(e.role === undefined ? {} : { role: e.role }),
       ...(e.hasDecorators === undefined ? {} : { hasDecorators: e.hasDecorators }),
       order: e.order,
       weight: e.weight,
@@ -201,6 +242,8 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
     keyIndexMarkdown: renderWorldbookKeyOnlyMd(candidates),
     ...(activatedPluginCandidates.length === 0 ? {} : { pluginCandidates: activatedPluginCandidates }),
     mode,
+    ...(ctx.worldbookTimedEffects === undefined ? {} : { timedEffects: ctx.worldbookTimedEffects }),
+    messageCount: history.length,
   }
 }
 
@@ -257,11 +300,16 @@ export function exactKeywordMatch(
   keywords: readonly string[],
   candidates: readonly WorldbookMatchCandidate[],
 ): WorldbookMatchCandidate[] {
-  const needles = new Set(keywords.map(k => k.toLowerCase()))
-  return candidates.filter(c =>
-    c.keys.some(k => needles.has(k.toLowerCase()))
-    || c.secondaryKeys.some(k => needles.has(k.toLowerCase()))
-  )
+  // The fallback receives the compact intent keywords rather than the full
+  // chat buffer.  Treat them as scan text, but keep ST's two-stage rule:
+  // secondary keys can constrain an already-matched primary key; they can
+  // never activate an entry on their own.
+  const scanText = keywords.join('\n')
+  return candidates.filter(candidate => {
+    const primary = candidate.keys.some(key => matchesWorldbookKey(scanText, key, candidate))
+    if (!primary) return false
+    return candidate.selective !== true || selectiveMatch(candidate, scanText)
+  })
 }
 
 /** Render the local ST result that the semantic matcher is allowed to extend. */
@@ -328,37 +376,180 @@ function selectiveMatch(
   }
 }
 
+const MAX_SAFE_RECURSION_LEVEL = 1000
+const DEFAULT_RECURSION_BOOK_ID = '__worldbook__'
+
+function recursionDelayLevel(candidate: WorldbookMatchCandidate): number {
+  if (candidate.delayUntilRecursion === true) return 1
+  if (typeof candidate.delayUntilRecursion !== 'number' || !Number.isFinite(candidate.delayUntilRecursion)) return 0
+  return Math.min(MAX_SAFE_RECURSION_LEVEL, Math.max(0, Math.trunc(candidate.delayUntilRecursion)))
+}
+
+function recursionBookId(candidate: WorldbookMatchCandidate): string | undefined {
+  if (candidate.recursiveScanning !== true) return undefined
+  return candidate.recursiveBookId ?? DEFAULT_RECURSION_BOOK_ID
+}
+
+function scanTextForCandidate(
+  input: WorldbookMatchInput,
+  candidate: WorldbookMatchCandidate,
+  recursiveText = '',
+): string {
+  const depth = candidate.scanDepth === undefined
+    ? input.scanDepth
+    : Math.max(0, Math.trunc(candidate.scanDepth))
+  const baseText = depth === 0
+    ? ''
+    : input.recentMessages.slice(-depth).map(message => message.content).concat(
+      input.intent.userNarration,
+      ...input.intent.metaCommands,
+      ...input.intent.keywords,
+    ).join('\n')
+  return recursiveText.length === 0 ? baseText : [baseText, recursiveText].filter(Boolean).join('\n')
+}
+
+function candidateMatchesText(
+  input: WorldbookMatchInput,
+  candidate: WorldbookMatchCandidate,
+  recursiveText = '',
+): boolean {
+  if (candidate.constant === true) return true
+  const text = scanTextForCandidate(input, candidate, recursiveText)
+  const primary = candidate.keys.some(key => matchesWorldbookKey(text, key, candidate))
+  return primary && (candidate.selective !== true || selectiveMatch(candidate, text))
+}
+
+function appendRecursiveContent(
+  textByBook: Map<string, string>,
+  candidate: WorldbookMatchCandidate,
+): boolean {
+  const bookId = recursionBookId(candidate)
+  if (bookId === undefined || candidate.preventRecursion === true) return false
+  const content = candidate.recursiveContent ?? ''
+  if (content.length === 0) return false
+  const previous = textByBook.get(bookId) ?? ''
+  textByBook.set(bookId, [previous, content].filter(value => value.length > 0).join('\n'))
+  return true
+}
+
+/**
+ * Apply the deterministic ST key semantics and recursively scan activated
+ * entry content. `seedCandidates` is used by the one existing semantic call:
+ * an LLM-selected ordinary entry can seed the same local recursive pass, but
+ * recursion never causes another LLM request.
+ */
+function collectWorldbookActivations(
+  input: WorldbookMatchInput,
+  seedCandidates: readonly WorldbookMatchCandidate[] = [],
+  includeInitial = true,
+): Set<string> {
+  const active = new Set<string>()
+  const textByBook = new Map<string, string>()
+  const byPath = new Map(input.candidates.map(candidate => [candidate.path, candidate]))
+
+  const activate = (candidate: WorldbookMatchCandidate): void => {
+    if (active.has(candidate.path)) return
+    active.add(candidate.path)
+    appendRecursiveContent(textByBook, candidate)
+  }
+
+  // Initial ST matching. Delayed entries are intentionally left for a
+  // recursive pass, even when their key appears in the current chat turn.
+  if (includeInitial) {
+    for (const candidate of input.candidates) {
+      if (candidate.hasDecorators === true) continue
+      const messageCount = input.messageCount ?? input.recentMessages.length
+      if (isTimedEffectStickyActive(input.timedEffects ?? {}, candidate.path, messageCount)) {
+        activate(candidate)
+        continue
+      }
+      if (!canEvaluateTimedEffect(candidate, input.timedEffects ?? {}, messageCount)
+        || recursionDelayLevel(candidate) > 0) continue
+      if (candidateMatchesText(input, candidate)) activate(candidate)
+    }
+  }
+
+  // Semantic selections are normal (non-recursive) activations. They are
+  // allowed to seed recursion only after the caller has applied probability.
+  for (const seed of seedCandidates) {
+    const candidate = byPath.get(seed.path)
+    if (candidate === undefined || candidate.hasDecorators === true || recursionDelayLevel(candidate) > 0) continue
+    activate(candidate)
+  }
+
+  const recursiveBooks = new Map<string, WorldbookMatchCandidate[]>()
+  for (const candidate of input.candidates) {
+    const bookId = recursionBookId(candidate)
+    if (bookId === undefined) continue
+    const entries = recursiveBooks.get(bookId) ?? []
+    entries.push(candidate)
+    recursiveBooks.set(bookId, entries)
+  }
+
+  for (const [bookId, entries] of recursiveBooks) {
+    const delayedLevels = [...new Set(entries
+      .map(recursionDelayLevel)
+      .filter(level => level > 0))].sort((left, right) => left - right)
+    if ((textByBook.get(bookId) ?? '').length === 0 && delayedLevels.length === 0) continue
+    const levels = delayedLevels.length > 0 ? delayedLevels : [0]
+
+    for (const recursionLevel of levels) {
+      while (true) {
+        const recursiveText = textByBook.get(bookId) ?? ''
+        const newlyActivated: WorldbookMatchCandidate[] = []
+        for (const candidate of entries) {
+          if (active.has(candidate.path)
+            || candidate.hasDecorators === true
+            || candidate.excludeRecursion === true
+            || recursionDelayLevel(candidate) > recursionLevel) continue
+          if (!canEvaluateTimedEffect(
+            candidate,
+            input.timedEffects ?? {},
+            input.messageCount ?? input.recentMessages.length,
+          )) continue
+          if (!candidateMatchesText(input, candidate, recursiveText)) continue
+          activate(candidate)
+          newlyActivated.push(candidate)
+        }
+        // ST repeats a recursive pass only when it added new recursive text.
+        // An activated `preventRecursion` entry therefore cannot keep the loop
+        // alive by itself.
+        if (!newlyActivated.some(candidate =>
+          candidate.preventRecursion !== true
+          && (candidate.recursiveContent ?? '').length > 0)) break
+      }
+    }
+  }
+
+  return active
+}
+
 /** Apply SillyTavern's deterministic key/secondary-key semantics. */
 export function deterministicWorldbookMatch(
   input: WorldbookMatchInput,
-  options: { readonly rollProbability?: boolean } = {},
+  options: {
+    readonly rollProbability?: boolean
+    /** Additional already-selected entries that may seed recursive scanning. */
+    readonly seedCandidates?: readonly WorldbookMatchCandidate[]
+  } = {},
 ): WorldbookMatchCandidate[] {
-  const text = [
-    ...input.recentMessages.map(message => message.content),
-    input.intent.userNarration,
-    ...input.intent.metaCommands,
-    ...input.intent.keywords,
-  ].join('\n')
-  // A depth of zero excludes prior chat messages but still scans the current
-  // intent/user turn, which is the message ST is evaluating right now.
-  if (text.trim() === '') return []
+  const active = collectWorldbookActivations(input, options.seedCandidates)
   return input.candidates.filter(candidate => {
-    if (candidate.hasDecorators === true) return false
-    const depth = candidate.scanDepth === undefined ? input.scanDepth : Math.max(0, Math.trunc(candidate.scanDepth))
-    const scanText = depth === 0
-      ? ''
-      : input.recentMessages.slice(-depth).map(message => message.content).concat(
-        input.intent.userNarration,
-        ...input.intent.metaCommands,
-        ...input.intent.keywords,
-      ).join('\n')
-    const primary = candidate.keys.some(key => matchesWorldbookKey(scanText, key, candidate))
-    if (!primary) return false
-    if (candidate.selective === true && !selectiveMatch(candidate, scanText)) return false
+    if (!active.has(candidate.path)) return false
     return !candidate.useProbability
       || candidate.probability >= 100
       || options.rollProbability !== false && rollProbability(candidate.probability)
   })
+}
+
+/** Return only entries newly activated by an already-selected semantic seed. */
+export function recursiveWorldbookMatch(
+  input: WorldbookMatchInput,
+  seedCandidates: readonly WorldbookMatchCandidate[],
+): WorldbookMatchCandidate[] {
+  const seedPaths = new Set(seedCandidates.map(candidate => candidate.path))
+  const active = collectWorldbookActivations(input, seedCandidates, false)
+  return input.candidates.filter(candidate => active.has(candidate.path) && !seedPaths.has(candidate.path))
 }
 
 /** Convert raw candidates to {@link WorldbookMatch} shells (content left blank
@@ -369,6 +560,9 @@ function candidatesToMatchShells(entries: readonly WorldbookMatchCandidate[]): W
     order: c.order,
     weight: c.weight,
     content: '',
+    ...(c.position === undefined ? {} : { position: c.position }),
+    ...(c.depth === undefined ? {} : { depth: c.depth }),
+    ...(c.role === undefined ? {} : { role: c.role }),
   }))
 }
 
@@ -425,9 +619,34 @@ export const worldbookMatchAgent: Agent<WorldbookMatchInput, WorldbookMatchOutpu
       : { ...output, plugin }
     // ST-owned entries (including native ST regex keys) are always resolved
     // locally. Enhanced mode uses this as its baseline; strict mode stops here.
-    const deterministic = deterministicWorldbookMatch(input)
+    // First determine ST key activation without rolling.  Probability is a
+    // per-entry, per-turn final gate; keeping it separate lets us remember the
+    // result when enhanced mode asks the agent about the same entry.
+    const deterministicActivation = deterministicWorldbookMatch(input, { rollProbability: false })
+    const probabilityByPath = new Map<string, boolean>()
+    const passesProbability = (candidate: WorldbookMatchCandidate): boolean => {
+      const cached = probabilityByPath.get(candidate.path)
+      if (cached !== undefined) return cached
+      const sticky = isTimedEffectStickyActive(
+        input.timedEffects ?? {},
+        candidate.path,
+        input.messageCount ?? input.recentMessages.length,
+      )
+      const passed = sticky
+        || candidate.useProbability === false
+        || candidate.probability >= 100
+        || rollProbability(candidate.probability)
+      probabilityByPath.set(candidate.path, passed)
+      return passed
+    }
+    const deterministic = deterministicActivation.filter(passesProbability)
     const stBaseline = resolveMatches(deterministic, ctx, 'st')
-    const stSelected = deterministic.filter(candidate => candidate.owner !== 'agent')
+    const stSelected = deterministic.filter(candidate => candidate.owner !== 'agent'
+      || isTimedEffectStickyActive(
+        input.timedEffects ?? {},
+        candidate.path,
+        input.messageCount ?? input.recentMessages.length,
+      ))
     const stOwnedOutput = resolveMatches(stSelected, ctx, 'st')
     const agentCandidates = input.candidates.filter(candidate => candidate.owner === 'agent' || candidate.owner === undefined)
 
@@ -483,27 +702,53 @@ export const worldbookMatchAgent: Agent<WorldbookMatchInput, WorldbookMatchOutpu
     const candidateByPath = new Map(agentInput.candidates.map(c => [c.path, c]))
     const macro = (text: string): string =>
       substituteUserCharMacros(text, ctx.macros?.user ?? null, ctx.macros?.char ?? null)
-    const matches: WorldbookMatch[] = []
-    const seen = new Set<string>()
+    const semanticSeeds: WorldbookMatchCandidate[] = []
+    const acceptedModelMatches: Array<{ readonly match: WorldbookMatch; readonly candidate: WorldbookMatchCandidate }> = []
+    const modelSeen = new Set<string>()
     for (const m of rawList.matches) {
-      if (seen.has(m.path)) continue
+      if (modelSeen.has(m.path)) continue
       const candidate = candidateByPath.get(m.path)
       if (candidate === undefined) continue  // LLM invented a path that's not a candidate
-      seen.add(m.path)
-      // 5. probability 掷骰收尾(代码层,ST 公式)。useProbability=false 跳过掷骰;
-      //    probability=100 时公式恒真,直接短路省一次随机数。
-      if (candidate.useProbability
-        && candidate.probability < 100
-        && rollProbability(candidate.probability) === false) {
-        continue
-      }
+      // delay_until_recursion entries cannot be activated by the ordinary
+      // semantic pass. They can still be reached from a non-delayed seed.
+      if (recursionDelayLevel(candidate) > 0
+        || !canEvaluateTimedEffect(
+          candidate,
+          input.timedEffects ?? {},
+          input.messageCount ?? input.recentMessages.length,
+        )) continue
+      if (!passesProbability(candidate)) continue
+      modelSeen.add(m.path)
+      semanticSeeds.push(candidate)
+      acceptedModelMatches.push({ match: m, candidate })
+    }
+    const recursivelyActivated = recursiveWorldbookMatch(agentInput, semanticSeeds)
+    const recursivelyActivatedByPath = new Map(recursivelyActivated.map(candidate => [candidate.path, candidate]))
+    const matches: WorldbookMatch[] = []
+    const seen = new Set<string>()
+    const addMatch = (candidate: WorldbookMatchCandidate): void => {
+      if (seen.has(candidate.path)) return
+      seen.add(candidate.path)
+      if (!passesProbability(candidate)) return
       matches.push({
-        path: m.path,
+        path: candidate.path,
         order: candidate.order,
         weight: candidate.weight,
-        content: macro(ctx.worldbook.getContent(m.path) ?? ''),
+        content: macro(ctx.worldbook.getContent(candidate.path) ?? ''),
         source: 'agent',
+        ...(candidate.position === undefined ? {} : { position: candidate.position }),
+        ...(candidate.depth === undefined ? {} : { depth: candidate.depth }),
+        ...(candidate.role === undefined ? {} : { role: candidate.role }),
       })
+    }
+    // 5. Probability is cached from the deterministic pass when this path
+    // already matched ST keys.  A semantic-only path is rolled here once;
+    // neither route can roll the same entry twice in one run.
+    for (const { candidate } of acceptedModelMatches) addMatch(candidate)
+    // Recursive hits are deterministic additions from authoritative content;
+    // they do not require a second semantic matcher call.
+    for (const candidate of recursivelyActivatedByPath.values()) {
+      addMatch(candidate)
     }
 
     // 6. Sort: order asc (low = injected earlier), weight desc (stronger first).
@@ -533,6 +778,9 @@ function resolveMatches(
     weight: candidate.weight,
     content: macro(ctx.worldbook.getContent(candidate.path) ?? ''),
     source,
+    ...(candidate.position === undefined ? {} : { position: candidate.position }),
+    ...(candidate.depth === undefined ? {} : { depth: candidate.depth }),
+    ...(candidate.role === undefined ? {} : { role: candidate.role }),
   }))
   matches.sort((a, b) => a.order - b.order || b.weight - a.weight)
   return { matches }

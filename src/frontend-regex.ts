@@ -223,6 +223,36 @@ function filterMatch(value: string, trimStrings: readonly string[], card: RegexC
   return trimStrings.reduce((text, trim) => text.replaceAll(substituteCardMacros(trim, card, userName), ''), value)
 }
 
+function expandReplacement(
+  template: string,
+  match: string,
+  captures: readonly unknown[],
+  groups: Record<string, string | undefined> | undefined,
+  offset: number,
+  input: string,
+  trimStrings: readonly string[],
+  card: RegexCharacter,
+  userName?: string,
+): string {
+  const replaced = template
+    .replace(/\{\{match\}\}/giu, match)
+    .replace(/\$\$|\$&|\$`|\$'|\$\d{1,2}|\$<([^>]+)>/gu, (token, named: string | undefined) => {
+      if (token === '$$') return '$'
+      if (token === '$&') return match
+      if (token === '$`') return input.slice(0, offset)
+      if (token === "$'") return input.slice(offset + match.length)
+      if (named !== undefined) {
+        const value = groups?.[named]
+        return value === undefined ? '' : filterMatch(value, trimStrings, card, userName)
+      }
+      const number = Number(token.slice(1))
+      if (number === 0) return match
+      const value = captures[number - 1]
+      return value === undefined || value === null ? '' : filterMatch(String(value), trimStrings, card, userName)
+    })
+  return substituteCardMacros(replaced, card, userName)
+}
+
 function applyScript(
   raw: string,
   script: ImportedRegexScript,
@@ -244,17 +274,23 @@ function applyScriptWithOutcome(
   let matched = false
   const text = raw.replace(find, (...args: unknown[]) => {
     matched = true
-    const groups = typeof args.at(-1) === 'object' && args.at(-1) !== null
-      ? args.at(-1) as Record<string, string | undefined>
-      : undefined
-    const replacement = script.replaceString.replace(/\{\{match\}\}/giu, '$0').replace(
-      /\$(\d+)|\$<([^>]+)>/gu,
-      (_token, numeric: string | undefined, named: string | undefined) => {
-        const match = numeric === undefined ? groups?.[named ?? ''] : args[Number(numeric)]
-        return typeof match === 'string' ? filterMatch(match, script.trimStrings, card, userName) : ''
-      },
+    const last = args.at(-1)
+    const groups = typeof last === 'object' && last !== null
+      ? last as Record<string, string | undefined> : undefined
+    const input = String(groups === undefined ? last : args.at(-2) ?? raw)
+    const offsetIndex = groups === undefined ? args.length - 2 : args.length - 3
+    const offset = typeof args[offsetIndex] === 'number' ? args[offsetIndex] as number : 0
+    return expandReplacement(
+      script.replaceString,
+      String(args[0] ?? ''),
+      args.slice(1, offsetIndex),
+      groups,
+      offset,
+      input,
+      script.trimStrings,
+      card,
+      userName,
     )
-    return substituteCardMacros(replacement, card, userName)
   })
   return { text, outcome: matched ? 'applied' : 'no-match' }
 }

@@ -10,10 +10,9 @@
  *   - 宏替换({{user}}/{{char}})在最后一步作用到替换结果(ST substituteParams 时机)
  *   - 多脚本按数组顺序依次应用,disabled 跳过
  *
- *  与 ST 的差异(有意裁剪):
- *   - placement 用字符串枚举而非数字;SLASH_COMMAND/REASONING 不适用本架构
- *   - markdownOnly/promptOnly 用显式 placement 表达(display=只影响显示不改存档)
- *   - minDepth/maxDepth/runOnEdit、scoped(角色卡内)与 preset 脚本类型暂不支持
+ *  与 ST 的边界:
+ *   - placement 用字符串枚举;当前产品面只暴露 user_input/ai_output/display/world_info
+ *   - scoped/preset 脚本仍由角色卡 import 层单独保留,不混入全局脚本库
  */
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -34,6 +33,12 @@ export interface RegexScript {
   trimStrings: string[]
   placement: RegexPlacement[]
   disabled: boolean
+  markdownOnly: boolean
+  promptOnly: boolean
+  runOnEdit: boolean
+  substituteRegex: number
+  minDepth: number | null
+  maxDepth: number | null
   createdAt: string
 }
 
@@ -46,12 +51,14 @@ export interface RegexMacros {
 /** ST `utils.js regexFromString` 同款:`/pattern/flags` 字面量或裸 pattern。无效返回 null。 */
 export function regexFromString(input: string): RegExp | null {
   try {
-    const m = input.match(/(\/?)(.+)\1([a-z]*)/i)
-    if (m === null) return null
-    if (m[3] !== undefined && m[3] !== '' && !/^(?!.*?(.).*?\1)[gmixXsuUAJ]+$/u.test(m[3])) {
-      return new RegExp(input)
-    }
-    return new RegExp(m[2] ?? input, m[3] ?? '')
+    const literal = input.match(/^\/([\s\S]*)\/([a-z]*)$/iu)
+    if (literal === null) return new RegExp(input)
+    const flags = literal[2] ?? ''
+    // Keep the same accepted modern JavaScript flag set as the card-owned
+    // regex path (including `d`/`v`), while letting native RegExp reject
+    // duplicate or runtime-unsupported combinations.
+    if (flags !== '' && !/^(?!.*?(.).*?\1)[dgimsuvy]+$/u.test(flags)) return new RegExp(input)
+    return new RegExp(literal[1] ?? '', flags)
   } catch {
     return null
   }
@@ -65,6 +72,18 @@ function substituteMacros(text: string, macros: RegexMacros): string {
   return out
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[\\^$.*+?()\[\]{}|/\-]/gu, '\\$&')
+}
+
+function substituteFindMacros(text: string, macros: RegexMacros, mode: number): string {
+  if (mode === 0) return text
+  const substituted = substituteMacros(text, macros)
+  return mode === 2
+    ? escapeRegex(substituted)
+    : substituted
+}
+
 /** ST `filterString`:从串里剥掉所有 trimStrings(先过宏)。 */
 function filterString(raw: string, trimStrings: readonly string[], macros: RegexMacros): string {
   let out = raw
@@ -76,24 +95,89 @@ function filterString(raw: string, trimStrings: readonly string[], macros: Regex
 }
 
 /** 应用单条脚本。任何解析/执行异常都返回原文(正则是增益,不是链路依赖)。 */
-export function runRegexScript(script: RegexScript, rawString: string, macros: RegexMacros): string {
+export interface RegexExecutionOptions {
+  readonly depth?: number
+  readonly isEdit?: boolean
+  readonly surface?: 'prompt' | 'display'
+}
+
+function appliesAtDepth(script: RegexScript, depth: number | undefined): boolean {
+  if (depth === undefined) return true
+  if (script.minDepth !== null && script.minDepth >= -1 && depth < script.minDepth) return false
+  if (script.maxDepth !== null && script.maxDepth >= 0 && depth > script.maxDepth) return false
+  return true
+}
+
+function appliesToSurface(script: RegexScript, surface: RegexExecutionOptions['surface']): boolean {
+  if (surface === 'display') return script.markdownOnly || (!script.markdownOnly && !script.promptOnly)
+  return script.promptOnly || (!script.markdownOnly && !script.promptOnly)
+}
+
+function expandReplacement(
+  template: string,
+  match: string,
+  captures: readonly unknown[],
+  groups: Record<string, string | undefined> | undefined,
+  offset: number,
+  input: string,
+  trimStrings: readonly string[],
+  macros: RegexMacros,
+): string {
+  const prefix = input.slice(0, offset)
+  const suffix = input.slice(offset + match.length)
+  const replaced = template
+    .replace(/\{\{match\}\}/giu, match)
+    .replace(/\$\$|\$&|\$`|\$'|\$\d{1,2}|\$<([^>]+)>/gu, (token, named: string | undefined) => {
+      if (token === '$$') return '$'
+      if (token === '$&') return match
+      if (token === '$`') return prefix
+      if (token === "$'") return suffix
+      if (named !== undefined) {
+        const value = groups?.[named]
+        return value === undefined ? '' : filterString(value, trimStrings, macros)
+      }
+      const number = Number(token.slice(1))
+      if (number === 0) return match
+      const value = captures[number - 1]
+      return value === undefined || value === null ? '' : filterString(String(value), trimStrings, macros)
+    })
+  return substituteMacros(replaced, macros)
+}
+
+/** Run one script with ST's surface/edit/depth gates applied. */
+export function runRegexScript(
+  script: RegexScript,
+  rawString: string,
+  macros: RegexMacros,
+  options: RegexExecutionOptions = {},
+): string {
   if (script.disabled || script.findRegex.length === 0 || rawString.length === 0) return rawString
-  const find = regexFromString(script.findRegex)
+  if (!appliesToSurface(script, options.surface ?? 'prompt')) return rawString
+  if (options.isEdit === true && !script.runOnEdit) return rawString
+  if (!appliesAtDepth(script, options.depth)) return rawString
+  const find = regexFromString(substituteFindMacros(script.findRegex, macros, script.substituteRegex))
   if (find === null) return rawString
   if (find.global || find.sticky) find.lastIndex = 0
   try {
     return rawString.replace(find, (...args: unknown[]) => {
-      const groups = args[args.length - 1] as Record<string, string> | undefined
-      // {{match}} → $0(ST 同款预映射),由下面的捕获组分支统一处理
-      const template = script.replaceString.replace(/\{\{match\}\}/giu, '$0')
-      const replaced = template.replace(/\$(\d+)|\$<([^>]+)>/gu, (_m, num: string | undefined, name: string | undefined) => {
-        let captured: string | undefined
-        if (num !== undefined) captured = args[Number(num)] as string | undefined
-        else if (name !== undefined) captured = groups?.[name]
-        if (captured === undefined || captured === null) return ''
-        return filterString(captured, script.trimStrings, macros)
-      })
-      return substituteMacros(replaced, macros)
+      const last = args.at(-1)
+      const groups = last !== null && typeof last === 'object'
+        ? last as Record<string, string | undefined> : undefined
+      const input = typeof (groups === undefined ? last : args.at(-2)) === 'string'
+        ? String(groups === undefined ? last : args.at(-2)) : rawString
+      const offsetIndex = groups === undefined ? args.length - 2 : args.length - 3
+      const offset = typeof args[offsetIndex] === 'number' ? args[offsetIndex] as number : 0
+      const match = String(args[0] ?? '')
+      return expandReplacement(
+        script.replaceString,
+        match,
+        args.slice(1, offsetIndex),
+        groups,
+        offset,
+        input,
+        script.trimStrings,
+        macros,
+      )
     })
   } catch {
     return rawString
@@ -106,12 +190,13 @@ export function applyRegexScripts(
   text: string,
   placement: RegexPlacement,
   macros: RegexMacros,
+  options: RegexExecutionOptions = {},
 ): string {
   let out = text
   for (const script of scripts) {
     if (script.disabled) continue
     if (!script.placement.includes(placement)) continue
-    out = runRegexScript(script, out, macros)
+    out = runRegexScript(script, out, macros, options)
   }
   return out
 }
@@ -214,6 +299,12 @@ function normalizeScript(
     trimStrings: trimRaw.filter((t): t is string => typeof t === 'string'),
     placement: placement.length > 0 ? placement : ['display'],
     disabled: fields.disabled === true,
+    markdownOnly: fields.markdownOnly === true,
+    promptOnly: fields.promptOnly === true,
+    runOnEdit: fields.runOnEdit === true,
+    substituteRegex: Number.isFinite(fields.substituteRegex) ? Math.trunc(fields.substituteRegex as number) : 0,
+    minDepth: typeof fields.minDepth === 'number' && Number.isFinite(fields.minDepth) ? Math.trunc(fields.minDepth) : null,
+    maxDepth: typeof fields.maxDepth === 'number' && Number.isFinite(fields.maxDepth) ? Math.trunc(fields.maxDepth) : null,
   }
 }
 

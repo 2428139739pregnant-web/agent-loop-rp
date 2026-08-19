@@ -23,10 +23,10 @@
 | `position` | number `0` | 插入位置枚举（见 §4） |
 | `disable` | bool `false` | 条目禁用 |
 | `ignoreBudget` | bool `false` | 不受 token 预算约束（超预算后仍可进，但排在预算内条目之后） |
-| `excludeRecursion` | bool `false` | 递归扫描时不参与（不能被已激活条目的 content 再触发） |
-| `preventRecursion` | bool `false` | 其 content 不参与递归扫描文本 |
+| `excludeRecursion` | bool `false` | 递归扫描时不参与（当前确定性 lorebook inspector 已实现） |
+| `preventRecursion` | bool `false` | 其 content 不参与递归扫描文本（当前已实现） |
 | `matchPersonaDescription` 等 7 个 | bool `false` | 把用户 persona / 角色 description / personality / depth prompt / scenario / creator notes 纳入扫描文本（`world-info.js:295-320`） |
-| `delayUntilRecursion` | number `0` | 延迟到第 N 层递归才可激活 |
+| `delayUntilRecursion` | number `0` | 延迟到第 N 层递归才可激活（`true` 按第 1 层处理；当前已实现） |
 | `probability` | number `100` | 激活概率 %（`world-info.js:4907-4925`：`Math.random()*100 <= probability` 则通过；sticky 条目免掷） |
 | `useProbability` | bool `true` | 概率开关 |
 | `depth` | number `4` | position=atDepth(4) 时的插入深度（`DEFAULT_DEPTH=4`，`world-info.js:96`） |
@@ -38,13 +38,13 @@
 | `caseSensitive` | bool? `null` | 条目级大小写敏感覆盖；null = 用全局（默认 false） |
 | `matchWholeWords` | bool? `null` | 条目级整词匹配覆盖；null = 用全局（默认 false） |
 | `useGroupScoring` | bool? `null` | 组打分 |
-| `sticky` / `cooldown` / `delay` | number? `null` | 定时效应：激活后保持 N 轮 / 冷却 N 轮 / 延迟 N 轮（`WorldInfoTimedEffects`，`world-info.js:475+`） |
+| `sticky` / `cooldown` / `delay` | number? `null` | ST 定时效应字段；已按消息计数接入会话级状态机，支持跨轮保持、冷却和延迟 |
 | `role` | enum `0` | atDepth 注入的消息角色（0=system） |
 | `automationId` | string `''` | 外部 API 触发 id |
 | `characterFilterNames/Tags/Exclude` | — | 条目按角色卡过滤（模板外字段） |
 | `triggers` | array `[]` | 生成类型触发器 |
 
-**世界书级全局设置**（`world-info.js:69-86`）：`world_info_depth=2`（扫描最近 2 条消息，默认）、`world_info_budget=25`（占上下文 25%）、`world_info_budget_cap=0`（绝对上限，0=不限）、`world_info_case_sensitive=false`、`world_info_match_whole_words=false`、`world_info_recursive=false`、`world_info_max_recursion_steps=0`、`world_info_min_activations=0`。
+**世界书级全局设置**（`world-info.js:69-86`）：`world_info_depth=2`（扫描最近 2 条消息，默认）、`world_info_budget=25`（占上下文 25%）、`world_info_budget_cap=0`（绝对上限，0=不限）、`world_info_case_sensitive=false`、`world_info_match_whole_words=false`、`world_info_recursive=false`、`world_info_max_recursion_steps=0`、`world_info_min_activations=0`。本项目当前把 `scan_depth`/`recursive_scanning` 以及条目递归控制映射进 `ImportedLorebook`；确定性 inspector 执行递归扫描，独立世界书 JSON 还兼容顶层 `recursive` 别名。`sticky/cooldown/delay` 由宿主按会话消息计数维护，不依赖 LLM。
 
 ## 2. 蓝灯 vs 绿灯：激活语义（`checkWorldInfo`，`world-info.js:4597` 起）
 
@@ -63,7 +63,7 @@
      - `NOT_ANY(2)`：所有次关键词都未命中 → 激活
      - `AND_ALL(3)`：所有次关键词命中 → 激活
 7. 激活集合再做：包含组过滤（`filterByInclusionGroups`）→ 概率掷骰 → token 预算截断
-8. 激活条目的 `content` 做 `substituteParams` 宏替换后拼接注入；其 content 若未 `preventRecursion`，追加进递归缓冲，进入下一层递归扫描（直到无新激活或达 `max_recursion_steps`）
+8. 激活条目的 `content` 做 `substituteParams` 宏替换后拼接注入；其 content 若未 `preventRecursion`，追加进**累计**递归缓冲，进入下一层递归扫描。`excludeRecursion` 阻止条目从递归文本触发，`delayUntilRecursion` 控制可进入的递归层级；当前本项目 inspector 重复扫描直到没有新条目。跨消息 `sticky/cooldown/delay` 由 `src/agent-loop/worldbook-timed-effects.ts` 按消息计数维护：普通生成提交激活时间点，重 roll 不推进状态。
 9. `min_activations` > 0 时若激活数不足，扩大扫描深度（skew 机制）继续找
 
 **关键词匹配细节**（`WorldInfoBuffer.matchKeys`，`world-info.js:336-360`）：
@@ -71,6 +71,8 @@
 - 普通文本：默认 `haystack.includes(needle)`（两者都按大小写设置 toLowerCase）
 - `matchWholeWords=true`：多词短语仍用 includes；单词用边界正则 `(?:^|\W)(word)(?:$|\W)`
 - 扫描文本 = 最近 `scanDepth`（默认 2）条消息 + 可选 persona/角色字段 + 递归缓冲，用 `\n\x01` 连接防跨消息误匹配
+
+**本项目递归实现边界**：`src/import/lorebook.ts` 的 `inspectLorebook`/`inspectLorebooks` 已实现 book-level recursive switch、entry-level scan-depth override、累计递归文本、`excludeRecursion`、`preventRecursion` 和 `delayUntilRecursion`，并有单元测试覆盖。跨轮 timed effects 另由会话级 `TimedEffectState` 维护；尚未声称完全复刻 ST 的包含组、向量匹配和所有宿主分支编辑边界。
 
 ## 3. 排序与预算
 
@@ -91,6 +93,23 @@
 | 7 | outlet | 自定义插座 |
 
 角色卡内嵌 character_book 的换算（`world-info.js:5517`）：`extensions.position ?? (position==='before_char' ? 0 : 1)`。
+
+### 4.1 当前 response 的位置分桶
+
+本项目 response 阶段不会把激活结果重新压成一个段落，而是先由 `splitWorldbookMatches` 分为 `beforeCharacter`、`afterCharacter`、`beforeExamples`、`afterExamples`、`beforeAuthorNote`、`afterAuthorNote`、`atDepth`、`outlet` 和 `unplaced` 九个桶；桶内按 `order` 升序、`weight` 降序（再按 path）稳定排序。当前模板锚点如下：
+
+| ST position | 本项目桶 | response 锚点 |
+| ---: | --- | --- |
+| 0 | `beforeCharacter` | persona 段 |
+| 1 | `afterCharacter` | worldview 段 |
+| 2 | `beforeExamples` | `mes_example` 前 |
+| 3 | `afterExamples` | `mes_example` 后 |
+| 4 | `atDepth` | `at_depth_worldbook` 段 |
+| 5 | `beforeAuthorNote` | `post_history_instructions` 段 |
+| 6 | `afterAuthorNote` | `post_history_instructions` 段 |
+| 7 | `outlet` | 与 `unplaced` 合并进旧 `worldbook_block` |
+
+没有受支持 position 的条目进入 `unplaced`。这些是 response template 的稳定锚点，不是 ST 的真实消息数组：当前没有独立 Author's Note/outlet host 对象，`atDepth` 是标记段而非真实消息树深度插入。独立世界书的 constant 条目走另一条简化映射：`0 → persona`、`1 → worldview`、`2–7 → style`。
 
 ## 5. 角色卡 V2/V3 字段与消费方式
 
@@ -141,21 +160,26 @@
 
 | ST 机制 | 本项目落地 |
 | --- | --- |
-| 蓝灯 constant 无条件激活 | 保留现有 preprocess 合并进三文档的路径，但改为**严格按 ST 语义**：constant && !disable 的条目按 order 降序拼接注入 response 的 system 区（persona 文档）。不再依赖 LLM 判断 |
+| 蓝灯 constant 无条件激活 | `constant && enabled` 条目不进入 2.1 agent 候选池；角色卡内嵌蓝灯在 preprocess 合并进三文档，独立书蓝灯由 response 每轮注入。独立书按 ST position 做 `0 → persona`、`1 → worldview`、`2–7 → style` 简化映射；实际代码仍会按 `probability/useProbability` 处理可掷骰条目 |
 | 绿灯 keyed 激活 | 支持三种模式：`ST strict` 由确定性 ST 关键词/次关键词匹配；`ST enhanced` 先保留 ST 基线，再由 ② worldbook-match agent 只追加普通绿灯的语义候选；`Agent native` 由 agent 判断普通绿灯。ST baseline 与 agent 结果交给纯代码 WorldbookResolver 去重、排序并标记 source，不新增额外 LLM 调用。蓝灯、原生 ST regex key、控制型 EJS、`@INJECT`、`[GENERATE]`、`[RENDER]`、decorator 条目先排除出 agent 候选池；EJS-only 普通条目仍按普通绿灯激活，命中后再渲染 |
 | ST-Prompt-Template 特殊条目 | `worldbook-plugin.ts` 在本地生成结构化计划：`@INJECT pos/target/regex` 和 `[GENERATE:BEFORE/AFTER/idx/REGEX]` 修改正文 agent 的既有消息数组；`[RENDER:BEFORE/AFTER]` 只生成 display-only 结果；常用 `@@generate_*`/`@@render_*` 作为别名。该 lane 不调用 LLM，未覆盖的变量初始化/复杂 decorator 保留并记录 skipped |
-| position | 简化映射：`0/before_char` → persona 文档（system 前段）；`1/after_char` → worldview 文档；`4/atDepth` → 交给 2.2 context-process 作为分段素材；`2/3/5/6` → 并入 style 文档尾部（v1 简化，注释说明与 ST 的差异） |
-| order 排序 | 同一注入点内 order 降序拼接 |
-| mes_example | preprocess 新增第四文档「示例对话」：`<START>` 分组、宏替换后注入 response prompt（示例消息区，位于人设后历史前）。**当前项目完全没接此字段，是最大缺口** |
+| World Info parser mapping | 角色卡条目从 `extensions.selectiveLogic/probability/useProbability/position/scan_depth/exclude_recursion/prevent_recursion/delay_until_recursion`（并兼容直接字段）归一化；独立 World Info 从 `entries` 字典读取，兼容顶层 `recursive`/`recursiveScanning`，将 `selectiveLogic` 数字/枚举名、禁用、概率和 position 映射到统一模型。未知字段不进入执行模型 |
+| recursive scanning | `src/import/lorebook.ts` 的 deterministic inspector 已执行 `recursiveScanning`、entry `scanDepth`、累计递归 buffer、`excludeRecursion`、`preventRecursion` 和 `delayUntilRecursion`；递归控制不再写成 inert。它不是跨轮 timed-effects 状态机 |
+| position / response buckets | `response.ts` 先将匹配结果分为 `beforeCharacter`、`afterCharacter`、`beforeExamples`、`afterExamples`、`beforeAuthorNote`、`afterAuthorNote`、`atDepth`、`outlet`、`unplaced`。这些桶分别接到 persona/worldview、`mes_example` 前后、post-history、at-depth 标记块和旧 `worldbook_block`；`outlet` 与 `unplaced` 在最终模板中合并 |
+| order 排序 | 匹配条目桶内按 `order` 升序、`weight` 降序和 path 稳定排序；独立 constant 文档块保留 ST 风格按 `order` 降序 |
+| mes_example | preprocess 提取 `<START>` 分组后的 `mes_example`，response 在示例对话锚点中渲染；position 2/3 条目包在其前后 |
 | system_prompt / post_history_instructions | preprocess 提取；response 组装时 system_prompt 前置、post_history 追加在历史之后（宏替换） |
 | {{user}}/{{char}} 宏 | 全链路替换：卡文本、世界书 content 与 key、开场白。与 A3 的 persona 联动（userPersona.name） |
-| probability / scanDepth / caseSensitive / matchWholeWords / useRegex / selectiveLogic | 条目级参数透传到代码匹配器（ImportedLorebookEntry 已有部分字段，补全缺失的 delayUntilRecursion/ignoreBudget/group 系可先留默认） |
-| 世界书级 scan_depth | 全局设置项（配置 API + 前端输入），默认 2 |
+| probability / scanDepth / caseSensitive / matchWholeWords / useRegex / selectiveLogic | 参数进入确定性 ST lane 或统一 `ImportedLorebookEntry`/`WorldbookEntry`；概率在代码层收尾，regex 走隔离 deterministic lane，不能让 agent 重解释原生 regex 条目 |
+| 世界书级 scan_depth | 世界书匹配设置默认扫描最近 2 条消息；角色卡/独立书的 parser 另保留书级递归开关和已支持的 entry-level override |
+| Tavern Helper `injectPrompts` | Host state 实现 `injectPrompts`、`uninjectPrompts`、按 script replacement；prompt id 全局唯一，重复 id 替换，其他脚本 prompt 保留 |
+| `once` / `filter` | selection 按 `order` 排序，`filter:false` 和同步/异步 host predicate 都可排除；只消费本次实际选中的 once snapshot，并按 id + script id + content 防止晚到完成事件删除新替换 |
+| iframe variable scopes | iframe bridge 实现 `global`、`preset`、`character`、`chat`、`message`、`script`、`extension` 七类 scope；`message_id` 默认 `latest`，`script_id` 默认当前脚本，`extension` 必须带 `extension_id` 并按 id 隔离 |
 
 ### 可选（后置）
 
 - token 预算（budget/cap/ignoreBudget）—— 本项目上下文压力小，可先只做条目数上限
-- sticky/cooldown/delay 定时效应、递归扫描（excludeRecursion/preventRecursion/delayUntilRecursion）—— 需要 chat_metadata 级状态，v1 跳过
+- 更复杂的 timed-effects 边界——基础 `sticky/cooldown/delay` 已实现；仍需继续对齐 ST 的包含组、向量匹配及所有 chat_metadata 分支编辑细节
 - 包含组（group/groupWeight）—— 跳过
 - vectorized 紫灯 —— 跳过（无向量库）
 - matchPersonaDescription 等 7 开关 —— 可选做 2 个（persona/character description）
@@ -166,7 +190,7 @@
 
 1. 普通绿灯匹配由世界书模式决定：strict 只走 ST，enhanced 为 ST + agent，native 只走 agent；Resolver 纯代码合并，probability 掷骰与宏替换在代码层收尾
 2. position 2/3/5/6/7 并入文档尾部，不精确复刻 ST 的插入点
-3. 定时效应/递归/包含组/向量暂不支持
+3. 基础 sticky/cooldown/delay 定时效应已支持；包含组、向量匹配和部分 chat_metadata/分支编辑边界暂不支持，递归扫描仍只实现确定性 entry/content 语义
 4. token 计数用字符数近似（无 tokenizer 依赖）
 
 ## 9. 验收口径（A5 完成标准）

@@ -18,6 +18,12 @@ export interface WorldbookMatch {
   content: string
   /** Where the final activation decision came from. */
   source?: 'st' | 'agent' | 'plugin' | 'st+agent'
+  /** ST World Info insertion position retained through activation. */
+  position?: number
+  /** atDepth position metadata, when supplied by the source book. */
+  depth?: number
+  /** Tavern Helper prompt role for position-aware entries. */
+  role?: WorldbookPromptRole
 }
 
 export type WorldbookPromptRole = 'system' | 'user' | 'assistant'

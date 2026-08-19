@@ -243,7 +243,13 @@ function outputWith(
 }
 
 function isActivated(candidate: WorldbookPluginCandidate): boolean {
-  return candidate.constant === true || candidate.active === true
+  // ST-Prompt-Template defines @INJECT as an extension-owned directive. It
+  // is processed regardless of the entry's blue/green activation state; the
+  // extension's own settings decide whether disabled special entries are
+  // honoured. Do not force it through the ordinary World Info key matcher.
+  const isInject = candidate.pluginKinds?.includes('inject')
+    || /^\s*@INJECT\b/iu.test(candidate.comment)
+  return isInject === true || candidate.constant === true || candidate.active === true
 }
 
 function canApplyGeneration(
@@ -275,6 +281,10 @@ export function buildWorldbookPluginOutput(
   const skipped: Array<{ path: string; reason: string }> = []
 
   for (const candidate of candidates) {
+    if (!isActivated(candidate)) {
+      skipped.push({ path: candidate.path, reason: 'entry was not activated by ST key/constant rules' })
+      continue
+    }
     if (!passesProbability(candidate)) {
       skipped.push({ path: candidate.path, reason: 'trigger probability did not pass' })
       continue
