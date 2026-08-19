@@ -13,6 +13,7 @@
 - 补齐酒馆助手 `extension` 变量作用域，按官方 `extension_id` 隔离读写，并兼容没有该字段的旧会话快照。
 - iframe 变量 bridge 对齐 Tavern Helper option：补齐 `message_id`（默认 `latest`）、`script_id`（默认当前脚本）和 `extension_id` 的原样透传；`message` 读写保持独立作用域，不再误写入 chat。
 - 补齐 Tavern Helper 注入的 `injectPrompts`、`uninjectPrompts`、`once`、`order`、`should_scan`、筛选和生成后消费逻辑，防止一次性注入误删新替换内容。
+- 将 Tavern Helper 注入真正接入正文生成链：`should_scan` 文本进入世界书扫描缓冲，`position=in_chat` 按 ST 的 depth/order/role 规则进入 response 消息数组，`position=none` 保持扫描专用，并在成功生成后消费本轮 `once` 快照。
 - 世界书激活支持条目级 `scanDepth`、累计递归缓冲、`exclude_recursion`、`prevent_recursion` 和 `delay_until_recursion`，并把角色卡/独立世界书字段映射到执行层。
 - 按 SillyTavern 消息计数接入世界书 `sticky`、`cooldown`、`delay`；定时效果按会话持久化，重 roll 不推进计数，分支回退会清理未来状态。
 - 接入 SillyTavern 世界书包含组：贯通 `group`、`groupOverride`、`groupWeight`、`useGroupScoring`，按 sticky 优先、覆盖优先、评分和加权选择在本地收尾，避免让 LLM 决定组内互斥关系。

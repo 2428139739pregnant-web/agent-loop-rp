@@ -261,6 +261,7 @@ interface CtxOpts {
     readonly scenario?: string
     readonly creatorNotes?: string
   }
+  readonly tavernHelperState?: AgentContext['tavernHelperState']
 }
 
 function makeCtx(opts: CtxOpts): AgentContext {
@@ -285,6 +286,7 @@ function makeCtx(opts: CtxOpts): AgentContext {
       ? { worldbookSettings: { scanDepth: opts.scanDepth, useLlmMatcher: true } }
       : {}),
     ...(opts.globalScanData === undefined ? {} : { worldbookGlobalScanData: opts.globalScanData }),
+    ...(opts.tavernHelperState === undefined ? {} : { tavernHelperState: opts.tavernHelperState }),
   }
 }
 
@@ -391,6 +393,24 @@ test('worldbook matcher includes only opted-in ST global scan fields', () => {
   }))
   const matched = deterministicWorldbookMatch(input, { rollProbability: false })
   assert.deepEqual(matched.map(candidate => candidate.path), ['persona.md', 'scenario.md'])
+})
+
+test('worldbook matcher includes Tavern Helper should_scan prompts in the local scan buffer', () => {
+  const store = new MemoryWorldbookStore([
+    { path: 'helper.md', keywords: ['暗号'], order: 1, weight: 1, content: '' },
+  ])
+  const helperState = {
+    injectedPrompts: [{
+      id: 'scan', scriptId: 'script', position: 'none', depth: 0, role: 'system',
+      content: '暗号', shouldScan: true, once: false, order: 100,
+    }],
+  } as unknown as AgentContext['tavernHelperState']
+  const input = buildWorldbookMatchInput(makeIntent(), makeCtx({ store, tavernHelperState: helperState }))
+  assert.deepEqual(input.injectedScanText, ['暗号'])
+  assert.deepEqual(
+    deterministicWorldbookMatch(input, { rollProbability: false }).map(candidate => candidate.path),
+    ['helper.md'],
+  )
 })
 
 test('buildWorldbookMatchInput carries recursive source metadata and macro-expanded content', () => {

@@ -6,6 +6,7 @@ import type {
   ImportedTavernHelperScript,
   ImportedTavernHelperScriptTree,
 } from './import/types.ts'
+import type { ChatMessage } from './agent-loop/provider.ts'
 
 /** DSH's command package extends SessionEventMap; keep this compatibility
  * reader usable without pulling the command registry into the standalone app. */
@@ -1359,6 +1360,60 @@ export function tavernInjectedInChatPrompts(
   return selectTavernInjectedPrompts(state, options).prompts.flatMap(prompt => prompt.position === 'in_chat' && prompt.content.trim() !== ''
     ? [{ role: prompt.role, content: prompt.content, depth: prompt.depth, order: prompt.order }]
     : [])
+}
+
+/**
+ * Apply the official Tavern Helper `in_chat` prompts to an oldest-to-newest
+ * chat-completion message array. ST performs this operation on a reversed
+ * array, inserts at `depth + totalInsertedMessages`, and reverses it back;
+ * keeping that detail is important because depth 0 is the generation-side
+ * boundary after the newest message. Prompts are grouped by depth, then by
+ * descending injection order and finally by ST's system → user → assistant
+ * role order. `position:'none'` is intentionally excluded: it participates
+ * in World Info scanning through {@link tavernInjectedScanText} but is never
+ * sent to the model as a prompt message.
+ */
+export function applyTavernInjectedInChatPrompts(
+  baseMessages: readonly ChatMessage[],
+  state: TavernHelperState | undefined,
+  options: TavernInjectedPromptSelectionOptions = {},
+): ChatMessage[] {
+  const selected = selectTavernInjectedPrompts(state, options)
+  const byDepth = new Map<number, TavernInjectedPrompt[]>()
+  for (const prompt of selected.prompts) {
+    if (prompt.position !== 'in_chat' || prompt.content.trim().length === 0) continue
+    const depth = Math.max(0, Math.trunc(prompt.depth))
+    const bucket = byDepth.get(depth) ?? []
+    bucket.push(prompt)
+    byDepth.set(depth, bucket)
+  }
+  if (byDepth.size === 0) return baseMessages.map(message => ({ ...message }))
+
+  const messages = baseMessages.map(message => ({ ...message })).reverse()
+  let totalInsertedMessages = 0
+  const roleOrder: readonly TavernInjectedPrompt['role'][] = ['system', 'user', 'assistant']
+  for (const depth of [...byDepth.keys()].sort((left, right) => left - right)) {
+    const prompts = byDepth.get(depth) ?? []
+    const orders = [...new Set(prompts.map(prompt => prompt.order))].sort((left, right) => right - left)
+    const roleMessages: ChatMessage[] = []
+    for (const order of orders) {
+      const orderPrompts = prompts.filter(prompt => prompt.order === order)
+      for (const role of roleOrder) {
+        const content = orderPrompts
+          .filter(prompt => prompt.role === role)
+          .sort((left, right) => left.id.localeCompare(right.id))
+          .map(prompt => prompt.content.trim())
+          .filter(Boolean)
+          .join('\n')
+        if (content.length > 0) roleMessages.push({ role, content })
+      }
+    }
+    if (roleMessages.length === 0) continue
+    const index = Math.min(depth + totalInsertedMessages, messages.length)
+    messages.splice(index, 0, ...roleMessages)
+    totalInsertedMessages += roleMessages.length
+  }
+  return messages.reverse()
 }
 
 /** Return script prompt text that participates in the next lorebook scan. */

@@ -8,6 +8,7 @@ import type { SessionStore, WorldbookStore } from './session.ts'
 import type { PreprocessedCharacter } from './character-loader.ts'
 import type { ResponseGenerationSettings } from './response-settings.ts'
 import type { triggerSummarize } from './agents/summarize.ts'
+import type { TavernHelperState } from '../tavern-helper.ts'
 import { runMvuUpdate, type MvuRuntimeSettings } from './agents/mvu-update.ts'
 import { readMvuStateFromMessages } from '../mvu.ts'
 import { buildWorldbookMatchInput, deterministicWorldbookMatch } from './agents/worldbook-match.ts'
@@ -103,6 +104,8 @@ export interface RunLoopDeps {
   worldbookSettings?: WorldbookSettings
   /** ST World Info chat-independent scan fields. */
   worldbookGlobalScanData?: WorldbookGlobalScanData
+  /** Session-owned Tavern Helper prompt injections and scan text. */
+  tavernHelperState?: TavernHelperState
   /** Optional ⑤ postprocess settings; omitted callers use the agent defaults. */
   postprocessSettings?: PostprocessRuntimeSettings
   /** Optional independent MVU post-response analysis settings. */
@@ -141,6 +144,7 @@ function buildContext(deps: RunLoopDeps): AgentContext {
     // 世界书设置(扫描深度等);缺省走 ST 默认(scanDepth=2)。
     worldbookSettings: deps.worldbookSettings ?? DEFAULT_WORLDBOOK_SETTINGS,
     ...(deps.worldbookGlobalScanData === undefined ? {} : { worldbookGlobalScanData: deps.worldbookGlobalScanData }),
+    ...(deps.tavernHelperState === undefined ? {} : { tavernHelperState: deps.tavernHelperState }),
     ...(deps.postprocessSettings === undefined ? {} : { postprocessSettings: deps.postprocessSettings }),
     // {{user}}/{{char}} 宏替换源:persona 名 + 角色名(酒馆语义:WI key 匹配与
     // content 注入前替换)。未配置时对应侧传 null,保持宏原样。

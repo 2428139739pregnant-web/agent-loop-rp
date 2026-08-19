@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import type { ImportedCharacterFrontend } from './import/types.ts'
 import {
   applyTavernHelperMutation,
+  applyTavernInjectedInChatPrompts,
   consumeTavernInjectedPromptsAfterGeneration,
   getScriptTrees,
   injectPrompts,
@@ -203,6 +204,28 @@ test('generation selection filters, sorts, scans none prompts, and consumes only
 
   const consumed = consumeTavernInjectedPromptsAfterGeneration(injected, selected)
   assert.deepEqual(consumed?.injectedPrompts?.map(prompt => prompt.id), ['persistent', 'none', 'blocked'])
+})
+
+test('in_chat prompts use ST depth and role ordering while none prompts stay scan-only', () => {
+  const state = initializeTavernHelperState(frontend([scriptTree('script')]), 'character')
+  const injected = injectPrompts(state, 'script', [
+    injection('depth-0-user', { role: 'user', depth: 0, order: 20, content: 'U0' }),
+    injection('depth-0-system', { role: 'system', depth: 0, order: 10, content: 'S0' }),
+    injection('depth-1-assistant', { role: 'assistant', depth: 1, order: 30, content: 'A1' }),
+    injection('scan-only', { position: 'none', depth: 0, shouldScan: true, content: 'SCAN' }),
+  ])
+  const messages = applyTavernInjectedInChatPrompts([
+    { role: 'system', content: 'base system' },
+    { role: 'user', content: 'latest user' },
+  ], injected)
+  assert.deepEqual(messages.map(message => `${message.role}:${message.content}`), [
+    'system:base system',
+    'assistant:A1',
+    'user:latest user',
+    'system:S0',
+    'user:U0',
+  ])
+  assert.ok(messages.every(message => !message.content.includes('SCAN')))
 })
 
 test('once consumption does not delete a newer replacement with the same id', () => {

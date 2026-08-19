@@ -14,6 +14,12 @@
 {{recent_messages}}
 ```
 
+- 酒馆助手 `injectPrompts` 中标记 `should_scan` 的提示词（也包括 `position=none` 的扫描专用提示词）：
+
+```
+{{injected_scan_text}}
+```
+
 - ST 本地关键词基线（已经确定激活，**不得删除**；你只需要从候选表中追加语义相关条目）:
 
 ```

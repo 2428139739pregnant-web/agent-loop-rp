@@ -37,6 +37,7 @@ import {
 import type { Agent, AgentContext } from './types.ts'
 import { applyPromptTemplateInjections } from '../../extensions/prompt-template-adapter.ts'
 import { classifyWorldbookEntry } from '../worldbook-compat.ts'
+import { applyTavernInjectedInChatPrompts } from '../../tavern-helper.ts'
 
 /** Input contract for {@link responseAgent}. */
 export interface ResponseInput {
@@ -482,13 +483,17 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
       { role: 'system', content: systemPrompt },
       { role: 'user', content: promptUserInput },
     ]
-    const promptMessages = applyPromptTemplateInjections(
+    const promptTemplateMessages = applyPromptTemplateInjections(
       baseMessages,
       input.worldbook.plugin ?? {
         promptInjections: [],
         renderDirectives: [],
         skipped: [],
       },
+    )
+    const promptMessages = applyTavernInjectedInChatPrompts(
+      promptTemplateMessages,
+      ctx.tavernHelperState,
     )
 
     // 3. Call the LLM. Plain text — no response_format.

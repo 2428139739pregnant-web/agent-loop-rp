@@ -37,6 +37,7 @@ import { classifyWorldbookEntry, type WorldbookEntryOwner, type WorldbookPluginK
 import { resolveWorldbookMatches } from '../worldbook-resolver.ts'
 import { buildWorldbookPluginOutput } from '../worldbook-plugin.ts'
 import { renderWorldbookKeyOnlyMd } from '../worldbook-key-index.ts'
+import { tavernInjectedScanText } from '../../tavern-helper.ts'
 import {
   canEvaluateTimedEffect,
   isTimedEffectStickyActive,
@@ -130,6 +131,8 @@ export interface WorldbookMatchInput {
   recentMessages: readonly WorldbookScanMessage[]
   /** Persona/character fields supplied by the host; never included unless an entry opts in. */
   globalScanData?: WorldbookGlobalScanData
+  /** Tavern Helper prompts marked `should_scan`; included in the ST scan buffer. */
+  injectedScanText?: readonly string[]
   /** 候选绿灯条目(已剔除蓝灯/禁用条目,key 已过宏替换)。 */
   candidates: readonly WorldbookMatchCandidate[]
   /** ST-Prompt-Template/扩展条目，仅用于 trace 与后续兼容适配，不进 agent 候选池。 */
@@ -247,6 +250,8 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
       intent,
       scanDepth,
       recentMessages,
+      ...(ctx.worldbookGlobalScanData === undefined ? {} : { globalScanData: ctx.worldbookGlobalScanData }),
+      ...(ctx.tavernHelperState === undefined ? {} : { injectedScanText: tavernInjectedScanText(ctx.tavernHelperState) }),
       candidates: pluginCandidates,
       mode: 'strict',
     }, { rollProbability: false }).map(candidate => candidate.path),
@@ -261,6 +266,7 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
     scanDepth,
     recentMessages,
     ...(ctx.worldbookGlobalScanData === undefined ? {} : { globalScanData: ctx.worldbookGlobalScanData }),
+    ...(ctx.tavernHelperState === undefined ? {} : { injectedScanText: tavernInjectedScanText(ctx.tavernHelperState) }),
     candidates,
     // The persisted/indexed document includes every green entry, including
     // ST-owned regex entries. The prompt tells the LLM to select only the
@@ -343,6 +349,14 @@ export function exactKeywordMatch(
     if (!primary) return false
     return candidate.selective !== true || selectiveMatch(candidate, scanText)
   })
+}
+
+/** Render Tavern Helper `should_scan` prompt text without exposing full books. */
+export function formatInjectedScanText(texts: readonly string[] | undefined): string {
+  const values = (texts ?? []).filter(text => text.trim().length > 0)
+  return values.length === 0
+    ? '(无酒馆助手扫描注入)'
+    : values.map((text, index) => `[${index + 1}] ${text}`).join('\n\n')
 }
 
 /** Render the local ST result that the semantic matcher is allowed to extend. */
@@ -447,6 +461,7 @@ function scanTextForCandidate(
     if (candidate.matchScenario) baseParts.push(global.scenario ?? '')
     if (candidate.matchCreatorNotes) baseParts.push(global.creatorNotes ?? '')
   }
+  if (depth > 0) baseParts.push(...(input.injectedScanText ?? []))
   const baseText = baseParts.filter(value => value.length > 0).join('\n\x01')
   return recursiveText.length === 0 ? baseText : [baseText, recursiveText].filter(Boolean).join('\n')
 }
@@ -748,6 +763,7 @@ function scanTextIsEmpty(input: WorldbookMatchInput): boolean {
   return !hasMessage
     && input.intent.keywords.length === 0
     && input.intent.userNarration.trim().length === 0
+    && (input.injectedScanText ?? []).every(text => text.trim().length === 0)
 }
 
 export const worldbookMatchAgent: Agent<WorldbookMatchInput, WorldbookMatchOutput> = {
@@ -822,6 +838,7 @@ export const worldbookMatchAgent: Agent<WorldbookMatchInput, WorldbookMatchOutpu
       .replace('{{keywords}}', JSON.stringify(agentInput.intent.keywords))
       .replace('{{scan_depth}}', String(agentInput.scanDepth))
       .replace('{{recent_messages}}', formatRecentMessages(agentInput.recentMessages))
+      .replace('{{injected_scan_text}}', formatInjectedScanText(agentInput.injectedScanText))
       // New prompts use {{key_index}}. Keep {{candidates}} as a compatibility
       // alias for custom/older prompt templates.
       .replace('{{key_index}}', agentInput.keyIndexMarkdown ?? formatCandidates(agentInput.candidates))

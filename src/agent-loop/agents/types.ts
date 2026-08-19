@@ -8,6 +8,7 @@ import type { EjsTemplateResult, EjsTemplateTarget } from '../../ejs-template.ts
 import type { LLMProvider } from '../provider.ts'
 import type { SessionStore, WorldbookStore } from '../session.ts'
 import type { TimedEffectState } from '../worldbook-timed-effects.ts'
+import type { TavernHelperState } from '../../tavern-helper.ts'
 
 /** Reads a prompt template by name. The `name` is the file stem in the prompts directory. */
 export interface PromptLoader {
@@ -119,6 +120,8 @@ export interface AgentContext {
   readonly worldbookTimedEffects?: TimedEffectState
   /** ST World Info global scan data; entries opt into each field individually. */
   readonly worldbookGlobalScanData?: WorldbookGlobalScanData
+  /** Session-owned Tavern Helper state, including prompt injections and scan text. */
+  readonly tavernHelperState?: TavernHelperState
   /** Optional ⑤ postprocess settings supplied by the host. */
   readonly postprocessSettings?: PostprocessRuntimeSettings
   /**

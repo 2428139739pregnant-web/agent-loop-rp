@@ -87,6 +87,8 @@ import {
   encodeTavernHelperState,
   initializeTavernHelperState,
   parseTavernHelperMutationRequest,
+  consumeTavernInjectedPromptsAfterGeneration,
+  selectTavernInjectedPrompts,
   type TavernHelperVariableMutationRequest,
   type TavernHelperMutationRequest,
   type TavernHelperState,
@@ -358,6 +360,8 @@ function buildAgentContext(deps: {
   worldbookTimedEffects?: TimedEffectState
   /** ST World Info chat-independent scan fields. */
   worldbookGlobalScanData?: WorldbookGlobalScanData
+  /** Session-owned Tavern Helper prompts and scan-text injections. */
+  tavernHelperState?: TavernHelperState
   /** ⑤ postprocess preset 当前值。 */
   postprocessSettings?: PostprocessRuntimeSettings
   /** 进度回调:多步骤 agent 在每个子步骤时调用。 */
@@ -380,6 +384,7 @@ function buildAgentContext(deps: {
     ...(deps.worldbookSettings !== undefined ? { worldbookSettings: deps.worldbookSettings } : {}),
     ...(deps.worldbookTimedEffects === undefined ? {} : { worldbookTimedEffects: deps.worldbookTimedEffects }),
     ...(deps.worldbookGlobalScanData === undefined ? {} : { worldbookGlobalScanData: deps.worldbookGlobalScanData }),
+    ...(deps.tavernHelperState === undefined ? {} : { tavernHelperState: deps.tavernHelperState }),
     ...(deps.postprocessSettings !== undefined ? { postprocessSettings: deps.postprocessSettings } : {}),
     ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
     ...(deps.renderTemplate !== undefined ? { renderTemplate: deps.renderTemplate } : {}),
@@ -397,6 +402,7 @@ function displayRenderDirectives(
   sessionId: string,
   character: PreprocessedCharacter,
 ): import('./schema.ts').WorldbookRenderDirective[] {
+  const helperState = state.sessionRecords.get(sessionId)?.tavernHelperState
   const templateRenderer = buildCharacterTemplateRenderer(
     state,
     character,
@@ -414,6 +420,7 @@ function displayRenderDirectives(
     sessionId,
     macros: { user: getCurrentUserPersona(state)?.name ?? null, char: character.name },
     worldbookSettings: state.worldbookSettings,
+    ...(helperState === undefined ? {} : { tavernHelperState: helperState }),
     ...(templateRenderer === undefined ? {} : { renderTemplate: templateRenderer }),
   })
   const input = buildWorldbookMatchInput({
@@ -1523,6 +1530,8 @@ async function handleRunJson(state: AppState, req: IncomingMessage, res: ServerR
 
   const record = state.sessionRecords.get(sessionId)
   if (record === undefined) return sendError(res, 500, 'session record vanished')
+  const helperState = ensureSessionTavernHelperState(record)
+  const helperPromptSelection = selectTavernInjectedPrompts(helperState)
 
   // 重 roll:截掉最后一条 assistant,复用该轮 user 输入(runLoop 跳过重复 append)。
   let rerollPrevious: ChatMessage | undefined
@@ -1559,6 +1568,7 @@ async function handleRunJson(state: AppState, req: IncomingMessage, res: ServerR
         skipUserAppend: reroll,
         // 世界书全局设置(扫描深度 / LLM 匹配开关):ST world_info_depth 对应物。
         worldbookSettings: state.worldbookSettings,
+        tavernHelperState: helperState,
         responseSettings: state.responseSettings,
         postprocessSettings: state.postprocessSettings,
         mvu: state.mvuSettings,
@@ -1590,6 +1600,17 @@ async function handleRunJson(state: AppState, req: IncomingMessage, res: ServerR
         const m = afterHistory[i]
         if (m === undefined) continue
         try { await appendHistoryJsonl(sessionId, m) } catch { /* swallow */ }
+      }
+    }
+    const latestRecord = state.sessionRecords.get(sessionId)
+    if (latestRecord !== undefined) {
+      const consumedHelperState = consumeTavernInjectedPromptsAfterGeneration(
+        latestRecord.tavernHelperState ?? helperState,
+        helperPromptSelection,
+      )
+      if (consumedHelperState !== undefined && consumedHelperState !== latestRecord.tavernHelperState) {
+        state.sessionRecords.set(sessionId, { ...latestRecord, tavernHelperState: consumedHelperState })
+        try { await saveSessionVariables({ ...latestRecord, tavernHelperState: consumedHelperState }) } catch { /* best effort */ }
       }
     }
     const persistedHistory = state.sessions.getHistory(sessionId)
@@ -1666,6 +1687,9 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
       { user: getCurrentUserPersona(state)?.name ?? null, char: record.character.name },
     )
   }
+
+  const helperState = ensureSessionTavernHelperState(record)
+  const helperPromptSelection = selectTavernInjectedPrompts(helperState)
 
   // Reroll keeps the original user turn and looks up the successful
   // generation's reusable artifacts before opening SSE. This survives a
@@ -1756,6 +1780,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
       scenario: character.raw.scenario,
       creatorNotes: character.raw.creatorNotes ?? '',
     },
+    tavernHelperState: helperState,
     ...(timedEffects === undefined ? {} : { worldbookTimedEffects: timedEffects }),
     postprocessSettings: state.postprocessSettings,
     ...(templateRenderer === undefined ? {} : { renderTemplate: templateRenderer }),
@@ -2068,6 +2093,18 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
         const nextRecord = Object.keys(nextTimedEffects).length === 0
           ? recordWithoutTimedEffects
           : { ...recordWithoutTimedEffects, worldbookTimedEffects: nextTimedEffects }
+        state.sessionRecords.set(sessionId, nextRecord)
+        try { await saveSessionVariables(nextRecord) } catch { /* best effort */ }
+      }
+    }
+    const latestRecordAfterResponse = state.sessionRecords.get(sessionId)
+    if (latestRecordAfterResponse !== undefined) {
+      const consumedHelperState = consumeTavernInjectedPromptsAfterGeneration(
+        latestRecordAfterResponse.tavernHelperState ?? helperState,
+        helperPromptSelection,
+      )
+      if (consumedHelperState !== undefined && consumedHelperState !== latestRecordAfterResponse.tavernHelperState) {
+        const nextRecord = { ...latestRecordAfterResponse, tavernHelperState: consumedHelperState }
         state.sessionRecords.set(sessionId, nextRecord)
         try { await saveSessionVariables(nextRecord) } catch { /* best effort */ }
       }

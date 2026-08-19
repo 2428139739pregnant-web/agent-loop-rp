@@ -172,7 +172,7 @@
 | {{user}}/{{char}} 宏 | 全链路替换：卡文本、世界书 content 与 key、开场白。与 A3 的 persona 联动（userPersona.name） |
 | probability / scanDepth / caseSensitive / matchWholeWords / useRegex / selectiveLogic | 参数进入确定性 ST lane 或统一 `ImportedLorebookEntry`/`WorldbookEntry`；概率在代码层收尾，regex 走隔离 deterministic lane，不能让 agent 重解释原生 regex 条目 |
 | 世界书级 scan_depth | 世界书匹配设置默认扫描最近 2 条消息；角色卡/独立书的 parser 另保留书级递归开关和已支持的 entry-level override |
-| Tavern Helper `injectPrompts` | Host state 实现 `injectPrompts`、`uninjectPrompts`、按 script replacement；prompt id 全局唯一，重复 id 替换，其他脚本 prompt 保留 |
+| Tavern Helper `injectPrompts` | Host state 实现 `injectPrompts`、`uninjectPrompts`、按 script replacement；prompt id 全局唯一，重复 id 替换，其他脚本 prompt 保留；生成时 `should_scan` 进入 World Info 扫描，`in_chat` 按 ST 的 depth/order/role 插入 response 消息，`none` 仅扫描 |
 | `once` / `filter` | selection 按 `order` 排序，`filter:false` 和同步/异步 host predicate 都可排除；只消费本次实际选中的 once snapshot，并按 id + script id + content 防止晚到完成事件删除新替换 |
 | iframe variable scopes | iframe bridge 实现 `global`、`preset`、`character`、`chat`、`message`、`script`、`extension` 七类 scope；`message_id` 默认 `latest`，`script_id` 默认当前脚本，`extension` 必须带 `extension_id` 并按 id 隔离 |
 
@@ -191,7 +191,8 @@
 1. 普通绿灯匹配由世界书模式决定：strict 只走 ST，enhanced 为 ST + agent，native 只走 agent；Resolver 纯代码合并，probability 掷骰与宏替换在代码层收尾
 2. position 2/3/5/6/7 并入文档尾部，不精确复刻 ST 的插入点
 3. 基础 sticky/cooldown/delay 定时效应、包含组和六个全局扫描开关已支持；向量匹配和部分 chat_metadata/分支编辑边界暂不支持，递归扫描仍只实现确定性 entry/content 语义
-4. token 计数用字符数近似（无 tokenizer 依赖）
+4. Tavern Helper 的任意函数型 `filter` 不能跨持久化 iframe 快照执行；当前宿主只保存并使用已解析的布尔筛选结果
+5. token 计数用字符数近似（无 tokenizer 依赖）
 
 ## 9. 验收口径（A5 完成标准）
 
