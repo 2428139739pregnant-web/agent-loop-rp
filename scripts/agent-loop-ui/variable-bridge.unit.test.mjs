@@ -131,6 +131,7 @@ test('omitting option keeps the legacy chat default while preserving option on t
 
 test('Tavern Helper injectPrompts and uninjectPrompts use the canonical mutation bridge', async () => {
   const frame = createFrame()
+  frame.window.__agentRpCurrentScriptId = 'script-a'
   const handle = frame.window.injectPrompts([
     { id: 'prompt-a', position: 'in_chat', depth: 0, role: 'system', content: 'A', should_scan: true },
     { id: 'prompt-b', position: 'none', depth: 1, role: 'user', content: 'B' },
@@ -138,7 +139,7 @@ test('Tavern Helper injectPrompts and uninjectPrompts use the canonical mutation
   const inject = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
   assert.equal(inject?.method, 'tavern-helper-mutation')
   assert.equal(inject?.payload.operation, 'inject-prompts')
-  assert.equal(inject?.payload.scriptId, 'frame-test')
+  assert.equal(inject?.payload.scriptId, 'script-a')
   assert.equal(inject?.payload.once, true)
   assert.deepEqual(plain(inject?.payload.prompts), [
     { id: 'prompt-a', position: 'in_chat', depth: 0, role: 'system', content: 'A', should_scan: true },

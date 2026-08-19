@@ -1723,7 +1723,11 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
         const content = helper.content.trim()
         if (/^\s*(?:import|export)\b|\bimport\s*\(/u.test(content)) helperScript.type = 'module'
         helperScript.dataset.agentRpTavernHelper = helper.name || helper.id || 'script'
-        helperScript.textContent = content
+        // Keep the script owner available while its top-level code runs so
+        // injectPrompts/variable scopes use the imported Tavern Helper id,
+        // not the iframe id. Async callbacks still need to pass an explicit
+        // script_id where the official API supports one.
+        helperScript.textContent = `window.__agentRpCurrentScriptId=${safeCardScriptJson(String(helper.id || frameId.current))};\n${content}`
         doc.head.append(helperScript)
       }
       const measureScript = doc.createElement('script')
