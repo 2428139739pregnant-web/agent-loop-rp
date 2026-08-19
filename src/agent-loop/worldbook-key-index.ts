@@ -27,6 +27,12 @@ export interface WorldbookKeyIndexEntry {
   readonly groupOverride?: boolean
   readonly groupWeight?: number
   readonly useGroupScoring?: boolean
+  readonly matchPersonaDescription?: boolean
+  readonly matchCharacterDescription?: boolean
+  readonly matchCharacterPersonality?: boolean
+  readonly matchCharacterDepthPrompt?: boolean
+  readonly matchScenario?: boolean
+  readonly matchCreatorNotes?: boolean
   readonly order: number
   readonly weight: number
 }
@@ -75,6 +81,12 @@ export function buildWorldbookKeyIndex(
       ...(entry.groupOverride === undefined ? {} : { groupOverride: entry.groupOverride }),
       ...(entry.groupWeight === undefined ? {} : { groupWeight: entry.groupWeight }),
       ...(entry.useGroupScoring === undefined ? {} : { useGroupScoring: entry.useGroupScoring }),
+      ...(entry.matchPersonaDescription === undefined ? {} : { matchPersonaDescription: entry.matchPersonaDescription }),
+      ...(entry.matchCharacterDescription === undefined ? {} : { matchCharacterDescription: entry.matchCharacterDescription }),
+      ...(entry.matchCharacterPersonality === undefined ? {} : { matchCharacterPersonality: entry.matchCharacterPersonality }),
+      ...(entry.matchCharacterDepthPrompt === undefined ? {} : { matchCharacterDepthPrompt: entry.matchCharacterDepthPrompt }),
+      ...(entry.matchScenario === undefined ? {} : { matchScenario: entry.matchScenario }),
+      ...(entry.matchCreatorNotes === undefined ? {} : { matchCreatorNotes: entry.matchCreatorNotes }),
       order: entry.order,
       weight: entry.weight,
     }))
@@ -115,8 +127,8 @@ export function renderWorldbookKeyOnlyMd(
   }
 
   lines.push(
-    '| path | owner | comment | keys | secondaryKeys | selectiveLogic | caseSensitive | wholeWord | regex | group | groupOverride | groupWeight | order | weight |',
-    '| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |',
+    '| path | owner | comment | keys | secondaryKeys | selectiveLogic | caseSensitive | wholeWord | regex | group | groupOverride | groupWeight | globalScan | order | weight |',
+    '| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | --- | ---: | ---: |',
   )
   for (const entry of entries) {
     lines.push([
@@ -132,6 +144,14 @@ export function renderWorldbookKeyOnlyMd(
       `${markdownCell(entry.group ?? '') || '(none)'}`,
       `${entry.groupOverride === true ? 'yes' : 'no'}`,
       `${entry.groupWeight ?? 100}`,
+      `${[
+        entry.matchPersonaDescription ? 'persona' : '',
+        entry.matchCharacterDescription ? 'description' : '',
+        entry.matchCharacterPersonality ? 'personality' : '',
+        entry.matchCharacterDepthPrompt ? 'depth' : '',
+        entry.matchScenario ? 'scenario' : '',
+        entry.matchCreatorNotes ? 'creator_notes' : '',
+      ].filter(Boolean).join(', ') || '(none)'}`,
       `${entry.order}`,
       `${entry.weight} |`,
     ].join(' | '))

@@ -1,6 +1,6 @@
 /** Agent loop orchestrator: 1 → 2.1 → 2.2 → 3 + optional async ④ summarize trigger. */
 
-import type { Agent, AgentContext, PostprocessRuntimeSettings, WorldbookSettings } from './agents/types.ts'
+import type { Agent, AgentContext, PostprocessRuntimeSettings, WorldbookGlobalScanData, WorldbookSettings } from './agents/types.ts'
 import { DEFAULT_WORLDBOOK_SETTINGS } from './agents/types.ts'
 import type { LLMProvider } from './provider.ts'
 import type { PromptLoader } from './agents/types.ts'
@@ -101,6 +101,8 @@ export interface RunLoopDeps {
    * 可选;缺省 scanDepth=2 + useLlmMatcher=true(ST 默认,见 DEFAULT_WORLDBOOK_SETTINGS)。
    */
   worldbookSettings?: WorldbookSettings
+  /** ST World Info chat-independent scan fields. */
+  worldbookGlobalScanData?: WorldbookGlobalScanData
   /** Optional ⑤ postprocess settings; omitted callers use the agent defaults. */
   postprocessSettings?: PostprocessRuntimeSettings
   /** Optional independent MVU post-response analysis settings. */
@@ -138,6 +140,7 @@ function buildContext(deps: RunLoopDeps): AgentContext {
     sessionId: deps.sessionId,
     // 世界书设置(扫描深度等);缺省走 ST 默认(scanDepth=2)。
     worldbookSettings: deps.worldbookSettings ?? DEFAULT_WORLDBOOK_SETTINGS,
+    ...(deps.worldbookGlobalScanData === undefined ? {} : { worldbookGlobalScanData: deps.worldbookGlobalScanData }),
     ...(deps.postprocessSettings === undefined ? {} : { postprocessSettings: deps.postprocessSettings }),
     // {{user}}/{{char}} 宏替换源:persona 名 + 角色名(酒馆语义:WI key 匹配与
     // content 注入前替换)。未配置时对应侧传 null,保持宏原样。

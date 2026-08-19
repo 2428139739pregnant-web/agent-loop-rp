@@ -41,7 +41,7 @@ function cardWithLorebook(entries: readonly unknown[], recursiveScanning = true)
       system_prompt: '',
       post_history_instructions: '',
       alternate_greetings: [],
-      creator_notes: '',
+      creator_notes: '创作者说明',
       creator: 'unit-test',
       character_version: '1',
       tags: [],
@@ -163,11 +163,18 @@ test('character import preserves SillyTavern inclusion-group controls', () => {
       group_override: true,
       group_weight: 7,
       use_group_scoring: true,
+      match_persona_description: true,
+      match_character_description: true,
+      match_scenario: true,
     },
   }]))
   const entry = card.lorebook?.entries[0]
+  assert.equal(card.creatorNotes, '创作者说明')
   assert.equal(entry?.group, 'scene, mood')
   assert.equal(entry?.groupOverride, true)
   assert.equal(entry?.groupWeight, 7)
   assert.equal(entry?.useGroupScoring, true)
+  assert.equal(entry?.matchPersonaDescription, true)
+  assert.equal(entry?.matchCharacterDescription, true)
+  assert.equal(entry?.matchScenario, true)
 })

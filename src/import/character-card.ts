@@ -343,6 +343,14 @@ function parseLorebookEntry(value: JsonValue, index: number, version: CharacterC
   const groupOverride = lenientBool(extensions.group_override ?? entry.group_override)
   const groupWeight = lenientNumber(extensions.group_weight ?? entry.group_weight)
   const useGroupScoring = lenientBool(extensions.use_group_scoring ?? entry.use_group_scoring)
+  const matchFlag = (snake: string, camel: string): boolean | undefined =>
+    lenientBool(extensions[snake] ?? extensions[camel] ?? entry[snake] ?? entry[camel])
+  const matchPersonaDescription = matchFlag('match_persona_description', 'matchPersonaDescription')
+  const matchCharacterDescription = matchFlag('match_character_description', 'matchCharacterDescription')
+  const matchCharacterPersonality = matchFlag('match_character_personality', 'matchCharacterPersonality')
+  const matchCharacterDepthPrompt = matchFlag('match_character_depth_prompt', 'matchCharacterDepthPrompt')
+  const matchScenario = matchFlag('match_scenario', 'matchScenario')
+  const matchCreatorNotes = matchFlag('match_creator_notes', 'matchCreatorNotes')
   // ST position 枚举原值:extensions.position ?? (position==='before_char' ? 0 : 1)
   // (换算与 ST world-info.js:5517 一致)。
   const stPosition = lenientNumber(extensions.position) ?? (position === 'before_char' ? 0 : 1)
@@ -371,6 +379,12 @@ function parseLorebookEntry(value: JsonValue, index: number, version: CharacterC
     ...(groupOverride === undefined ? {} : { groupOverride }),
     ...(groupWeight === undefined ? {} : { groupWeight }),
     ...(useGroupScoring === undefined ? {} : { useGroupScoring }),
+    ...(matchPersonaDescription === undefined ? {} : { matchPersonaDescription }),
+    ...(matchCharacterDescription === undefined ? {} : { matchCharacterDescription }),
+    ...(matchCharacterPersonality === undefined ? {} : { matchCharacterPersonality }),
+    ...(matchCharacterDepthPrompt === undefined ? {} : { matchCharacterDepthPrompt }),
+    ...(matchScenario === undefined ? {} : { matchScenario }),
+    ...(matchCreatorNotes === undefined ? {} : { matchCreatorNotes }),
     position,
     stPosition,
     ...(probability === undefined ? {} : { probability }),
@@ -489,6 +503,7 @@ function normalizeCharacterCardValue(raw: JsonValue): ImportedCharacterCard {
   const alternateGreetings = stringArray(data.alternate_greetings, 'data.alternate_greetings')
   const systemPrompt = optionalString(data.system_prompt, 'data.system_prompt') ?? ''
   const postHistoryInstructions = optionalString(data.post_history_instructions, 'data.post_history_instructions') ?? ''
+  const creatorNotes = optionalString(data.creator_notes, 'data.creator_notes')
   const frontend = parseFrontend(data)
   const assets = parseAssets(data.assets)
   return {
@@ -500,6 +515,7 @@ function normalizeCharacterCardValue(raw: JsonValue): ImportedCharacterCard {
     description: requiredString(data.description, 'data.description'),
     personality: requiredString(data.personality, 'data.personality'),
     scenario: requiredString(data.scenario, 'data.scenario'),
+    ...(creatorNotes === undefined ? {} : { creatorNotes }),
     firstMessage: requiredString(data.first_mes, 'data.first_mes'),
     messageExample: requiredString(data.mes_example, 'data.mes_example'),
     alternateGreetings,

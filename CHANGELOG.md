@@ -16,6 +16,7 @@
 - 世界书激活支持条目级 `scanDepth`、累计递归缓冲、`exclude_recursion`、`prevent_recursion` 和 `delay_until_recursion`，并把角色卡/独立世界书字段映射到执行层。
 - 按 SillyTavern 消息计数接入世界书 `sticky`、`cooldown`、`delay`；定时效果按会话持久化，重 roll 不推进计数，分支回退会清理未来状态。
 - 接入 SillyTavern 世界书包含组：贯通 `group`、`groupOverride`、`groupWeight`、`useGroupScoring`，按 sticky 优先、覆盖优先、评分和加权选择在本地收尾，避免让 LLM 决定组内互斥关系。
+- 接入 ST World Info 的六个条目级全局扫描开关：角色卡、独立世界书和酒馆助手条目可选择扫描 Persona、角色描述、性格、depth prompt、场景和 `creator_notes`；未启用的字段不会进入 matcher 扫描缓冲，也不增加 LLM 调用。
 - response 阶段保留 ST 世界书 0–7 插入位置，将角色定义、示例、Author Note、atDepth 和 outlet 分配到对应提示词锚点，旧版无 position 的条目继续进入兼容 worldbook block。
 - 扩大回归命令覆盖范围，加入 EJS、Tavern Helper、角色卡导入和 lorebook 测试。
 - 重构角色卡前端宿主：消息楼层继续由外层对话区统一滚动，卡片 HTML/CSS/JS 改在独立 iframe 文档中运行，避免 `html/body`、固定定位、全局 ID 和脚本污染宿主页面。

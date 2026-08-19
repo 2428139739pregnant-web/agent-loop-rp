@@ -242,7 +242,7 @@ PNG 中同时存在 `ccv3` 和旧 `chara` 元数据时，优先使用 `ccv3`。�
 - iframe 变量 API 兼容官方 option：省略 option 时默认为 `chat`，`message` 的 `message_id` 默认为 `latest`，`script` 的 `script_id` 默认为当前 iframe 脚本 ID；`extension` 必须显式传入 `extension_id`。option 会原样随宿主 bridge 传递，message 作用域不会回退为 chat。
 - MVU 的初始化、状态读取和变量更新路径。
 
-以下能力目前会保留但不执行，或只执行确定性安全子集：复杂 decorator、动态向量匹配、任意网络请求、文件访问、父页面 DOM 操作、未批准的模块导入、复杂变量写入和依赖宿主 UI 的功能。世界书 `sticky/cooldown/delay` 与包含组已按 SillyTavern 规则接入会话级确定性状态机；普通递归、条目级 scan depth、exclude/prevent/delay recursion 也按确定性规则执行。未支持的部分会记录为 skipped/inactive，避免静默地产生错误结果。
+以下能力目前会保留但不执行，或只执行确定性安全子集：复杂 decorator、动态向量匹配、任意网络请求、文件访问、父页面 DOM 操作、未批准的模块导入、复杂变量写入和依赖宿主 UI 的功能。世界书 `sticky/cooldown/delay`、包含组和条目级全局扫描开关已按 SillyTavern 规则接入会话级确定性处理；普通递归、条目级 scan depth、exclude/prevent/delay recursion 也按确定性规则执行。未支持的部分会记录为 skipped/inactive，避免静默地产生错误结果。
 
 项目底层有两个独立 adapter：`TavernHelperAdapter` 负责角色卡前端 iframe、脚本树、MVU 事件/变量和世界书桥；`PromptTemplateAdapter` 负责 EJS、`[GENERATE:*]`、`[RENDER:*]`、`@INJECT` 和 `[InitialVariables]`。两者都在发送正文前的本地兼容层运行，不会因为适配插件增加 LLM 调用；世界书匹配 Agent 与上下文 Agent 仍然并行。
 

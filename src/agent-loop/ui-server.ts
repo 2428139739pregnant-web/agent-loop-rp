@@ -60,6 +60,7 @@ import {
   type WorldbookEntry,
   type WorldbookMatchMode,
   type WorldbookSettings,
+  type WorldbookGlobalScanData,
   type WorldbookStore,
 } from './index.ts'
 
@@ -355,6 +356,8 @@ function buildAgentContext(deps: {
   worldbookSettings?: WorldbookSettings
   /** Session-local sticky/cooldown/delay snapshot. */
   worldbookTimedEffects?: TimedEffectState
+  /** ST World Info chat-independent scan fields. */
+  worldbookGlobalScanData?: WorldbookGlobalScanData
   /** ⑤ postprocess preset 当前值。 */
   postprocessSettings?: PostprocessRuntimeSettings
   /** 进度回调:多步骤 agent 在每个子步骤时调用。 */
@@ -376,6 +379,7 @@ function buildAgentContext(deps: {
     ...(deps.macros !== undefined ? { macros: deps.macros } : {}),
     ...(deps.worldbookSettings !== undefined ? { worldbookSettings: deps.worldbookSettings } : {}),
     ...(deps.worldbookTimedEffects === undefined ? {} : { worldbookTimedEffects: deps.worldbookTimedEffects }),
+    ...(deps.worldbookGlobalScanData === undefined ? {} : { worldbookGlobalScanData: deps.worldbookGlobalScanData }),
     ...(deps.postprocessSettings !== undefined ? { postprocessSettings: deps.postprocessSettings } : {}),
     ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
     ...(deps.renderTemplate !== undefined ? { renderTemplate: deps.renderTemplate } : {}),
@@ -1745,6 +1749,13 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     provider, model: cfg.model, prompts, session, worldbook, sessionId,
     macros: { user: activeUserName, char: character.name },
     worldbookSettings: state.worldbookSettings,
+    worldbookGlobalScanData: {
+      personaDescription: getCurrentUserPersona(state)?.description ?? '',
+      characterDescription: character.raw.description,
+      characterPersonality: character.raw.personality,
+      scenario: character.raw.scenario,
+      creatorNotes: character.raw.creatorNotes ?? '',
+    },
     ...(timedEffects === undefined ? {} : { worldbookTimedEffects: timedEffects }),
     postprocessSettings: state.postprocessSettings,
     ...(templateRenderer === undefined ? {} : { renderTemplate: templateRenderer }),
@@ -4403,6 +4414,16 @@ function parseWorldInfoJson(json: string): ImportedLorebook {
       ? Math.max(1, Math.trunc(groupWeightRaw)) : undefined
     const groupScoringRaw = ext?.use_group_scoring ?? r.use_group_scoring
     const useGroupScoring = typeof groupScoringRaw === 'boolean' ? groupScoringRaw : undefined
+    const matchFlag = (snake: string, camel: string): boolean | undefined => {
+      const value = ext?.[snake] ?? ext?.[camel] ?? r[snake] ?? r[camel]
+      return typeof value === 'boolean' ? value : undefined
+    }
+    const matchPersonaDescription = matchFlag('match_persona_description', 'matchPersonaDescription')
+    const matchCharacterDescription = matchFlag('match_character_description', 'matchCharacterDescription')
+    const matchCharacterPersonality = matchFlag('match_character_personality', 'matchCharacterPersonality')
+    const matchCharacterDepthPrompt = matchFlag('match_character_depth_prompt', 'matchCharacterDepthPrompt')
+    const matchScenario = matchFlag('match_scenario', 'matchScenario')
+    const matchCreatorNotes = matchFlag('match_creator_notes', 'matchCreatorNotes')
     // ST position 枚举原值(0-7):extensions.position ?? 数字 position ?? 字符串换算。
     const stPositionRaw = typeof ext?.position === 'number' ? ext.position : r.position
     const stPosition = typeof stPositionRaw === 'number' ? stPositionRaw
@@ -4437,6 +4458,12 @@ function parseWorldInfoJson(json: string): ImportedLorebook {
       ...(groupOverride === undefined ? {} : { groupOverride }),
       ...(groupWeight === undefined ? {} : { groupWeight }),
       ...(useGroupScoring === undefined ? {} : { useGroupScoring }),
+      ...(matchPersonaDescription === undefined ? {} : { matchPersonaDescription }),
+      ...(matchCharacterDescription === undefined ? {} : { matchCharacterDescription }),
+      ...(matchCharacterPersonality === undefined ? {} : { matchCharacterPersonality }),
+      ...(matchCharacterDepthPrompt === undefined ? {} : { matchCharacterDepthPrompt }),
+      ...(matchScenario === undefined ? {} : { matchScenario }),
+      ...(matchCreatorNotes === undefined ? {} : { matchCreatorNotes }),
       ...(probability !== undefined ? { probability } : {}),
       ...(useProbability !== undefined ? { useProbability } : {}),
       ...(priority !== undefined ? { priority } : {}),
@@ -4646,6 +4673,12 @@ function lorebookEntryToWorldbookEntry(
     ...(e.groupOverride === undefined ? {} : { groupOverride: e.groupOverride }),
     ...(e.groupWeight === undefined ? {} : { groupWeight: e.groupWeight }),
     ...(e.useGroupScoring === undefined ? {} : { useGroupScoring: e.useGroupScoring }),
+    ...(e.matchPersonaDescription === undefined ? {} : { matchPersonaDescription: e.matchPersonaDescription }),
+    ...(e.matchCharacterDescription === undefined ? {} : { matchCharacterDescription: e.matchCharacterDescription }),
+    ...(e.matchCharacterPersonality === undefined ? {} : { matchCharacterPersonality: e.matchCharacterPersonality }),
+    ...(e.matchCharacterDepthPrompt === undefined ? {} : { matchCharacterDepthPrompt: e.matchCharacterDepthPrompt }),
+    ...(e.matchScenario === undefined ? {} : { matchScenario: e.matchScenario }),
+    ...(e.matchCreatorNotes === undefined ? {} : { matchCreatorNotes: e.matchCreatorNotes }),
     ignoreBudget: e.ignoreBudget,
     hasDecorators: e.hasDecorators,
   }
@@ -4676,6 +4709,14 @@ function tavernHelperWorldbookEntryToWorldbookEntry(bookName: string, entry: Tav
   const groupWeight = typeof extra.group_weight === 'number' && Number.isFinite(extra.group_weight)
     ? Math.max(1, Math.trunc(extra.group_weight)) : undefined
   const useGroupScoring = typeof extra.use_group_scoring === 'boolean' ? extra.use_group_scoring : undefined
+  const extraMatchFlag = (key: string): boolean | undefined =>
+    typeof extra[key] === 'boolean' ? extra[key] as boolean : undefined
+  const matchPersonaDescription = extraMatchFlag('match_persona_description')
+  const matchCharacterDescription = extraMatchFlag('match_character_description')
+  const matchCharacterPersonality = extraMatchFlag('match_character_personality')
+  const matchCharacterDepthPrompt = extraMatchFlag('match_character_depth_prompt')
+  const matchScenario = extraMatchFlag('match_scenario')
+  const matchCreatorNotes = extraMatchFlag('match_creator_notes')
   return {
     path,
     comment: entry.name,
@@ -4703,6 +4744,12 @@ function tavernHelperWorldbookEntryToWorldbookEntry(bookName: string, entry: Tav
     ...(groupOverride === undefined ? {} : { groupOverride }),
     ...(groupWeight === undefined ? {} : { groupWeight }),
     ...(useGroupScoring === undefined ? {} : { useGroupScoring }),
+    ...(matchPersonaDescription === undefined ? {} : { matchPersonaDescription }),
+    ...(matchCharacterDescription === undefined ? {} : { matchCharacterDescription }),
+    ...(matchCharacterPersonality === undefined ? {} : { matchCharacterPersonality }),
+    ...(matchCharacterDepthPrompt === undefined ? {} : { matchCharacterDepthPrompt }),
+    ...(matchScenario === undefined ? {} : { matchScenario }),
+    ...(matchCreatorNotes === undefined ? {} : { matchCreatorNotes }),
     ignoreBudget: entry.ignoreBudget === true,
   }
 }

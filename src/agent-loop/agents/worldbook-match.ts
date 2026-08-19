@@ -31,6 +31,7 @@ import {
   type Agent,
   type AgentContext,
   type WorldbookMatchMode,
+  type WorldbookGlobalScanData,
 } from './types.ts'
 import { classifyWorldbookEntry, type WorldbookEntryOwner, type WorldbookPluginKind } from '../worldbook-compat.ts'
 import { resolveWorldbookMatches } from '../worldbook-resolver.ts'
@@ -94,6 +95,13 @@ export interface WorldbookMatchCandidate {
   groupOverride?: boolean
   groupWeight?: number
   useGroupScoring?: boolean
+  /** ST per-entry opt-ins for chat-independent scan fields. */
+  matchPersonaDescription?: boolean
+  matchCharacterDescription?: boolean
+  matchCharacterPersonality?: boolean
+  matchCharacterDepthPrompt?: boolean
+  matchScenario?: boolean
+  matchCreatorNotes?: boolean
   /** Macro-expanded authoritative content used only by the local recursive scanner. */
   recursiveContent?: string
   /** ST prompt insertion metadata retained after activation. */
@@ -120,6 +128,8 @@ export interface WorldbookMatchInput {
   scanDepth: number
   /** 最近 N 条消息(时间升序,最后一条最新)。 */
   recentMessages: readonly WorldbookScanMessage[]
+  /** Persona/character fields supplied by the host; never included unless an entry opts in. */
+  globalScanData?: WorldbookGlobalScanData
   /** 候选绿灯条目(已剔除蓝灯/禁用条目,key 已过宏替换)。 */
   candidates: readonly WorldbookMatchCandidate[]
   /** ST-Prompt-Template/扩展条目，仅用于 trace 与后续兼容适配，不进 agent 候选池。 */
@@ -211,6 +221,12 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
       ...(e.groupOverride === undefined ? {} : { groupOverride: e.groupOverride }),
       ...(e.groupWeight === undefined ? {} : { groupWeight: e.groupWeight }),
       ...(e.useGroupScoring === undefined ? {} : { useGroupScoring: e.useGroupScoring }),
+      ...(e.matchPersonaDescription === undefined ? {} : { matchPersonaDescription: e.matchPersonaDescription }),
+      ...(e.matchCharacterDescription === undefined ? {} : { matchCharacterDescription: e.matchCharacterDescription }),
+      ...(e.matchCharacterPersonality === undefined ? {} : { matchCharacterPersonality: e.matchCharacterPersonality }),
+      ...(e.matchCharacterDepthPrompt === undefined ? {} : { matchCharacterDepthPrompt: e.matchCharacterDepthPrompt }),
+      ...(e.matchScenario === undefined ? {} : { matchScenario: e.matchScenario }),
+      ...(e.matchCreatorNotes === undefined ? {} : { matchCreatorNotes: e.matchCreatorNotes }),
       ...(e.recursiveScanning === true
         ? { recursiveContent: macro(ctx.worldbook.getContent(e.path) ?? '') }
         : {}),
@@ -244,6 +260,7 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
     intent,
     scanDepth,
     recentMessages,
+    ...(ctx.worldbookGlobalScanData === undefined ? {} : { globalScanData: ctx.worldbookGlobalScanData }),
     candidates,
     // The persisted/indexed document includes every green entry, including
     // ST-owned regex entries. The prompt tells the LLM to select only the
@@ -272,12 +289,19 @@ export function formatCandidates(candidates: readonly WorldbookMatchCandidate[])
     const secondary = c.secondaryKeys.length > 0 ? c.secondaryKeys.join(', ') : '(无)'
     return [
       `| ${c.path} | ${c.comment} | ${keys} | ${secondary} | ${SELECTIVE_LOGIC_LABELS[c.selectiveLogic]} |`,
-      `  ${c.caseSensitive ? '是' : '否'} | ${c.matchWholeWords ? '是' : '否'} | ${c.useRegex ? '是' : '否'} | ${c.probability} | ${c.order} | ${c.weight} | ${c.group ?? '(无)'} |`,
+      `  ${c.caseSensitive ? '是' : '否'} | ${c.matchWholeWords ? '是' : '否'} | ${c.useRegex ? '是' : '否'} | ${c.probability} | ${c.order} | ${c.weight} | ${c.group ?? '(无)'} | ${[
+        c.matchPersonaDescription ? 'persona' : '',
+        c.matchCharacterDescription ? 'description' : '',
+        c.matchCharacterPersonality ? 'personality' : '',
+        c.matchCharacterDepthPrompt ? 'depth' : '',
+        c.matchScenario ? 'scenario' : '',
+        c.matchCreatorNotes ? 'creator_notes' : '',
+      ].filter(Boolean).join(', ') || '(无)'} |`,
     ].join('')
   })
   return [
-    '| 路径 | 名称 | 主关键词 | 次关键词 | 次关键词逻辑 | 大小写敏感 | 整词匹配 | 正则 | 概率% | 顺序 | 权重 | 包含组 |',
-    '|---|---|---|---|---|---|---|---|---|---|---|---|',
+    '| 路径 | 名称 | 主关键词 | 次关键词 | 次关键词逻辑 | 大小写敏感 | 整词匹配 | 正则 | 概率% | 顺序 | 权重 | 包含组 | 全局扫描字段 |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|',
     ...rows,
   ].join('\n')
 }
@@ -407,13 +431,23 @@ function scanTextForCandidate(
   const depth = candidate.scanDepth === undefined
     ? input.scanDepth
     : Math.max(0, Math.trunc(candidate.scanDepth))
-  const baseText = depth === 0
-    ? ''
+  const baseParts = depth === 0
+    ? []
     : input.recentMessages.slice(-depth).map(message => message.content).concat(
       input.intent.userNarration,
       ...input.intent.metaCommands,
       ...input.intent.keywords,
-    ).join('\n')
+    )
+  const global = input.globalScanData
+  if (depth > 0 && global !== undefined) {
+    if (candidate.matchPersonaDescription) baseParts.push(global.personaDescription ?? '')
+    if (candidate.matchCharacterDescription) baseParts.push(global.characterDescription ?? '')
+    if (candidate.matchCharacterPersonality) baseParts.push(global.characterPersonality ?? '')
+    if (candidate.matchCharacterDepthPrompt) baseParts.push(global.characterDepthPrompt ?? '')
+    if (candidate.matchScenario) baseParts.push(global.scenario ?? '')
+    if (candidate.matchCreatorNotes) baseParts.push(global.creatorNotes ?? '')
+  }
+  const baseText = baseParts.filter(value => value.length > 0).join('\n\x01')
   return recursiveText.length === 0 ? baseText : [baseText, recursiveText].filter(Boolean).join('\n')
 }
 

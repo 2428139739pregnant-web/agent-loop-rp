@@ -164,6 +164,13 @@ export interface ImportedLorebookEntry {
   readonly groupWeight?: number
   /** Enable ST key-score filtering for this entry's inclusion group. */
   readonly useGroupScoring?: boolean
+  /** ST global scan switches for persona/character fields. */
+  readonly matchPersonaDescription?: boolean
+  readonly matchCharacterDescription?: boolean
+  readonly matchCharacterPersonality?: boolean
+  readonly matchCharacterDepthPrompt?: boolean
+  readonly matchScenario?: boolean
+  readonly matchCreatorNotes?: boolean
   readonly position: 'before_char' | 'after_char'
   /**
    * SillyTavern position 枚举原值(0=before,1=after,2=ANTop,3=ANBottom,
@@ -234,6 +241,8 @@ export interface ImportedCharacterCard {
   readonly description: string
   readonly personality: string
   readonly scenario: string
+  /** Character creator notes exposed only to opted-in World Info scans. */
+  readonly creatorNotes?: string
   readonly firstMessage: string
   readonly messageExample: string
   readonly alternateGreetings: readonly string[]

@@ -25,7 +25,7 @@
 | `ignoreBudget` | bool `false` | 不受 token 预算约束（超预算后仍可进，但排在预算内条目之后） |
 | `excludeRecursion` | bool `false` | 递归扫描时不参与（当前确定性 lorebook inspector 已实现） |
 | `preventRecursion` | bool `false` | 其 content 不参与递归扫描文本（当前已实现） |
-| `matchPersonaDescription` 等 7 个 | bool `false` | 把用户 persona / 角色 description / personality / depth prompt / scenario / creator notes 纳入扫描文本（`world-info.js:295-320`） |
+| `matchPersonaDescription`、`matchCharacterDescription`、`matchCharacterPersonality`、`matchCharacterDepthPrompt`、`matchScenario`、`matchCreatorNotes` | bool `false` | 按条目开关把用户 persona / 角色 description / personality / depth prompt / scenario / creator notes 纳入扫描文本（`world-info.js:295-320`）；本项目已在本地扫描器执行 |
 | `delayUntilRecursion` | number `0` | 延迟到第 N 层递归才可激活（`true` 按第 1 层处理；当前已实现） |
 | `probability` | number `100` | 激活概率 %（`world-info.js:4907-4925`：`Math.random()*100 <= probability` 则通过；sticky 条目免掷） |
 | `useProbability` | bool `true` | 概率开关 |
@@ -70,9 +70,9 @@
 - key 形如 `/regex/flags` → 按正则匹配，**覆盖大小写/整词设置**
 - 普通文本：默认 `haystack.includes(needle)`（两者都按大小写设置 toLowerCase）
 - `matchWholeWords=true`：多词短语仍用 includes；单词用边界正则 `(?:^|\W)(word)(?:$|\W)`
-- 扫描文本 = 最近 `scanDepth`（默认 2）条消息 + 可选 persona/角色字段 + 递归缓冲，用 `\n\x01` 连接防跨消息误匹配
+- 扫描文本 = 最近 `scanDepth`（默认 2）条消息 + 条目显式选择的 persona/角色字段 + 递归缓冲，用 `\n\x01` 连接防跨消息误匹配；未开启的全局字段不会进入该条目的扫描文本
 
-**本项目递归实现边界**：`src/import/lorebook.ts` 的 `inspectLorebook`/`inspectLorebooks` 已实现 book-level recursive switch、entry-level scan-depth override、累计递归文本、`excludeRecursion`、`preventRecursion` 和 `delayUntilRecursion`，并有单元测试覆盖。跨轮 timed effects 另由会话级 `TimedEffectState` 维护；尚未声称完全复刻 ST 的包含组、向量匹配和所有宿主分支编辑边界。
+**本项目递归实现边界**：`src/import/lorebook.ts` 的 `inspectLorebook`/`inspectLorebooks` 已实现 book-level recursive switch、entry-level scan-depth override、累计递归文本、`excludeRecursion`、`preventRecursion` 和 `delayUntilRecursion`，并有单元测试覆盖。跨轮 timed effects 和包含组另由会话级确定性状态机维护；向量匹配和所有宿主分支编辑边界仍未完全复刻 ST。
 
 ## 3. 排序与预算
 
@@ -182,7 +182,7 @@
 - 更复杂的 timed-effects 边界——基础 `sticky/cooldown/delay` 已实现；仍需继续对齐 ST 的所有 chat_metadata 分支编辑细节
 - 包含组（`group/groupOverride/groupWeight/useGroupScoring`）——已在 matcher 中按确定性 ST 管道执行；仍需补齐与完整 Host 递归/预算生命周期的所有边界
 - vectorized 紫灯 —— 跳过（无向量库）
-- matchPersonaDescription 等 7 开关 —— 可选做 2 个（persona/character description）
+- 六个全局扫描开关 —— 已接入角色卡、独立 World Info 和 Tavern Helper 条目；按条目 opt-in 后由本地 matcher 拼入扫描缓冲，不增加 LLM 调用
 - persona AT_DEPTH 注入 —— v1 只做 IN_PROMPT
 - `{{random}}`/`{{roll}}`/时间宏 —— 小工作量，顺手做
 
@@ -190,7 +190,7 @@
 
 1. 普通绿灯匹配由世界书模式决定：strict 只走 ST，enhanced 为 ST + agent，native 只走 agent；Resolver 纯代码合并，probability 掷骰与宏替换在代码层收尾
 2. position 2/3/5/6/7 并入文档尾部，不精确复刻 ST 的插入点
-3. 基础 sticky/cooldown/delay 定时效应和包含组已支持；向量匹配和部分 chat_metadata/分支编辑边界暂不支持，递归扫描仍只实现确定性 entry/content 语义
+3. 基础 sticky/cooldown/delay 定时效应、包含组和六个全局扫描开关已支持；向量匹配和部分 chat_metadata/分支编辑边界暂不支持，递归扫描仍只实现确定性 entry/content 语义
 4. token 计数用字符数近似（无 tokenizer 依赖）
 
 ## 9. 验收口径（A5 完成标准）

@@ -44,6 +44,16 @@ export class InMemoryPromptLoader implements PromptLoader {
 
 export type WorldbookMatchMode = 'strict' | 'enhanced' | 'native'
 
+/** Chat-independent fields exposed to ST World Info matching. */
+export interface WorldbookGlobalScanData {
+  readonly personaDescription?: string
+  readonly characterDescription?: string
+  readonly characterPersonality?: string
+  readonly characterDepthPrompt?: string
+  readonly scenario?: string
+  readonly creatorNotes?: string
+}
+
 /** 世界书全局设置(对应 SillyTavern world_info_depth 等 world-info.js:69-86 全局项)。 */
 export interface WorldbookSettings {
   /**
@@ -107,6 +117,8 @@ export interface AgentContext {
   readonly worldbookSettings?: WorldbookSettings
   /** Session-owned ST World Info sticky/cooldown/delay state. */
   readonly worldbookTimedEffects?: TimedEffectState
+  /** ST World Info global scan data; entries opt into each field individually. */
+  readonly worldbookGlobalScanData?: WorldbookGlobalScanData
   /** Optional ⑤ postprocess settings supplied by the host. */
   readonly postprocessSettings?: PostprocessRuntimeSettings
   /**

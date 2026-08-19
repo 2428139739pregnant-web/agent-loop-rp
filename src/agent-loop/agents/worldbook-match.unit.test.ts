@@ -253,6 +253,14 @@ interface CtxOpts {
   readonly history?: readonly ChatMessage[]
   readonly macros?: { user: string | null; char: string | null }
   readonly scanDepth?: number
+  readonly globalScanData?: {
+    readonly personaDescription?: string
+    readonly characterDescription?: string
+    readonly characterPersonality?: string
+    readonly characterDepthPrompt?: string
+    readonly scenario?: string
+    readonly creatorNotes?: string
+  }
 }
 
 function makeCtx(opts: CtxOpts): AgentContext {
@@ -276,6 +284,7 @@ function makeCtx(opts: CtxOpts): AgentContext {
     ...(opts.scanDepth !== undefined
       ? { worldbookSettings: { scanDepth: opts.scanDepth, useLlmMatcher: true } }
       : {}),
+    ...(opts.globalScanData === undefined ? {} : { worldbookGlobalScanData: opts.globalScanData }),
   }
 }
 
@@ -357,6 +366,31 @@ test('buildWorldbookMatchInput carries inclusion-group metadata', () => {
   assert.equal(candidate?.groupOverride, true)
   assert.equal(candidate?.groupWeight, 4)
   assert.equal(candidate?.useGroupScoring, true)
+})
+
+test('worldbook matcher includes only opted-in ST global scan fields', () => {
+  const store = new MemoryWorldbookStore([
+    {
+      path: 'persona.md', keywords: ['用户设定'], order: 1, weight: 1, content: '',
+      matchPersonaDescription: true,
+    },
+    {
+      path: 'scenario.md', keywords: ['暮州'], order: 2, weight: 1, content: '',
+      matchScenario: true,
+    },
+    {
+      path: 'blocked.md', keywords: ['用户设定'], order: 3, weight: 1, content: '',
+    },
+  ])
+  const input = buildWorldbookMatchInput(makeIntent(), makeCtx({
+    store,
+    globalScanData: {
+      personaDescription: '用户设定：艾云浮',
+      scenario: '故事发生在暮州',
+    },
+  }))
+  const matched = deterministicWorldbookMatch(input, { rollProbability: false })
+  assert.deepEqual(matched.map(candidate => candidate.path), ['persona.md', 'scenario.md'])
 })
 
 test('buildWorldbookMatchInput carries recursive source metadata and macro-expanded content', () => {

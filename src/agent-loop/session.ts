@@ -100,6 +100,12 @@ export interface WorldbookEntry {
   groupOverride?: boolean
   groupWeight?: number
   useGroupScoring?: boolean
+  matchPersonaDescription?: boolean
+  matchCharacterDescription?: boolean
+  matchCharacterPersonality?: boolean
+  matchCharacterDepthPrompt?: boolean
+  matchScenario?: boolean
+  matchCreatorNotes?: boolean
   /** Preserve ST's budget bypass flag for deterministic activation. */
   ignoreBudget?: boolean
   /** Decorated/template entries are retained but not activated by the Harness. */

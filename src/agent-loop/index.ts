@@ -5,7 +5,7 @@ export type { LLMProvider, ChatMessage, ChatOptions, LLMResult, SwipeInfo } from
 export { DeepSeekProvider } from './providers/deepseek.ts'
 export { MockProvider } from './providers/mock.ts'
 
-export type { AgentContext, Agent, PromptLoader, PostprocessRuntimeSettings, WorldbookSettings, WorldbookMatchMode } from './agents/types.ts'
+export type { AgentContext, Agent, PromptLoader, PostprocessRuntimeSettings, WorldbookSettings, WorldbookMatchMode, WorldbookGlobalScanData } from './agents/types.ts'
 export { FilePromptLoader, InMemoryPromptLoader, parseJson, DEFAULT_WORLDBOOK_SETTINGS, resolveWorldbookMatchMode } from './agents/types.ts'
 
 export type { SessionStore } from './session.ts'
