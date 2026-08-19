@@ -1358,13 +1358,15 @@
       } catch { return '{}' }
     }
 
-    function buildCardFrameRuntime(frameId, mvuState, helperVariables, helperScriptTrees = {}) {
+    function buildCardFrameRuntime(frameId, mvuState, helperVariables, helperScriptTrees = {}, sessionId = null) {
       const frame = safeCardScriptJson(frameId)
+      const chatId = safeCardScriptJson(sessionId ?? '')
       const variables = safeCardScriptJson(mvuState?.stat_data ? mvuState : { stat_data: mvuState || {} })
       const helper = safeCardScriptJson(helperVariables || {})
       const trees = safeCardScriptJson(helperScriptTrees || {})
       return `(function(){
   const __frameId=${frame};
+  const __chatId=${chatId};
   let __variables=${variables};
   let __helperVariables=${helper};
   const __listeners=new Map();
@@ -1633,6 +1635,7 @@
   window.updateVariables=value=>__replace(value);
   window.getMvuVariable=window.getVariable;
   window.getChatMessages=()=>__rpc('get-chat-messages',{});
+  window.getCurrentChatId=()=>String(__chatId||__frameId);
   window.getCurrentMessageId=()=>-1;
   window.getLastMessageId=()=>-1;
   window.getCharWorldbookNames=()=>__rpc('get-char-worldbook-names',{});
@@ -1673,7 +1676,7 @@
   window.registerMessageResolver=()=>undefined;
   window.registerVariableSchema=(schema)=>{window.__agentRpVariableSchema=schema;return schema;};
   window.appendInexistentScriptButtons=()=>undefined;
-  window.tavern_events={CHAT_CHANGED:'chat_changed',CHAT_COMPLETION_SETTINGS_READY:'chat_completion_settings_ready',GENERATION_STARTED:'generation_started',MESSAGE_DELETED:'message_deleted',MESSAGE_RECEIVED:'message_received',MESSAGE_SENT:'message_sent',WORLDINFO_UPDATED:'worldinfo_updated'};
+  window.tavern_events={CHAT_CHANGED:'chat_id_changed',CHAT_LOADED:'chatLoaded',CHAT_COMPLETION_SETTINGS_READY:'chat_completion_settings_ready',GENERATION_AFTER_COMMANDS:'GENERATION_AFTER_COMMANDS',GENERATION_STARTED:'generation_started',GENERATION_STOPPED:'generation_stopped',GENERATION_ENDED:'generation_ended',MESSAGE_DELETED:'message_deleted',MESSAGE_RECEIVED:'message_received',MESSAGE_SENT:'message_sent',MESSAGE_EDITED:'message_edited',MESSAGE_UPDATED:'message_updated',MESSAGE_SWIPED:'message_swiped',CHARACTER_MESSAGE_RENDERED:'character_message_rendered',WORLDINFO_UPDATED:'worldinfo_updated',WORLDINFO_SETTINGS_UPDATED:'worldinfo_settings_updated',WORLD_INFO_ACTIVATED:'world_info_activated'};
   window.toastr={success:()=>{},info:()=>{},warning:(message)=>console.warn('[agent-rp card]',message),error:(message)=>console.error('[agent-rp card]',message)};
   if(!window.EjsTemplate)window.EjsTemplate={render:(template)=>String(template??''),compile:(template)=>()=>String(template??'')};
 if(!window.showdown)window.showdown={Converter:class{constructor(options={}){this.options=options;}makeHtml(value){return String(value??'').replace(/&/gu,'&amp;').replace(/</gu,'&lt;').replace(/>/gu,'&gt;').replace(/\\*\\*(.+?)\\*\\*/gu,'<strong>$1</strong>').replace(/\\*(.+?)\\*/gu,'<em>$1</em>').replace(/\\n/gu,'<br>');}}};
@@ -1684,12 +1687,27 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
   const __wrap=items=>{const list=Array.from(items||[]),api={length:list.length};list.forEach((el,i)=>api[i]=el);api.toArray=()=>list.slice();api.get=index=>index===undefined?list.slice():list[index];api.each=fn=>{list.forEach((el,i)=>fn.call(el,i,el));return api;};api.clone=()=>__wrap(list.map(el=>el.cloneNode?.(true)).filter(Boolean));api.appendTo=target=>{const destination=typeof target==='string'?__query(target):target?.length!==undefined?target:__wrap([target]);destination?.each?.((_i,el)=>list.forEach(item=>el.append(item)));return api;};api.find=sel=>__wrap(list.flatMap(el=>[...el.querySelectorAll(sel)]));api.parent=()=>__wrap(list.map(el=>el.parentElement).filter(Boolean));api.siblings=()=>__wrap(list.flatMap(el=>el.parentElement?[...el.parentElement.children].filter(x=>x!==el):[]));api.addClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.add(x)));api.removeClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.remove(x)));api.toggleClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.toggle(x)));api.hasClass=v=>!!list[0]?.classList.contains(String(v||''));api.html=v=>v===undefined?(list[0]?.innerHTML||''):api.each((_i,el)=>el.innerHTML=String(v));api.text=v=>v===undefined?(list[0]?.textContent||''):api.each((_i,el)=>el.textContent=String(v));api.val=v=>v===undefined?(list[0]?.value||''):api.each((_i,el)=>el.value=String(v));api.attr=(k,v)=>v===undefined?list[0]?.getAttribute(k):api.each((_i,el)=>el.setAttribute(k,String(v)));api.data=(k,v)=>v===undefined?list[0]?.dataset?.[k]:api.each((_i,el)=>el.dataset[k]=String(v));api.empty=()=>api.each((_i,el)=>el.replaceChildren());api.append=v=>api.each((_i,el)=>typeof v==='string'?el.insertAdjacentHTML('beforeend',v):v?.nodeType&&el.append(v));api.css=(k,v)=>v===undefined?(list[0]?getComputedStyle(list[0])[k]:undefined):api.each((_i,el)=>el.style[k]=String(v));api.show=()=>api.each((_i,el)=>el.style.display='');api.hide=()=>api.each((_i,el)=>el.style.display='none');api.on=(type,fn)=>api.each((_i,el)=>el.addEventListener(type,fn));api.off=(type,fn)=>api.each((_i,el)=>el.removeEventListener(type,fn));api.trigger=type=>api.each((_i,el)=>el.dispatchEvent(new Event(type,{bubbles:true})));api.sortable=()=>api;return api;};
   const __query=value=>{if(typeof value==='function'){if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',value,{once:true});else queueMicrotask(value);return __wrap([]);}if(value?.nodeType)return __wrap([value]);if(Array.isArray(value))return __wrap(value);try{return __wrap(document.querySelectorAll(String(value||'')));}catch{return __wrap([]);}};
   if(!window.$){window.$=__query;window.jQuery=__query;}
-  window.addEventListener('message',event=>{if(event.source!==window.parent||!event.data||event.data.id!==__frameId)return;if(event.data.type==='agent-rp-card-rpc-result'){const pending=__rpcPending.get(event.data.requestId);if(!pending)return;__rpcPending.delete(event.data.requestId);clearTimeout(pending.timer);if(event.data.ok===false)pending.reject(new Error(String(event.data.error||'Tavern Helper host RPC failed')));else pending.resolve(event.data.value);return;}if(event.data.type==='agent-rp-card-variables'){__replace(event.data.variables||{stat_data:{}});}if(event.data.type==='agent-rp-card-helper-state'){__applyScopeSnapshot(event.data.scopes,event.data.mvuState,event.data.scripts);}if(event.data.type==='agent-rp-card-theme'&&event.data.theme)document.documentElement.dataset.theme=event.data.theme;});
+  window.addEventListener('message',event=>{
+    if(event.source!==window.parent||!event.data||event.data.id!==__frameId)return;
+    if(event.data.type==='agent-rp-card-rpc-result'){
+      const pending=__rpcPending.get(event.data.requestId);if(!pending)return;
+      __rpcPending.delete(event.data.requestId);clearTimeout(pending.timer);
+      if(event.data.ok===false)pending.reject(new Error(String(event.data.error||'Tavern Helper host RPC failed')));else pending.resolve(event.data.value);return;
+    }
+    if(event.data.type==='agent-rp-card-host-event'){
+      const eventName=String(event.data.eventName||'');
+      if(eventName)__emit(eventName,...(Array.isArray(event.data.args)?event.data.args:[]));
+      return;
+    }
+    if(event.data.type==='agent-rp-card-variables'){__replace(event.data.variables||{stat_data:{}});}
+    if(event.data.type==='agent-rp-card-helper-state'){__applyScopeSnapshot(event.data.scopes,event.data.mvuState,event.data.scripts);}
+    if(event.data.type==='agent-rp-card-theme'&&event.data.theme)document.documentElement.dataset.theme=event.data.theme;
+  });
   __emit('mag_variable_initialized',__variables);
 })();`
     }
 
-    function buildCardFrameDocument(source, frameId, mvuState = null, helperVariables = {}, helperScripts = [], helperScriptTrees = {}) {
+    function buildCardFrameDocument(source, frameId, mvuState = null, helperVariables = {}, helperScripts = [], helperScriptTrees = {}, sessionId = null) {
       let value = replaceCardViewportMinHeight(normalizeCardFrontendSource(source))
         .replace(/<(iframe|object|embed|base)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, '')
         .replace(/<(iframe|object|embed|base)\b[^>]*\/?>/giu, '')
@@ -1714,7 +1732,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           if (item && /^\s*javascript:/iu.test(item)) node.removeAttribute(attr)
         }
       }
-      const runtime = buildCardFrameRuntime(frameId, mvuState, helperVariables, helperScriptTrees)
+      const runtime = buildCardFrameRuntime(frameId, mvuState, helperVariables, helperScriptTrees, sessionId)
       // Do not inject third-party runtime scripts into the card document.
       // The host already provides local dependency fallbacks and remote
       // parser-blocking scripts can replace the bridge globals/protocol.
@@ -1751,6 +1769,26 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       return '<!doctype html>\n' + doc.documentElement.outerHTML
     }
 
+    function postCardHostEvent(frame, eventName, args = []) {
+      if (!frame?.contentWindow || !frame.id || !eventName) return
+      try {
+        frame.contentWindow.postMessage({
+          type: 'agent-rp-card-host-event',
+          id: frame.id,
+          eventName: String(eventName),
+          args: Array.isArray(args) ? args : [],
+        }, '*')
+      } catch { /* a frame may be unloading */ }
+    }
+
+    function broadcastCardHostEvent(sessionId, eventName, ...args) {
+      const expectedSession = sessionId === null || sessionId === undefined ? '' : String(sessionId)
+      for (const frame of document.querySelectorAll('iframe.msg-card-html-frame')) {
+        if (expectedSession && frame.dataset.sessionId !== expectedSession) continue
+        postCardHostEvent(frame, eventName, args)
+      }
+    }
+
     function CardHtmlSurface({ source, mvuState, character, sessionId = null, surfaceKind = 'content', onVariablesChange = null }) {
       const frameRef = useRef(null)
       const frameId = useRef(`card-frame-${Math.random().toString(36).slice(2)}`)
@@ -1764,8 +1802,8 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       const helperScripts = character?.frontend?.tavernHelperScripts || []
       const [height, setHeight] = useState(1)
       const frameDocument = useMemo(
-        () => buildCardFrameDocument(source, frameId.current, initialMvuState.current, character?.frontend?.tavernHelperVariables || {}, helperScripts, character?.frontend?.tavernHelperScriptTrees || {}),
-        [source, character?.frontend?.tavernHelperVariables, helperScripts, character?.frontend?.tavernHelperScriptTrees],
+        () => buildCardFrameDocument(source, frameId.current, initialMvuState.current, character?.frontend?.tavernHelperVariables || {}, helperScripts, character?.frontend?.tavernHelperScriptTrees || {}, sessionId),
+        [source, character?.frontend?.tavernHelperVariables, helperScripts, character?.frontend?.tavernHelperScriptTrees, sessionId],
       )
       const syncFrameState = () => {
         const frame = frameRef.current
@@ -1786,6 +1824,14 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
             }, '*')
           }).catch(() => { /* a card may render before a session is available */ })
         }
+      }
+      const notifyFrameReady = () => {
+        syncFrameState()
+        const frame = frameRef.current
+        const activeSessionId = sessionIdRef.current
+        postCardHostEvent(frame, 'chat_id_changed', [activeSessionId])
+        postCardHostEvent(frame, 'chatLoaded', [activeSessionId])
+        postCardHostEvent(frame, 'chat_completion_settings_ready', [{ sessionId: activeSessionId }])
       }
       useEffect(() => {
         const frame = frameRef.current
@@ -1846,9 +1892,21 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                 return apiPut(`/api/sessions/${encodeURIComponent(sessionId)}/message/${messageId}`, { content: String(data.payload?.message ?? '') })
               }
               if (data.method === 'set-chat-messages') {
-                return apiPut(endpoint, { format: 0, operation: 'set-chat-messages', messages: data.payload?.messages || [] })
+                const result = await apiPut(endpoint, { format: 0, operation: 'set-chat-messages', messages: data.payload?.messages || [] })
+                broadcastCardHostEvent(activeSessionId, 'message_updated', -1)
+                return result
               }
-              if (data.method === 'tavern-helper-mutation') return apiPut(endpoint, data.payload || {})
+              if (data.method === 'tavern-helper-mutation') {
+                const payload = data.payload || {}
+                const result = await apiPut(endpoint, payload)
+                if (['replace-worldbook', 'bind-global-worldbooks', 'bind-character-worldbooks', 'bind-chat-worldbook', 'update-worldbook'].includes(String(payload.operation || ''))) {
+                  broadcastCardHostEvent(activeSessionId, 'worldinfo_updated', payload.name || null)
+                }
+                if (['set-chat-messages', 'set-chat-message'].includes(String(payload.operation || ''))) {
+                  broadcastCardHostEvent(activeSessionId, 'message_updated', Number.isSafeInteger(payload.messageId) ? payload.messageId : -1)
+                }
+                return result
+              }
               throw new Error(`unsupported Tavern Helper RPC: ${String(data.method || '')}`)
             }
             void runRpc().then(respond).catch(fail)
@@ -1886,7 +1944,8 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
         scrolling: 'no',
         srcDoc: frameDocument,
         'data-card-surface': surfaceKind,
-        onLoad: syncFrameState,
+        'data-session-id': sessionId || '',
+        onLoad: notifyFrameReady,
         style: { height: `${height}px` },
       })
     }
@@ -3414,17 +3473,35 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
 
       // /api/run 的 SSE 消费核心:send(新输入)与 reroll(重 roll)共用。
       // 返回 true=流正常结束。bodyObj 为 POST body(不含流处理差异)。
-      const streamRun = useCallback(async (bodyObj) => {
+      const streamRun = useCallback(async (bodyObj, lifecycle = {}) => {
+        const sessionId = bodyObj?.sessionId || currentSessionId
+        const generationType = lifecycle.generationType || (bodyObj?.reroll ? 'swipe' : 'normal')
+        const messageId = Number.isSafeInteger(lifecycle.messageId) ? lifecycle.messageId : -1
+        let lifecycleFinished = false
+        const stopGeneration = () => {
+          if (lifecycleFinished) return
+          lifecycleFinished = true
+          broadcastCardHostEvent(sessionId, 'generation_stopped', generationType)
+        }
+        // Match SillyTavern's host lifecycle. The actual prompt pipeline still
+        // runs on the server, but card extensions must see the same ordering
+        // before their generation hooks are evaluated.
+        if (!bodyObj?.reroll) broadcastCardHostEvent(sessionId, 'message_sent', Number.isSafeInteger(lifecycle.userMessageId) ? lifecycle.userMessageId : -1)
+        broadcastCardHostEvent(sessionId, 'generation_started', generationType, {}, false)
+        broadcastCardHostEvent(sessionId, 'GENERATION_AFTER_COMMANDS', generationType, {}, false)
+        if (bodyObj?.reroll) broadcastCardHostEvent(sessionId, 'message_deleted', messageId)
         let resp
         try {
           resp = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyObj) })
         } catch (err) {
           setError(`网络错误: ${err instanceof Error ? err.message : String(err)}`)
+          stopGeneration()
           return false
         }
         if (!resp.ok || resp.body === null) {
           const t = await resp.text().catch(() => '')
           setError(`服务器错误 ${resp.status}: ${t}`)
+          stopGeneration()
           return false
         }
         const reader = resp.body.getReader()
@@ -3452,9 +3529,16 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                   setMvuState(payload.result.mvuState ?? null)
                   setLastTokenStats(payload.result.tokenStats || null)
                   setProgressStages((prev) => ({ ...prev, [payload.name]: payload.status }))
+                  if (!lifecycleFinished) {
+                    lifecycleFinished = true
+                    broadcastCardHostEvent(sessionId, 'message_received', messageId, generationType)
+                    broadcastCardHostEvent(sessionId, 'character_message_rendered', messageId, generationType)
+                    broadcastCardHostEvent(sessionId, 'generation_ended', generationType)
+                  }
                 } else if (payload.name === 'error') {
                   setError(payload.message || '未知错误')
                   streamErrored = true
+                  stopGeneration()
                   setProgressStages((prev) => ({ ...prev, [payload.name]: 'error' }))
                 } else {
                   // 顶层 stage(intent/worldbook/context/response/summarize) + 5 个
@@ -3490,16 +3574,16 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                 if (payload.tokenStats !== undefined) setLastTokenStats(payload.tokenStats)
               } else if (ev.event === 'error') {
                 let msg = '未知错误'; try { msg = (JSON.parse(ev.data)).message || msg } catch { /* */ }
-                setError(msg); streamErrored = true
+                setError(msg); streamErrored = true; stopGeneration()
               }
             }
           }
         } catch (err) {
           setError(`读取 SSE 失败: ${err instanceof Error ? err.message : String(err)}`)
-          streamErrored = true
+          streamErrored = true; stopGeneration()
         }
         return !streamErrored
-      }, [])
+      }, [currentSessionId])
 
       const send = useCallback(async () => {
         const text = userInput.trim()
@@ -3512,12 +3596,15 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
         setLastTokenStats(null)
         setHistory((prev) => [...prev, { role: 'user', content: text }])
         setUserInput('')
-        const ok = await streamRun({ userInput: text, sessionId: currentSessionId })
+        const ok = await streamRun(
+          { userInput: text, sessionId: currentSessionId },
+          { generationType: 'normal', userMessageId: history.length, messageId: history.length + 1 },
+        )
         setLoading(false); setProgressStages(INITIAL_STAGES)
         if (!ok) setHistory((prev) => prev.slice(0, -1))
         else refreshCharacterSessions()
         setTimeout(() => setProgressStages(INITIAL_STAGES), 5000)
-      }, [userInput, currentCharacter, currentCharacterId, currentSessionId, refreshCharacterSessions, streamRun])
+      }, [userInput, history.length, currentCharacter, currentCharacterId, currentSessionId, refreshCharacterSessions, streamRun])
 
       // 重 roll:服务端截掉最后一条 assistant 并复用该轮 user 输入重新生成。
       const reroll = useCallback(async () => {
@@ -3532,7 +3619,10 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
         setTraces({})
         setLastTokenStats(null)
         setHistory((prev) => prev.slice(0, -1))
-        const ok = await streamRun({ reroll: true, sessionId: currentSessionId })
+        const ok = await streamRun(
+          { reroll: true, sessionId: currentSessionId },
+          { generationType: 'swipe', messageId: history.length - 1 },
+        )
         setLoading(false)
         if (!ok) {
           // 失败时从服务端拉真实历史(截断可能已发生也可能没有,以服务端为准)
@@ -3551,6 +3641,8 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           const r = await apiPut(`/api/sessions/${encodeURIComponent(currentSessionId)}/message/${index}`, { content })
           setHistory(r.history || [])
           setMvuState(r.mvuState ?? null)
+          broadcastCardHostEvent(currentSessionId, 'message_edited', index)
+          broadcastCardHostEvent(currentSessionId, 'message_updated', index)
           refreshCharacterSessions()
         } catch (err) {
           setError(String(err.message || err))
@@ -3564,6 +3656,8 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           const r = await apiPut(`/api/sessions/${encodeURIComponent(currentSessionId)}/message/${index}/swipe`, { swipeId })
           setHistory(r.history || [])
           setMvuState(r.mvuState ?? null)
+          broadcastCardHostEvent(currentSessionId, 'message_swiped', index, swipeId)
+          broadcastCardHostEvent(currentSessionId, 'message_updated', index)
         } catch (err) {
           setError(String(err.message || err))
         }
@@ -3574,6 +3668,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
         if (!window.confirm(`删除第 ${index + 1} 层？此操作不可恢复。`)) return
         try {
           await apiDelete(`/api/sessions/${encodeURIComponent(currentSessionId)}/message/${index}`)
+          broadcastCardHostEvent(currentSessionId, 'message_deleted', index)
           const r = await apiGet(`/api/history?sessionId=${encodeURIComponent(currentSessionId)}`)
           setHistory(r.history || [])
           setMvuState(r.mvuState ?? null)

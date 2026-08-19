@@ -158,3 +158,38 @@ test('Tavern Helper injectPrompts and uninjectPrompts use the canonical mutation
   assert.equal(typeof frame.window.TavernHelper.replaceWorldbook, 'function')
   assert.equal(typeof frame.window.TavernHelper.rebindCharWorldbooks, 'function')
 })
+
+test('host lifecycle events cross the iframe bridge with SillyTavern names and arguments', () => {
+  const frame = createFrame()
+  const seen = []
+  frame.window.eventOn('message_sent', (...args) => seen.push(['sent', ...args]))
+  frame.window.eventOnce('generation_started', (...args) => seen.push(['started', ...args]))
+
+  frame.window.dispatchEvent({
+    type: 'message',
+    source: frame.parent,
+    data: {
+      type: 'agent-rp-card-host-event',
+      id: 'frame-test',
+      eventName: 'message_sent',
+      args: [3],
+    },
+  })
+  frame.window.dispatchEvent({
+    type: 'message',
+    source: frame.parent,
+    data: {
+      type: 'agent-rp-card-host-event',
+      id: 'frame-test',
+      eventName: 'generation_started',
+      args: ['normal', { automatic_trigger: false }, false],
+    },
+  })
+
+  assert.deepEqual(seen, [
+    ['sent', 3],
+    ['started', 'normal', { automatic_trigger: false }, false],
+  ])
+  assert.equal(frame.window.tavern_events.CHAT_CHANGED, 'chat_id_changed')
+  assert.equal(frame.window.tavern_events.GENERATION_AFTER_COMMANDS, 'GENERATION_AFTER_COMMANDS')
+})
