@@ -60,11 +60,23 @@ export interface WorldbookPluginOutput {
   skipped: Array<{ path: string; reason: string }>
 }
 
+/** Deterministic ST World Info budget diagnostics for trace inspection. */
+export interface WorldbookBudgetStats {
+  contextTokens: number
+  budgetPercent: number
+  budgetTokens: number
+  budgetCap: number
+  usedTokens: number
+  droppedPaths: string[]
+}
+
 /** A wrapping payload returned by 2.1. */
 export interface WorldbookMatchOutput {
   matches: WorldbookMatch[]
   /** Deterministic ST-Prompt-Template compatibility artifacts. */
   plugin?: WorldbookPluginOutput
+  /** Present when the runtime applied the ST World Info token budget. */
+  budget?: WorldbookBudgetStats
 }
 
 /** How one historical/context segment should be injected into the reply prompt. */

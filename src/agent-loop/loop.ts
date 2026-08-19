@@ -143,6 +143,7 @@ function buildContext(deps: RunLoopDeps): AgentContext {
     sessionId: deps.sessionId,
     // 世界书设置(扫描深度等);缺省走 ST 默认(scanDepth=2)。
     worldbookSettings: deps.worldbookSettings ?? DEFAULT_WORLDBOOK_SETTINGS,
+    ...(deps.responseSettings === undefined ? {} : { responseSettings: deps.responseSettings }),
     ...(deps.worldbookGlobalScanData === undefined ? {} : { worldbookGlobalScanData: deps.worldbookGlobalScanData }),
     ...(deps.tavernHelperState === undefined ? {} : { tavernHelperState: deps.tavernHelperState }),
     ...(deps.postprocessSettings === undefined ? {} : { postprocessSettings: deps.postprocessSettings }),

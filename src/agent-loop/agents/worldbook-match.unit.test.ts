@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
   buildWorldbookMatchInput,
+  applyWorldbookTokenBudget,
   deterministicWorldbookMatch,
   exactKeywordMatch,
   filterInclusionGroupCandidates,
@@ -705,6 +706,32 @@ test('strict mode uses deterministic ST matching without an LLM call', async () 
   assert.equal(calls, 0)
   assert.equal(result.matches[0]?.path, 'a.md')
   assert.equal(result.matches[0]?.source, 'st')
+})
+
+test('worldbook token budget keeps ST priority and ignoreBudget entries', () => {
+  const input = {
+    intent: makeIntent(),
+    scanDepth: 2,
+    recentMessages: [],
+    maxContextTokens: 1_024,
+    budgetPercent: 1,
+    budgetCap: 0,
+    candidates: [
+      makeCandidate({ path: 'low.md', order: 1, weight: 1 }),
+      makeCandidate({ path: 'high.md', order: 9, weight: 1 }),
+      makeCandidate({ path: 'always.md', order: 2, weight: 1, ignoreBudget: true }),
+    ],
+  }
+  const result = applyWorldbookTokenBudget(input, [
+    { path: 'low.md', order: 1, weight: 1, content: 'x'.repeat(40) },
+    { path: 'high.md', order: 9, weight: 1, content: 'high' },
+    { path: 'always.md', order: 2, weight: 1, content: 'x'.repeat(40) },
+  ])
+  assert.ok(result)
+  assert.deepEqual(result.matches.map(match => match.path), ['high.md', 'always.md'])
+  assert.deepEqual(result.budget.droppedPaths, ['low.md'])
+  assert.equal(result.budget.budgetTokens, 10)
+  assert.equal(result.budget.usedTokens, 1)
 })
 
 test('enhanced mode keeps ST matches and adds agent matches in one LLM call', async () => {

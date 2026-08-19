@@ -20,6 +20,7 @@
 import {
   WorldbookMatchOutputSchema,
   type IntentOutput,
+  type WorldbookBudgetStats,
   type WorldbookMatch,
   type WorldbookMatchOutput,
 } from '../schema.ts'
@@ -111,6 +112,8 @@ export interface WorldbookMatchCandidate {
   role?: 'system' | 'user' | 'assistant'
   /** Decorated entries are preserved for export but are not executable here. */
   hasDecorators?: boolean
+  /** ST budget bypass flag; the entry remains eligible after the cap. */
+  ignoreBudget?: boolean
   order: number
   weight: number
   /** Which subsystem owns this entry's activation decision. */
@@ -146,6 +149,12 @@ export interface WorldbookMatchInput {
   keyIndexMarkdown?: string
   /** Explicit worldbook mode; omitted callers use the context setting. */
   mode?: WorldbookMatchMode
+  /** ST world_info_budget percentage of the configured context window. */
+  budgetPercent?: number
+  /** ST world_info_budget_cap; zero means no absolute cap. */
+  budgetCap?: number
+  /** Context window shared with response PromptManager budgeting. */
+  maxContextTokens?: number
   /** Session-local World Info timed effects; rerolls reuse this snapshot. */
   timedEffects?: TimedEffectState
   /** Model-visible message count before this generation starts. */
@@ -237,6 +246,7 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
       ...(e.depth === undefined ? {} : { depth: e.depth }),
       ...(e.role === undefined ? {} : { role: e.role }),
       ...(e.hasDecorators === undefined ? {} : { hasDecorators: e.hasDecorators }),
+      ...(e.ignoreBudget === undefined ? {} : { ignoreBudget: e.ignoreBudget }),
       order: e.order,
       weight: e.weight,
       owner: classification.owner,
@@ -275,6 +285,9 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
     keyIndexMarkdown: renderWorldbookKeyOnlyMd(candidates),
     ...(activatedPluginCandidates.length === 0 ? {} : { pluginCandidates: activatedPluginCandidates }),
     mode,
+    ...(ctx.worldbookSettings?.budgetPercent === undefined ? {} : { budgetPercent: ctx.worldbookSettings.budgetPercent }),
+    ...(ctx.worldbookSettings?.budgetCap === undefined ? {} : { budgetCap: ctx.worldbookSettings.budgetCap }),
+    ...(ctx.responseSettings?.maxContextTokens === undefined ? {} : { maxContextTokens: ctx.responseSettings.maxContextTokens }),
     ...(ctx.worldbookTimedEffects === undefined ? {} : { timedEffects: ctx.worldbookTimedEffects }),
     messageCount: history.length,
   }
@@ -767,6 +780,57 @@ function scanTextIsEmpty(input: WorldbookMatchInput): boolean {
     && (input.injectedScanText ?? []).every(text => text.trim().length === 0)
 }
 
+function approximateWorldbookTokens(text: string): number {
+  let ascii = 0
+  let nonAscii = 0
+  for (const character of text) {
+    if ((character.codePointAt(0) ?? 0) <= 0x7f) ascii += 1
+    else nonAscii += 1
+  }
+  return Math.max(1, Math.ceil(ascii / 4) + nonAscii)
+}
+
+export function applyWorldbookTokenBudget(
+  input: WorldbookMatchInput,
+  matches: readonly WorldbookMatch[],
+): { matches: WorldbookMatch[]; budget: WorldbookBudgetStats } | null {
+  if (input.budgetPercent === undefined) return null
+  const contextTokens = Math.max(1_024, Math.trunc(input.maxContextTokens ?? 32_768))
+  const budgetPercent = Math.min(100, Math.max(0, input.budgetPercent))
+  const rawBudget = Math.floor(contextTokens * budgetPercent / 100)
+  const rawCap = Math.max(0, Math.trunc(input.budgetCap ?? 0))
+  const budgetTokens = rawCap > 0 ? Math.min(rawBudget, rawCap) : rawBudget
+  const candidates = new Map(input.candidates.map(candidate => [candidate.path, candidate]))
+  const ranked = [...matches].sort((left, right) => {
+    const a = candidates.get(left.path)
+    const b = candidates.get(right.path)
+    return (b?.order ?? right.order) - (a?.order ?? left.order)
+      || (b?.weight ?? right.weight) - (a?.weight ?? left.weight)
+      || left.path.localeCompare(right.path)
+  })
+  let usedTokens = 0
+  const kept = new Set<string>()
+  const droppedPaths: string[] = []
+  for (const match of ranked) {
+    const candidate = candidates.get(match.path)
+    if (candidate?.ignoreBudget === true) {
+      kept.add(match.path)
+      continue
+    }
+    const cost = approximateWorldbookTokens(match.content)
+    if (usedTokens + cost <= budgetTokens) {
+      usedTokens += cost
+      kept.add(match.path)
+    } else {
+      droppedPaths.push(match.path)
+    }
+  }
+  return {
+    matches: matches.filter(match => kept.has(match.path)),
+    budget: { contextTokens, budgetPercent, budgetTokens, budgetCap: rawCap, usedTokens, droppedPaths },
+  }
+}
+
 export const worldbookMatchAgent: Agent<WorldbookMatchInput, WorldbookMatchOutput> = {
   name: 'worldbook-match',
 
@@ -784,7 +848,9 @@ export const worldbookMatchAgent: Agent<WorldbookMatchInput, WorldbookMatchOutpu
       const matches = output.matches.filter(match =>
         !input.candidates.some(candidate => candidate.path === match.path) || winners.has(match.path))
       const normalized = matches.length === output.matches.length ? output : { ...output, matches }
-      return plugin === undefined ? normalized : { ...normalized, plugin }
+      const budgeted = applyWorldbookTokenBudget(input, normalized.matches)
+      const withBudget = budgeted === null ? normalized : { ...normalized, matches: budgeted.matches, budget: budgeted.budget }
+      return plugin === undefined ? withBudget : { ...withBudget, plugin }
     }
     // ST-owned entries (including native ST regex keys) are always resolved
     // locally. Enhanced mode uses this as its baseline; strict mode stops here.

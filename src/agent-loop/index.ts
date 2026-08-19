@@ -29,6 +29,7 @@ export type {
   ContextSegmentOutput,
   ReplyResult,
   WorldbookPluginOutput,
+  WorldbookBudgetStats,
   WorldbookPromptInjection,
   WorldbookPromptPlacement,
   WorldbookPromptRole,
@@ -72,6 +73,7 @@ export type { RunLoopDeps, RunLoopAgents, ResponseInput, ContextProcessInput } f
 export { intentAgent } from './agents/intent.ts'
 export {
   worldbookMatchAgent,
+  applyWorldbookTokenBudget,
   buildWorldbookMatchInput,
   deterministicWorldbookMatch,
   recursiveWorldbookMatch,

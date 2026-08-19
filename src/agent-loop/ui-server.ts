@@ -356,6 +356,8 @@ function buildAgentContext(deps: {
   macros?: { user: string | null; char: string | null }
   /** 世界书全局设置(扫描深度等);缺省 ST 默认 scanDepth=2。 */
   worldbookSettings?: WorldbookSettings
+  /** 当前 response preset 的上下文窗口,供 World Info budget 计算。 */
+  responseSettings?: ResponseGenerationSettings
   /** Session-local sticky/cooldown/delay snapshot. */
   worldbookTimedEffects?: TimedEffectState
   /** ST World Info chat-independent scan fields. */
@@ -382,6 +384,7 @@ function buildAgentContext(deps: {
     // exactOptionalPropertyTypes: 可选字段用条件展开,不显式赋 undefined。
     ...(deps.macros !== undefined ? { macros: deps.macros } : {}),
     ...(deps.worldbookSettings !== undefined ? { worldbookSettings: deps.worldbookSettings } : {}),
+    ...(deps.responseSettings !== undefined ? { responseSettings: deps.responseSettings } : {}),
     ...(deps.worldbookTimedEffects === undefined ? {} : { worldbookTimedEffects: deps.worldbookTimedEffects }),
     ...(deps.worldbookGlobalScanData === undefined ? {} : { worldbookGlobalScanData: deps.worldbookGlobalScanData }),
     ...(deps.tavernHelperState === undefined ? {} : { tavernHelperState: deps.tavernHelperState }),
@@ -420,6 +423,7 @@ function displayRenderDirectives(
     sessionId,
     macros: { user: getCurrentUserPersona(state)?.name ?? null, char: character.name },
     worldbookSettings: state.worldbookSettings,
+    responseSettings: state.responseSettings,
     ...(helperState === undefined ? {} : { tavernHelperState: helperState }),
     ...(templateRenderer === undefined ? {} : { renderTemplate: templateRenderer }),
   })
@@ -1773,6 +1777,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     provider, model: cfg.model, prompts, session, worldbook, sessionId,
     macros: { user: activeUserName, char: character.name },
     worldbookSettings: state.worldbookSettings,
+    responseSettings: state.responseSettings,
     worldbookGlobalScanData: {
       personaDescription: getCurrentUserPersona(state)?.description ?? '',
       characterDescription: character.raw.description,
@@ -3573,7 +3578,7 @@ async function writeStateJson(state: AppState): Promise<void> {
 async function loadWorldbookSettings(): Promise<WorldbookSettings> {
   try {
     const raw = await readFile(ABS_WORLDBOOK_SETTINGS_JSON, 'utf-8')
-    const obj = JSON.parse(raw) as { scanDepth?: unknown; useLlmMatcher?: unknown; mode?: unknown }
+    const obj = JSON.parse(raw) as { scanDepth?: unknown; useLlmMatcher?: unknown; mode?: unknown; budgetPercent?: unknown; budgetCap?: unknown }
     const scanDepth = typeof obj.scanDepth === 'number' && Number.isInteger(obj.scanDepth)
       && obj.scanDepth >= 0 && obj.scanDepth <= 100
       ? obj.scanDepth
@@ -3581,7 +3586,11 @@ async function loadWorldbookSettings(): Promise<WorldbookSettings> {
     const mode: WorldbookMatchMode = obj.mode === 'strict' || obj.mode === 'enhanced' || obj.mode === 'native'
       ? obj.mode
       : obj.useLlmMatcher === false ? 'strict' : 'enhanced'
-    return { scanDepth, useLlmMatcher: mode !== 'strict', mode }
+    const budgetPercent = typeof obj.budgetPercent === 'number' && Number.isFinite(obj.budgetPercent)
+      ? Math.min(100, Math.max(0, obj.budgetPercent)) : DEFAULT_WORLDBOOK_SETTINGS.budgetPercent ?? 25
+    const budgetCap = typeof obj.budgetCap === 'number' && Number.isFinite(obj.budgetCap)
+      ? Math.min(2_000_000, Math.max(0, Math.trunc(obj.budgetCap))) : DEFAULT_WORLDBOOK_SETTINGS.budgetCap ?? 0
+    return { scanDepth, useLlmMatcher: mode !== 'strict', mode, budgetPercent, budgetCap }
   } catch {
     return { ...DEFAULT_WORLDBOOK_SETTINGS }
   }
@@ -3786,7 +3795,7 @@ async function handlePutResponseSettings(state: AppState, req: IncomingMessage, 
   sendJson(res, 200, { ...state.responseSettings })
 }
 
-/** PUT /api/worldbook-settings — body { scanDepth?: number, mode?: strict|enhanced|native }。
+/** PUT /api/worldbook-settings — body { scanDepth?: number, mode?: strict|enhanced|native, budgetPercent?: number, budgetCap?: number }。
  *  scanDepth = 绿灯匹配扫描的最近消息条数(酒馆 world_info_depth,默认 2)。
  *  useLlmMatcher 保留为旧客户端兼容字段。写盘 best-effort。 */
 async function handlePutWorldbookSettings(state: AppState, req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -3806,6 +3815,16 @@ async function handlePutWorldbookSettings(state: AppState, req: IncomingMessage,
   if (modeRaw !== undefined && modeRaw !== 'strict' && modeRaw !== 'enhanced' && modeRaw !== 'native') {
     return sendError(res, 400, 'mode must be strict, enhanced, or native')
   }
+  const budgetPercentRaw = payload.budgetPercent
+  if (budgetPercentRaw !== undefined
+    && (typeof budgetPercentRaw !== 'number' || !Number.isFinite(budgetPercentRaw) || budgetPercentRaw < 0 || budgetPercentRaw > 100)) {
+    return sendError(res, 400, 'budgetPercent must be a number in [0, 100]')
+  }
+  const budgetCapRaw = payload.budgetCap
+  if (budgetCapRaw !== undefined
+    && (typeof budgetCapRaw !== 'number' || !Number.isInteger(budgetCapRaw) || budgetCapRaw < 0 || budgetCapRaw > 2_000_000)) {
+    return sendError(res, 400, 'budgetCap must be an integer in [0, 2000000]')
+  }
   const mode: WorldbookMatchMode = modeRaw === 'strict' || modeRaw === 'enhanced' || modeRaw === 'native'
     ? modeRaw
     : useLlmMatcherRaw === false ? 'strict' : state.worldbookSettings.mode ?? 'enhanced'
@@ -3813,6 +3832,10 @@ async function handlePutWorldbookSettings(state: AppState, req: IncomingMessage,
     scanDepth: typeof scanDepthRaw === 'number' ? scanDepthRaw : state.worldbookSettings.scanDepth,
     useLlmMatcher: mode !== 'strict',
     mode,
+    budgetPercent: typeof budgetPercentRaw === 'number'
+      ? budgetPercentRaw : state.worldbookSettings.budgetPercent ?? DEFAULT_WORLDBOOK_SETTINGS.budgetPercent ?? 25,
+    budgetCap: typeof budgetCapRaw === 'number'
+      ? budgetCapRaw : state.worldbookSettings.budgetCap ?? DEFAULT_WORLDBOOK_SETTINGS.budgetCap ?? 0,
   }
   state.worldbookSettings = next
   try {

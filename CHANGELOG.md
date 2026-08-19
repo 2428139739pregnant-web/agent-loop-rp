@@ -4,6 +4,8 @@
 
 ### 修复
 
+- 世界书兼容层加入 ST `world_info_budget` / `budget_cap` 运行时收尾：按 ST 优先级本地裁剪已激活的多本世界书条目，`ignoreBudget` 条目不占预算，并把使用量与被裁剪路径写入 worldbook trace；整个过程不新增 LLM 调用。
+
 - response 消息树加入 ST `openai_max_context` 风格的上下文预算：可在回复设置中配置总上下文 token 上限，模型输出预留空间后，从最旧历史按 user/assistant 对裁剪，系统层、世界书、示例、插件注入和当前用户输入保留；response trace 同时记录预算、估算 token、裁剪数量及超预算状态。
 
 - 默认 response 模板接入 ST PromptManager 风格的消息树：角色卡 `mes_example` 按 speaker 拆为独立 system 消息并保留 `name`，加入 `[Example Chat]` 标记，聊天历史保留真实 user/assistant 角色，`atDepth` 条目按 depth/order/role 插入，post-history 指令位于历史之后；不带新标记的自定义 response 模板继续走旧兼容路径。

@@ -9,6 +9,7 @@ import type { LLMProvider } from '../provider.ts'
 import type { SessionStore, WorldbookStore } from '../session.ts'
 import type { TimedEffectState } from '../worldbook-timed-effects.ts'
 import type { TavernHelperState } from '../../tavern-helper.ts'
+import type { ResponseGenerationSettings } from '../response-settings.ts'
 
 /** Reads a prompt template by name. The `name` is the file stem in the prompts directory. */
 export interface PromptLoader {
@@ -69,6 +70,10 @@ export interface WorldbookSettings {
   readonly useLlmMatcher: boolean
   /** 普通绿灯条目的最终判断权。默认 enhanced。 */
   readonly mode?: WorldbookMatchMode
+  /** ST `world_info_budget`, expressed as a percentage of max context. */
+  readonly budgetPercent?: number
+  /** ST `world_info_budget_cap`; zero/undefined means no absolute cap. */
+  readonly budgetCap?: number
 }
 
 /** Resolve the explicit mode while preserving old worldbook-settings.json files. */
@@ -82,6 +87,8 @@ export const DEFAULT_WORLDBOOK_SETTINGS: WorldbookSettings = {
   scanDepth: 2,
   useLlmMatcher: true,
   mode: 'enhanced',
+  budgetPercent: 25,
+  budgetCap: 0,
 }
 
 /** Runtime knobs for the optional ⑤ postprocess pipeline. */
@@ -116,6 +123,8 @@ export interface AgentContext {
    * {@link DEFAULT_WORLDBOOK_SETTINGS}(scanDepth=2,useLlmMatcher=true)。
    */
   readonly worldbookSettings?: WorldbookSettings
+  /** Current response/preset context window, shared with World Info budgeting. */
+  readonly responseSettings?: ResponseGenerationSettings
   /** Session-owned ST World Info sticky/cooldown/delay state. */
   readonly worldbookTimedEffects?: TimedEffectState
   /** ST World Info global scan data; entries opt into each field individually. */

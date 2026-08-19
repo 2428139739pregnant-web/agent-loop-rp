@@ -59,7 +59,7 @@
     /** @typedef {{sessionId:string, label:string, characterName:string, createdAt:string, turnCount:number}} SessionInfo */
     /** @typedef {{sourceId:string, name:string|null, keys:string[], secondaryKeys:string[], content:string, enabled:boolean, insertionOrder:number, selective:boolean, constant:boolean, caseSensitive:boolean, matchWholeWords:boolean, useRegex:boolean, position:'before_char'|'after_char', priority:number|null, selectiveLogic?:string, probability?:number, useProbability?:boolean, stPosition?:number}} WBEntry */
     /** @typedef {{id:string, name:string, entryCount:number, enabledCount:number}} WBBook */
-    /** @typedef {{scanDepth:number, useLlmMatcher:boolean}} WorldbookSettingsView */
+    /** @typedef {{scanDepth:number, useLlmMatcher:boolean, budgetPercent:number, budgetCap:number}} WorldbookSettingsView */
     /** @typedef {{name:string, length:number, overridden:boolean}} PromptSummary */
     /** @typedef {{provider:'openai'|'mock', baseUrl:string, apiKey:string, model:string}} ApiConfigView */
     /** @typedef {{id:string, name:string, instruction:string}} ResponsePerspectiveOptionView */
@@ -2904,6 +2904,8 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       // 世界书全局设置(酒馆 world_info_depth:绿灯匹配扫描的最近消息条数)
       const [scanDepth, setScanDepth] = useState('2')
       const [matchMode, setMatchMode] = useState('enhanced')
+      const [budgetPercent, setBudgetPercent] = useState('25')
+      const [budgetCap, setBudgetCap] = useState('0')
       const [savingSettings, setSavingSettings] = useState(false)
       const scanDepthRef = useRef(null)
 
@@ -2914,6 +2916,8 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           setMatchMode(r.mode === 'strict' || r.mode === 'native' || r.mode === 'enhanced'
             ? r.mode
             : r.useLlmMatcher === false ? 'strict' : 'enhanced')
+          setBudgetPercent(String(r.budgetPercent ?? 25))
+          setBudgetCap(String(r.budgetCap ?? 0))
         } catch (err) { props.onError(String(err.message || err)) }
       }, [props])
       useEffect(() => { refreshSettings() }, [refreshSettings])
@@ -2921,11 +2925,17 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       const saveSettings = useCallback(async () => {
         const n = Number.parseInt(scanDepth, 10)
         if (Number.isNaN(n) || n < 0 || n > 100) { props.onError('扫描深度必须是 0-100 的整数'); return }
+        const percent = Number(budgetPercent)
+        const cap = Number.parseInt(budgetCap, 10)
+        if (!Number.isFinite(percent) || percent < 0 || percent > 100) { props.onError('世界书预算比例必须是 0-100'); return }
+        if (Number.isNaN(cap) || cap < 0 || cap > 2000000) { props.onError('世界书绝对预算必须是 0-2000000 的整数'); return }
         setSavingSettings(true)
         try {
-          const r = await apiPut('/api/worldbook-settings', { scanDepth: n, mode: matchMode })
+          const r = await apiPut('/api/worldbook-settings', { scanDepth: n, mode: matchMode, budgetPercent: percent, budgetCap: cap })
           setScanDepth(String(r.scanDepth))
           setMatchMode(r.mode || matchMode)
+          setBudgetPercent(String(r.budgetPercent ?? percent))
+          setBudgetCap(String(r.budgetCap ?? cap))
         } catch (err) { props.onError(String(err.message || err)) } finally { setSavingSettings(false) }
       }, [scanDepth, matchMode, props])
 
@@ -3073,9 +3083,21 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
               onChange: (e) => setScanDepth(e.target.value), style: { width: '90px' },
               title: '2.1 世界书匹配 agent 扫描最近 N 条消息(用户+角色都算);对应 SillyTavern 的 world_info_depth,默认 2',
             }),
+            h('input', {
+              type: 'number', min: 0, max: 100, step: 1, value: budgetPercent,
+              onChange: (e) => setBudgetPercent(e.target.value), style: { width: '90px' },
+              title: '对应 SillyTavern world_info_budget,占总上下文的百分比',
+              placeholder: '预算%',
+            }),
+            h('input', {
+              type: 'number', min: 0, max: 2000000, step: 256, value: budgetCap,
+              onChange: (e) => setBudgetCap(e.target.value), style: { width: '100px' },
+              title: '对应 SillyTavern world_info_budget_cap,0 表示不限',
+              placeholder: '绝对上限',
+            }),
             h('button', { onClick: saveSettings, disabled: savingSettings }, savingSettings ? '保存中…' : '保存'),
           ),
-          h('div', { className: 'hint' }, '普通绿灯按所选模式处理;蓝灯 constant、EJS、@INJECT、[GENERATE]/[RENDER] 等扩展特殊条目始终由兼容层处理。enhanced 模式不会新增一次 LLM 调用。'),
+          h('div', { className: 'hint' }, '普通绿灯按所选模式处理;蓝灯 constant、EJS、@INJECT、[GENERATE]/[RENDER] 等扩展特殊条目始终由兼容层处理。预算按 ST 的 order 优先选择，ignoreBudget 条目不计入上限；enhanced 模式不会新增一次 LLM 调用。'),
         ),
         // 角色内嵌世界书(选中角色后才显示)
         characterBookGroup,
