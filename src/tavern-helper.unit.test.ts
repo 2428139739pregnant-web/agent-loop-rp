@@ -15,6 +15,7 @@ import {
   tavernInjectedInChatPrompts,
   tavernInjectedScanText,
   uninjectPrompts,
+  updateTavernInjectedPromptFilters,
   type TavernInjectedPromptInput,
   updateScriptTreesWith,
   type TavernScriptTree,
@@ -179,6 +180,30 @@ test('inject and uninject preserve unrelated prompts and replace duplicate ids',
   const removed = uninjectPrompts(replaced, ['shared'])
   assert.deepEqual(removed.injectedPrompts?.map(prompt => prompt.id), ['keep'])
   assert.equal(uninjectPrompts(removed, ['missing']), removed)
+})
+
+test('generation filter snapshots update only the owning injected prompt', () => {
+  const state = initializeTavernHelperState(frontend([scriptTree('one'), scriptTree('two')]), 'character')
+  const injected = injectPrompts(state, 'one', [
+    injection('visible'),
+    injection('other-owner'),
+  ])
+  const withOwner = injectPrompts(injected, 'two', [injection('same-id', { content: 'two' })])
+  const updated = updateTavernInjectedPromptFilters(withOwner, [
+    { scriptId: 'one', promptId: 'visible', enabled: false },
+    { scriptId: 'two', promptId: 'same-id', enabled: true },
+  ])
+  assert.equal(updated.injectedPrompts?.find(prompt => prompt.id === 'visible')?.filter, false)
+  assert.equal(updated.injectedPrompts?.find(prompt => prompt.id === 'same-id')?.filter, true)
+  assert.equal(updated.injectedPrompts?.find(prompt => prompt.id === 'other-owner')?.filter, undefined)
+
+  const request = parseTavernHelperMutationRequest(JSON.stringify({
+    format: 0,
+    operation: 'update-injection-filters',
+    filters: [{ scriptId: 'one', promptId: 'visible', enabled: true }],
+  }))
+  const parsedUpdated = applyTavernHelperMutation(updated, request)
+  assert.equal(parsedUpdated.injectedPrompts?.find(prompt => prompt.id === 'visible')?.filter, true)
 })
 
 test('generation selection filters, sorts, scans none prompts, and consumes only selected once prompts', async () => {

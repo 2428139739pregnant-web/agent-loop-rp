@@ -193,3 +193,36 @@ test('host lifecycle events cross the iframe bridge with SillyTavern names and a
   assert.equal(frame.window.tavern_events.CHAT_CHANGED, 'chat_id_changed')
   assert.equal(frame.window.tavern_events.GENERATION_AFTER_COMMANDS, 'GENERATION_AFTER_COMMANDS')
 })
+
+test('function-valued injection filters are evaluated at generation preparation', async () => {
+  const frame = createFrame()
+  frame.window.__agentRpCurrentScriptId = 'script-filter'
+  let allowed = false
+  frame.window.injectPrompts([{
+    id: 'filter-prompt',
+    position: 'in_chat',
+    depth: 0,
+    role: 'system',
+    content: 'FILTERED',
+    filter: async () => allowed,
+  }])
+
+  frame.window.dispatchEvent({
+    type: 'message',
+    source: frame.parent,
+    data: { type: 'agent-rp-card-prepare-generation', id: 'frame-test' },
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  let result = messagesOf(frame, 'agent-rp-card-injection-filter-result').at(-1)
+  assert.deepEqual(plain(result?.filters), [{ scriptId: 'script-filter', promptId: 'filter-prompt', enabled: false }])
+
+  allowed = true
+  frame.window.dispatchEvent({
+    type: 'message',
+    source: frame.parent,
+    data: { type: 'agent-rp-card-prepare-generation', id: 'frame-test' },
+  })
+  await new Promise(resolve => setImmediate(resolve))
+  result = messagesOf(frame, 'agent-rp-card-injection-filter-result').at(-1)
+  assert.deepEqual(plain(result?.filters), [{ scriptId: 'script-filter', promptId: 'filter-prompt', enabled: true }])
+})

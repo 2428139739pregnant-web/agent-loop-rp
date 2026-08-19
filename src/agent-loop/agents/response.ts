@@ -245,6 +245,61 @@ export function buildContextBlock(
 }
 
 /**
+ * Build the ST-style chat-history message layer from context decisions.
+ *
+ * The old compatibility path flattened selected history into one system
+ * string. SillyTavern's chat-completion path keeps each selected turn as a
+ * real user/assistant message so role-sensitive presets and in-chat depth
+ * injections can see the same message tree. The current user turn is removed
+ * by the caller before this function is called.
+ */
+export function buildContextMessages(
+  segmentation: ContextSegmentOutput,
+  history: readonly ChatMessage[],
+  readSummary: (turn: number) => string | undefined,
+  card?: PreprocessedCharacter,
+  userName?: string,
+): ChatMessage[] {
+  const decisions = new Map(segmentation.segments.map(segment => [segment.id, segment.mode]))
+  const messages: ChatMessage[] = []
+  const pending: Array<{ message: ChatMessage; index: number }> = []
+  let assistantTurn = 0
+
+  const renderHistoryMessage = (message: ChatMessage, index: number): ChatMessage => {
+    if (card === undefined || message.role === 'system' || message.role === 'tool') return { ...message }
+    const placement = message.role === 'assistant' ? AI_OUTPUT_PLACEMENT : USER_INPUT_PLACEMENT
+    return {
+      ...message,
+      content: renderCharacterPromptView(
+        message.content,
+        regexCharacter(card),
+        placement,
+        history.length - 1 - index,
+        userName,
+      ),
+    }
+  }
+
+  for (const [index, message] of history.entries()) {
+    if (message.role !== 'assistant') {
+      pending.push({ message, index })
+      continue
+    }
+    assistantTurn += 1
+    const mode = decisions.get(assistantTurn) ?? 'drop'
+    if (mode === 'full') {
+      for (const item of pending) messages.push(renderHistoryMessage(item.message, item.index))
+      messages.push(renderHistoryMessage(message, index))
+    } else if (mode === 'summary') {
+      const summary = readSummary(assistantTurn)
+      if (summary) messages.push({ role: 'system', content: `[对话 ${assistantTurn} 摘要]\n${summary}` })
+    }
+    pending.length = 0
+  }
+  return messages
+}
+
+/**
  * Render worldbook matches as a markdown block, sorted by (order asc,
  * weight desc). 2.1 already sorts, this re-sorts defensively in case the
  * upstream ordering ever drifts.
@@ -367,7 +422,7 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     const charName = input.character.name
     const macro = (text: string): string =>
       substituteUserCharMacros(substituteMvuMacros(renderEjs(ctx, text), statData), userName, charName)
-    const contextBlock = buildContextBlock(
+    const contextBlockFallback = buildContextBlock(
       input.contextSegmentation,
       history,
       ctx.sessionId,
@@ -376,6 +431,24 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
       input.character,
       userName ?? undefined,
     )
+    // The session already contains the just-appended user turn. Do not send
+    // it once as history and once as the current generation input.
+    const historyBeforeCurrent = history.at(-1)?.role === 'user'
+      && history.at(-1)?.content === input.userInput
+      ? history.slice(0, -1)
+      : history
+    const contextMessages = buildContextMessages(
+      input.contextSegmentation,
+      historyBeforeCurrent,
+      () => undefined,
+      input.character,
+      userName ?? undefined,
+    )
+    // Keep custom response templates informative while avoiding duplicate
+    // history: selected turns now travel as real chat messages below.
+    const contextBlock = contextMessages.length > 0
+      ? '(相关历史已按 ST chatHistory 消息层注入)'
+      : contextBlockFallback
     const resolvedWorldbookMatches = input.worldbook.matches.map(match => ({
       ...match,
       content: renderEjs(ctx, match.content),
@@ -481,6 +554,7 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     //    one existing response call; it never creates a second LLM stage.
     const baseMessages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
+      ...contextMessages,
       { role: 'user', content: promptUserInput },
     ]
     const promptTemplateMessages = applyPromptTemplateInjections(

@@ -293,9 +293,24 @@ export interface TavernUninjectPromptsMutationRequest {
   readonly ids: readonly string[]
 }
 
+/** Browser result of evaluating official function-valued prompt filters. */
+export interface TavernInjectionFilterUpdate {
+  readonly scriptId: string
+  readonly promptId: string
+  readonly enabled: boolean
+}
+
+/** Browser request applying the current generation's filter snapshot. */
+export interface TavernUpdateInjectionFiltersMutationRequest {
+  readonly format: 0
+  readonly operation: 'update-injection-filters'
+  readonly filters: readonly TavernInjectionFilterUpdate[]
+}
+
 export type TavernInjectionMutationRequest = TavernReplaceInjectionMutationRequest
   | TavernInjectPromptsMutationRequest
   | TavernUninjectPromptsMutationRequest
+  | TavernUpdateInjectionFiltersMutationRequest
 
 /** One validated mutation sent by an isolated Tavern Helper script. */
 export type TavernHelperMutationRequest = TavernHelperVariableMutationRequest | TavernWorldbookMutationRequest
@@ -873,6 +888,30 @@ export function uninjectPrompts(
   }
 }
 
+/** Apply one generation's evaluated function filters without replacing prompts. */
+export function updateTavernInjectedPromptFilters(
+  state: TavernHelperState,
+  filters: readonly TavernInjectionFilterUpdate[],
+): TavernHelperState {
+  if (filters.length === 0 || state.injectedPrompts === undefined) return state
+  const updates = new Map(filters.map(filter => [`${filter.scriptId}\u0000${filter.promptId}`, filter.enabled] as const))
+  let changed = false
+  const injectedPrompts = state.injectedPrompts.map(prompt => {
+    const enabled = updates.get(`${prompt.scriptId}\u0000${prompt.id}`)
+    if (enabled === undefined || prompt.filter === enabled) return prompt
+    changed = true
+    return { ...prompt, filter: enabled }
+  })
+  if (!changed) return state
+  const first = filters[0]
+  return {
+    ...state,
+    revision: state.revision + 1,
+    injectedPrompts,
+    lastMutation: { scope: 'injection', ...(first?.scriptId === undefined ? {} : { scriptId: first.scriptId }) },
+  }
+}
+
 function sortInjectedPrompts(prompts: readonly TavernInjectedPrompt[]): readonly TavernInjectedPrompt[] {
   return [...prompts].sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
 }
@@ -1072,6 +1111,18 @@ export function parseTavernHelperMutationRequest(raw: string): TavernHelperMutat
   if (value.format === 0 && value.operation === 'uninject-prompts') {
     return { format: 0, operation: value.operation, ids: stringArray(value.ids, 'Tavern Helper injected prompt ids') }
   }
+  if (value.format === 0 && value.operation === 'update-injection-filters') {
+    if (!Array.isArray(value.filters)) throw new Error('update-injection-filters requires filters')
+    const filters = value.filters.map((raw, index) => {
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new Error(`injection filter ${index} is invalid`)
+      const item = raw as Record<string, unknown>
+      if (typeof item.scriptId !== 'string' || item.scriptId.trim() === '') throw new Error(`injection filter ${index} scriptId is invalid`)
+      if (typeof item.promptId !== 'string' || item.promptId.trim() === '') throw new Error(`injection filter ${index} promptId is invalid`)
+      if (typeof item.enabled !== 'boolean') throw new Error(`injection filter ${index} enabled is invalid`)
+      return { scriptId: item.scriptId.trim(), promptId: item.promptId.trim(), enabled: item.enabled }
+    })
+    return { format: 0, operation: value.operation, filters }
+  }
   if (value.format !== 0 || (value.scope !== 'global' && value.scope !== 'preset'
     && value.scope !== 'character' && value.scope !== 'chat' && value.scope !== 'message'
     && value.scope !== 'script' && value.scope !== 'extension')) {
@@ -1140,6 +1191,9 @@ export function applyTavernHelperMutation(
     }
     if (request.operation === 'uninject-prompts') {
       return uninjectPrompts(state, request.ids)
+    }
+    if (request.operation === 'update-injection-filters') {
+      return updateTavernInjectedPromptFilters(state, request.filters)
     }
     if (request.operation === 'replace-script-injections') {
       if (!(request.scriptId in state.scripts)) throw new Error('Tavern Helper injected prompts have an unknown scriptId')

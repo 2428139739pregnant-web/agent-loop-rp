@@ -19,6 +19,8 @@
 - 对齐 `TavernHelper` 世界书方法的官方参数形状：角色卡绑定使用 `(characterName, { primary, additional })`，聊天书绑定使用 `(chatName, worldbookName)`，并补齐 `replaceWorldbook` 的 canonical mutation bridge。
 - 将当前已实现的聊天、世界书、注入、变量和脚本树能力同步挂到 `window.TavernHelper`，不再只有同名全局函数，减少官方脚本因调用入口不同而失配。
 - 补齐角色卡 iframe 的 Tavern Helper/ST 事件生命周期桥：修正 `tavern_events` 官方事件名，并转发聊天切换、消息发送/编辑/删除/切换、生成开始/结束/停止、角色消息渲染和世界书更新事件；事件参数按 SillyTavern 的消息索引形状传递，`getCurrentChatId()` 改为当前应用会话 ID。
+- 对齐 Tavern Helper 函数式注入过滤器：在每次生成前由卡片 iframe 本地执行 `filter`，宿主只提交本轮的布尔快照，不增加 LLM 调用，并支持卡片刷新/卸载时安全结束握手。
+- 对齐 ST chatHistory 的消息层：上下文 agent 选中的历史按真实 `user`/`assistant` 消息注入 response 请求，当前用户输入不会重复注入；未选中或无摘要的轮次继续丢弃。
 - 世界书激活支持条目级 `scanDepth`、累计递归缓冲、`exclude_recursion`、`prevent_recursion` 和 `delay_until_recursion`，并把角色卡/独立世界书字段映射到执行层。
 - 按 SillyTavern 消息计数接入世界书 `sticky`、`cooldown`、`delay`；定时效果按会话持久化，重 roll 不推进计数，分支回退会清理未来状态。
 - 接入 SillyTavern 世界书包含组：贯通 `group`、`groupOverride`、`groupWeight`、`useGroupScoring`，按 sticky 优先、覆盖优先、评分和加权选择在本地收尾，避免让 LLM 决定组内互斥关系。

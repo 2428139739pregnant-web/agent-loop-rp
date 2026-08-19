@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import {
   buildConstantWorldbookBlocks,
   buildContextBlock,
+  buildContextMessages,
   buildWorldbookBlock,
   constantWorldbookDoc,
   renderTemplate,
@@ -137,6 +138,24 @@ test('buildContextBlock numbers segments by assistant turns only', () => {
   const seg: ContextSegmentOutput = { segments: [{ id: 1, mode: 'full' }] }
   const out = buildContextBlock(seg, history, 'sid', () => undefined)
   assert.ok(out.includes('A1'))
+})
+
+test('buildContextMessages preserves ST user/assistant roles and omits dropped turns', () => {
+  const history: ChatMessage[] = [
+    { role: 'user', content: 'u1' },
+    { role: 'assistant', content: 'A1' },
+    { role: 'user', content: 'u2' },
+    { role: 'assistant', content: 'A2' },
+  ]
+  const messages = buildContextMessages(
+    { segments: [{ id: 1, mode: 'full' }, { id: 2, mode: 'drop' }] },
+    history,
+    () => undefined,
+  )
+  assert.deepEqual(messages.map(message => [message.role, message.content]), [
+    ['user', 'u1'],
+    ['assistant', 'A1'],
+  ])
 })
 
 // ─── responseAgent.run (integration) ───────────────────────────────────────
@@ -298,6 +317,39 @@ test('responseAgent applies plugin prompt injections in the same single response
   assert.equal(calls, 1)
   assert.equal(captured[0]?.content, 'SPECIAL')
   assert.equal(captured.at(-1)?.role, 'user')
+})
+
+test('responseAgent sends selected context as a real chatHistory message layer', async () => {
+  let captured: ChatMessage[] = []
+  const provider: LLMProvider = {
+    name: 'spy',
+    async chat(messages) {
+      captured = messages
+      return { content: 'r' }
+    },
+  }
+  const ctx = makeCtx({
+    provider,
+    history: [
+      { role: 'user', content: 'old user' },
+      { role: 'assistant', content: 'old assistant' },
+      { role: 'user', content: 'current' },
+    ],
+  })
+  await responseAgent.run({
+    intent: makeIntent(),
+    worldbook: { matches: [] },
+    contextSegmentation: { segments: [{ id: 1, mode: 'full' }] },
+    userInput: 'current',
+    character: makeCharacter(),
+  }, ctx)
+  assert.deepEqual(captured.map(message => [message.role, message.content]), [
+    ['system', captured[0]?.content],
+    ['user', 'old user'],
+    ['assistant', 'old assistant'],
+    ['user', 'current'],
+  ])
+  assert.equal(captured.filter(message => message.content === 'current').length, 1)
 })
 
 test('responseAgent.run sets usedWorldbook when matches non-empty', async () => {

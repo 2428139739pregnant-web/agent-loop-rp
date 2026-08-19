@@ -1393,6 +1393,7 @@
   const __on=(type,fn,once=false)=>{const key=String(type);const item={fn,once};const set=__listeners.get(key)||new Set();set.add(item);__listeners.set(key,set);return ()=>set.delete(item);};
   const __post=(type,payload={})=>{try{window.parent.postMessage({type,id:__frameId,...payload},'*');}catch{} };
   const __rpcPending=new Map();let __rpcSeq=0;
+  const __injectionFilters=new Map();
   const __rpc=(method,payload={})=>new Promise((resolve,reject)=>{const requestId=__frameId+'-rpc-'+(++__rpcSeq);const timer=setTimeout(()=>{__rpcPending.delete(requestId);reject(new Error('Tavern Helper host RPC timed out: '+method));},15000);__rpcPending.set(requestId,{resolve,reject,timer});__post('agent-rp-card-rpc',{requestId,method,payload:__clone(payload)});});
   const __serializeError=error=>({name:String(error?.name||'Error'),message:String(error?.message||error||''),stack:String(error?.stack||'').slice(0,4000)});
   window.addEventListener('error',event=>{try{__post('agent-rp-card-script-error',{error:__serializeError(event.error||event.message),source:String(event.filename||''),line:Number(event.lineno||0),column:Number(event.colno||0)});}catch{} });
@@ -1610,25 +1611,36 @@
     if(typeof normalized.id!=='string'||normalized.id.trim()==='')return null;
     normalized.id=normalized.id.trim();
     if(typeof normalized.filter==='function'){
-      try{
-        const result=normalized.filter();
-        // The official filter may be async. A function cannot cross the
-        // JSON/RPC boundary; preserve synchronous false as a safe snapshot
-        // and leave async/true filters enabled for the host selection lane.
-        if(typeof result==='boolean')normalized.filter=result;
-        else delete normalized.filter;
-      }catch{normalized.filter=false;}
+      const scriptId=__currentScriptId();
+      __injectionFilters.set(scriptId+'\u0000'+normalized.id,{scriptId,promptId:normalized.id,filter:normalized.filter});
+      // Function-valued filters are evaluated at the same generation
+      // boundary as Tavern Helper. They never cross the JSON/RPC bridge.
+      delete normalized.filter;
     }
     return normalized;
   };
+  const __removeInjectionFilters=(ids,owner=__currentScriptId())=>{
+    const scriptId=String(owner||__frameId);
+    for(const id of ids)__injectionFilters.delete(scriptId+'\u0000'+id);
+  };
+  const __evaluateInjectionFilters=async()=>{
+    const filters=[];
+    for(const item of __injectionFilters.values()){
+      let enabled=false;
+      try{enabled=Boolean(await item.filter());}catch{enabled=false;}
+      filters.push({scriptId:item.scriptId,promptId:item.promptId,enabled});
+    }
+    __post('agent-rp-card-injection-filter-result',{hasFilters:__injectionFilters.size>0,filters});
+  };
   const __injectPrompts=(prompts,options={})=>{
+    const scriptId=__currentScriptId();
     const normalized=(Array.isArray(prompts)?prompts:[]).map(__normalizeInjectionPrompt).filter(Boolean);
     const ids=normalized.map(prompt=>prompt.id);
-    const payload={format:0,operation:'inject-prompts',scriptId:__currentScriptId(),prompts:__clone(normalized),...(typeof options?.once==='boolean'?{once:options.once}:{})};
+    const payload={format:0,operation:'inject-prompts',scriptId,prompts:__clone(normalized),...(typeof options?.once==='boolean'?{once:options.once}:{})};
     void __rpc('tavern-helper-mutation',payload).catch(error=>console.error('[agent-rp Tavern Helper injectPrompts]',error));
-    return {uninject:()=>{if(!ids.length)return;void __rpc('tavern-helper-mutation',{format:0,operation:'uninject-prompts',ids}).catch(error=>console.error('[agent-rp Tavern Helper uninjectPrompts]',error));}};
+    return {uninject:()=>{if(!ids.length)return;__removeInjectionFilters(ids,scriptId);void __rpc('tavern-helper-mutation',{format:0,operation:'uninject-prompts',ids}).catch(error=>console.error('[agent-rp Tavern Helper uninjectPrompts]',error));}};
   };
-  const __uninjectPrompts=ids=>{const normalized=(Array.isArray(ids)?ids:[]).map(String).filter(Boolean);if(!normalized.length)return;void __rpc('tavern-helper-mutation',{format:0,operation:'uninject-prompts',ids:normalized}).catch(error=>console.error('[agent-rp Tavern Helper uninjectPrompts]',error));};
+  const __uninjectPrompts=ids=>{const normalized=(Array.isArray(ids)?ids:[]).map(String).filter(Boolean);if(!normalized.length)return;__removeInjectionFilters(normalized);void __rpc('tavern-helper-mutation',{format:0,operation:'uninject-prompts',ids:normalized}).catch(error=>console.error('[agent-rp Tavern Helper uninjectPrompts]',error));};
   window.injectPrompts=__injectPrompts;
   window.uninjectPrompts=__uninjectPrompts;
   window.getLocaleMessage=(key)=>String(key??'');
@@ -1697,6 +1709,10 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
     if(event.data.type==='agent-rp-card-host-event'){
       const eventName=String(event.data.eventName||'');
       if(eventName)__emit(eventName,...(Array.isArray(event.data.args)?event.data.args:[]));
+      return;
+    }
+    if(event.data.type==='agent-rp-card-prepare-generation'){
+      void __evaluateInjectionFilters();
       return;
     }
     if(event.data.type==='agent-rp-card-variables'){__replace(event.data.variables||{stat_data:{}});}
@@ -1786,6 +1802,68 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       for (const frame of document.querySelectorAll('iframe.msg-card-html-frame')) {
         if (expectedSession && frame.dataset.sessionId !== expectedSession) continue
         postCardHostEvent(frame, eventName, args)
+      }
+    }
+
+    async function prepareCardHostInjections(sessionId) {
+      const expectedSession = sessionId === null || sessionId === undefined ? '' : String(sessionId)
+      const frames = [...document.querySelectorAll('iframe.msg-card-html-frame')]
+        .filter(frame => !expectedSession || frame.dataset.sessionId === expectedSession)
+        .filter(frame => frame.contentWindow && frame.id)
+      if (frames.length === 0) return
+      const results = await new Promise((resolve) => {
+        const expected = new Set(frames.map(frame => frame.id))
+        const filters = new Map()
+        let hasFunctionFilter = false
+        let timer
+        const finish = () => {
+          clearTimeout(timer)
+          window.removeEventListener('message', onMessage)
+          resolve({ hasFunctionFilter, filters: [...filters.values()] })
+        }
+        const onMessage = (event) => {
+          if (!event.source || !event.data || event.data.type !== 'agent-rp-card-injection-filter-result') return
+          if (!expected.has(event.data.id)) return
+          const frame = frames.find(item => item.id === event.data.id)
+          if (frame && event.source !== frame.contentWindow) return
+          expected.delete(event.data.id)
+          hasFunctionFilter = hasFunctionFilter || event.data.hasFilters === true
+          for (const item of Array.isArray(event.data.filters) ? event.data.filters : []) {
+            if (typeof item?.scriptId !== 'string' || typeof item?.promptId !== 'string' || typeof item?.enabled !== 'boolean') continue
+            filters.set(`${item.scriptId}\u0000${item.promptId}`, {
+              scriptId: item.scriptId,
+              promptId: item.promptId,
+              enabled: item.enabled,
+            })
+          }
+          // A frame with no local filter answers synchronously. Waiting for
+          // all loaded frames still adds no material delay, while avoiding a
+          // race where a later floor owns the actual function-valued filter.
+          if (expected.size === 0) finish()
+        }
+        window.addEventListener('message', onMessage)
+        timer = setTimeout(finish, 500)
+        for (const frame of frames) {
+          try {
+            frame.contentWindow.postMessage({ type: 'agent-rp-card-prepare-generation', id: frame.id }, '*')
+          } catch {
+            // A card iframe can disappear between the query and the postMessage.
+            // Treat it as having no local filter instead of leaving the handshake
+            // waiting for the timeout.
+            expected.delete(frame.id)
+          }
+        }
+        if (expected.size === 0) finish()
+      })
+      if (!results?.hasFunctionFilter || !Array.isArray(results.filters) || results.filters.length === 0) return
+      try {
+        await apiPut(`/api/sessions/${encodeURIComponent(String(sessionId))}/tavern-helper`, {
+          format: 0,
+          operation: 'update-injection-filters',
+          filters: results.filters,
+        })
+      } catch (error) {
+        console.warn('[agent-rp Tavern Helper filter]', error)
       }
     }
 
@@ -3483,6 +3561,10 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           lifecycleFinished = true
           broadcastCardHostEvent(sessionId, 'generation_stopped', generationType)
         }
+        // Evaluate Tavern Helper's function-valued filters at the same
+        // generation boundary as ST. This is a local iframe handshake, not
+        // an extra LLM request; failures leave the durable snapshot intact.
+        try { await prepareCardHostInjections(sessionId) } catch (error) { console.warn('[agent-rp Tavern Helper filter]', error) }
         // Match SillyTavern's host lifecycle. The actual prompt pipeline still
         // runs on the server, but card extensions must see the same ordering
         // before their generation hooks are evaluated.
