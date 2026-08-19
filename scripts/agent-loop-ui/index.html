@@ -1774,7 +1774,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
   window.Mvu=Object.assign({},__parent?.Mvu||{}, {events:__events,getMvuData:option=>__scopeValue(option),getVariable:window.getVariable,replaceMvuData:(value,option)=>__replaceVariables(value,option),isDuringExtraAnalysis:()=>false});
   window.TavernHelper=Object.assign({},__parent?.TavernHelper||{}, {getAllVariables:()=>__getVariables({type:'chat'}),getVariable:(path,fallback)=>__get(__getVariables({type:'chat'}),path,fallback),getVariables:__getVariables,replaceVariables:__replaceVariables,updateVariablesWith:__updateVariablesWith,insertOrAssignVariables:__insertOrAssignVariables,insertVariables:__insertVariables,deleteVariable:__deleteVariable,getScriptTrees:__getScriptTrees,replaceScriptTrees:__replaceScriptTrees,updateScriptTreesWith:__updateScriptTreesWith,injectPrompts:__injectPrompts,uninjectPrompts:__uninjectPrompts,getChatMessages:window.getChatMessages,setChatMessages:window.setChatMessages,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,rebindGlobalWorldbooks:window.rebindGlobalWorldbooks,getCharWorldbookNames:(_characterName='current')=>window.getCharWorldbookNames(),rebindCharWorldbooks:(_characterName='current',books={})=>window.rebindCharWorldbooks(books?.primary??null,Array.isArray(books?.additional)?books.additional:[]),getChatWorldbookName:(_chatName='current')=>window.getChatWorldbookName(),rebindChatWorldbook:(_chatName='current',name=null)=>window.rebindChatWorldbook(name),getWorldbook:window.getWorldbook,replaceWorldbook:window.replaceWorldbook,updateWorldbookWith:window.updateWorldbookWith,getTavernHelperVersion:window.getTavernHelperVersion,getLastMessageId:window.getLastMessageId,eventOn:window.eventOn,eventOnce:window.eventOnce,eventMakeFirst:window.eventMakeFirst,eventMakeLast:window.eventMakeLast,eventRemoveListener:window.eventRemoveListener,eventClearEvent:window.eventClearEvent,eventClearListener:window.eventClearListener,eventClearAll:window.eventClearAll,eventEmit:window.eventEmit,waitGlobalInitialized:window.waitGlobalInitialized});
   const __stEventSource={on:window.eventOn,once:window.eventOnce,makeFirst:window.eventMakeFirst,makeLast:window.eventMakeLast,removeListener:window.eventRemoveListener,emit:window.eventEmit,emitAndWait:window.eventEmit};
-  const __stContext={chat:[],characters:[],name1:'',name2:'',characterId:0,groupId:null,chatId:__chatId,eventSource:__stEventSource,eventTypes:window.tavern_events,extensionPrompts:{},chatMetadata:{},maxContext:0,getCurrentChatId:()=>__chatId,getChatMessages:window.getChatMessages,getWorldbook:window.getWorldbook,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),saveChat:async()=>undefined,saveSettingsDebounced:async()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined};
+  const __stContext={chat:[],characters:[],name1:'',name2:'',characterId:0,groupId:null,chatId:__chatId,eventSource:__stEventSource,eventTypes:window.tavern_events,extensionPrompts:{},chatMetadata:{},maxContext:0,getCurrentChatId:()=>__chatId,getCurrentMessageId:window.getCurrentMessageId,getLastMessageId:window.getLastMessageId,getChatMessages:window.getChatMessages,getVariables:window.getVariables,getVariable:window.getVariable,replaceVariables:window.replaceVariables,updateChatMetadata:(values)=>Object.assign(__stContext.chatMetadata,values||{}),getWorldbook:window.getWorldbook,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,injectPrompts:window.injectPrompts,uninjectPrompts:window.uninjectPrompts,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),saveChat:async()=>undefined,saveSettingsDebounced:async()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined};
   window.SillyTavern=Object.assign({},__parent?.SillyTavern||{}, {eventSource:__stEventSource,eventTypes:window.tavern_events,getContext:()=>__stContext,chat:__stContext.chat,characters:__stContext.characters,characterId:0,name2:'',extensionSettings:{},chatCompletionSettings:{},getCurrentChatId:()=>__chatId,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),saveChat:async()=>undefined,saveSettingsDebounced:async()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined});
   const __wrap=items=>{const list=Array.from(items||[]),api={length:list.length};list.forEach((el,i)=>api[i]=el);api.toArray=()=>list.slice();api.get=index=>index===undefined?list.slice():list[index];api.each=fn=>{list.forEach((el,i)=>fn.call(el,i,el));return api;};api.clone=()=>__wrap(list.map(el=>el.cloneNode?.(true)).filter(Boolean));api.appendTo=target=>{const destination=typeof target==='string'?__query(target):target?.length!==undefined?target:__wrap([target]);destination?.each?.((_i,el)=>list.forEach(item=>el.append(item)));return api;};api.find=sel=>__wrap(list.flatMap(el=>[...el.querySelectorAll(sel)]));api.parent=()=>__wrap(list.map(el=>el.parentElement).filter(Boolean));api.siblings=()=>__wrap(list.flatMap(el=>el.parentElement?[...el.parentElement.children].filter(x=>x!==el):[]));api.addClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.add(x)));api.removeClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.remove(x)));api.toggleClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.toggle(x)));api.hasClass=v=>!!list[0]?.classList.contains(String(v||''));api.html=v=>v===undefined?(list[0]?.innerHTML||''):api.each((_i,el)=>el.innerHTML=String(v));api.text=v=>v===undefined?(list[0]?.textContent||''):api.each((_i,el)=>el.textContent=String(v));api.val=v=>v===undefined?(list[0]?.value||''):api.each((_i,el)=>el.value=String(v));api.attr=(k,v)=>v===undefined?list[0]?.getAttribute(k):api.each((_i,el)=>el.setAttribute(k,String(v)));api.data=(k,v)=>v===undefined?list[0]?.dataset?.[k]:api.each((_i,el)=>el.dataset[k]=String(v));api.empty=()=>api.each((_i,el)=>el.replaceChildren());api.append=v=>api.each((_i,el)=>typeof v==='string'?el.insertAdjacentHTML('beforeend',v):v?.nodeType&&el.append(v));api.css=(k,v)=>v===undefined?(list[0]?getComputedStyle(list[0])[k]:undefined):api.each((_i,el)=>el.style[k]=String(v));api.show=()=>api.each((_i,el)=>el.style.display='');api.hide=()=>api.each((_i,el)=>el.style.display='none');api.on=(type,fn)=>api.each((_i,el)=>el.addEventListener(type,fn));api.off=(type,fn)=>api.each((_i,el)=>el.removeEventListener(type,fn));api.trigger=type=>api.each((_i,el)=>el.dispatchEvent(new Event(type,{bubbles:true})));api.sortable=()=>api;return api;};
   const __query=value=>{if(typeof value==='function'){if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',value,{once:true});else queueMicrotask(value);return __wrap([]);}if(value?.nodeType)return __wrap([value]);if(Array.isArray(value))return __wrap(value);try{return __wrap(document.querySelectorAll(String(value||'')));}catch{return __wrap([]);}};
@@ -1802,6 +1802,14 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
     }
     if(event.data.type==='agent-rp-card-variables'){__replace(event.data.variables||{stat_data:{}});}
     if(event.data.type==='agent-rp-card-helper-state'){__applyScopeSnapshot(event.data.scopes,event.data.mvuState,event.data.scripts);}
+    if(event.data.type==='agent-rp-card-context'){
+      const context=event.data.context&&typeof event.data.context==='object'?event.data.context:{};
+      for(const key of ['name1','name2','characterId','chatId','chatMetadata','extensionPrompts','character'])if(context[key]!==undefined)__stContext[key]=__clone(context[key]);
+      if(Array.isArray(context.chat)){__stContext.chat=__clone(context.chat);window.SillyTavern.chat=__stContext.chat;}
+      if(Array.isArray(context.characters)){__stContext.characters=__clone(context.characters);window.SillyTavern.characters=__stContext.characters;}
+      window.SillyTavern.name1=__stContext.name1||'';window.SillyTavern.name2=__stContext.name2||'';window.SillyTavern.characterId=__stContext.characterId||0;
+      return;
+    }
     if(event.data.type==='agent-rp-card-theme'&&event.data.theme)document.documentElement.dataset.theme=event.data.theme;
   });
   __emit('mag_variable_initialized',__variables);
@@ -1979,7 +1987,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       }
     }
 
-    function CardHtmlSurface({ source, mvuState, character, sessionId = null, surfaceKind = 'content', onVariablesChange = null }) {
+    function CardHtmlSurface({ source, mvuState, character, characterId = '', historyLength = 0, sessionId = null, surfaceKind = 'content', userName = '用户', onVariablesChange = null }) {
       const frameRef = useRef(null)
       const frameId = useRef(`card-frame-${Math.random().toString(36).slice(2)}`)
       const sessionIdRef = useRef(sessionId)
@@ -2003,14 +2011,52 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
         frame.contentWindow.postMessage({ type: 'agent-rp-card-theme', id: frameId.current, theme: document.documentElement.dataset.theme || '' }, '*')
         const activeSessionId = sessionIdRef.current
         if (activeSessionId) {
-          void apiGet(`/api/sessions/${encodeURIComponent(activeSessionId)}/tavern-helper`).then((snapshot) => {
+          void Promise.all([
+            apiGet(`/api/history?sessionId=${encodeURIComponent(activeSessionId)}&raw=1`),
+            apiGet(`/api/sessions/${encodeURIComponent(activeSessionId)}/tavern-helper`),
+          ]).then(([historySnapshot, helperSnapshot]) => {
+            const messages = (historySnapshot.history || []).map((message, index) => ({
+              message_id: index,
+              name: message.role === 'user' ? userName : message.role === 'assistant' ? (character?.name || 'assistant') : 'system',
+              role: message.role || 'assistant',
+              is_user: message.role === 'user',
+              is_system: message.role === 'system',
+              mes: String(message.content || ''),
+              message: String(message.content || ''),
+              content: String(message.content || ''),
+            }))
+            const helperState = helperSnapshot.tavernHelperState || {}
+            const characterProjection = {
+              name: character?.name || '',
+              description: character?.persona || '',
+              personality: character?.style || '',
+              scenario: character?.worldview || '',
+            }
+            frame.contentWindow?.postMessage({
+              type: 'agent-rp-card-context',
+              id: frameId.current,
+              context: {
+                chat: messages,
+                characters: [characterProjection],
+                character: characterProjection,
+                characterId: characterId || character?.id || '',
+                name1: userName,
+                name2: character?.name || '',
+                chatId: activeSessionId,
+                chatMetadata: {},
+                extensionPrompts: Object.fromEntries((Array.isArray(helperState.injectedPrompts) ? helperState.injectedPrompts : []).map((prompt) => [
+                  prompt.id,
+                  { value: prompt.content, position: prompt.position === 'none' ? -1 : 1, depth: prompt.depth || 0, scan: prompt.shouldScan !== false, role: prompt.role === 'system' ? 0 : prompt.role === 'user' ? 1 : 2, filter: prompt.filter !== false },
+                ])),
+              },
+            }, '*')
             frame.contentWindow?.postMessage({
               type: 'agent-rp-card-helper-state',
               id: frameId.current,
-              scopes: snapshot.variableScopes || snapshot.tavernHelperState?.scopes || {},
-              scripts: snapshot.tavernHelperState?.scripts || {},
-              scriptTrees: snapshot.tavernHelperState?.scriptTrees || {},
-              mvuState: snapshot.mvuState,
+              scopes: helperSnapshot.variableScopes || helperSnapshot.tavernHelperState?.scopes || {},
+              scripts: helperSnapshot.tavernHelperState?.scripts || {},
+              scriptTrees: helperSnapshot.tavernHelperState?.scriptTrees || {},
+              mvuState: helperSnapshot.mvuState,
             }, '*')
           }).catch(() => { /* a card may render before a session is available */ })
         }
@@ -2052,10 +2098,14 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
             const runRpc = async () => {
               const endpoint = `/api/sessions/${encodeURIComponent(activeSessionId)}/tavern-helper`
               if (data.method === 'get-chat-messages') {
-                const result = await apiGet(`/api/history?sessionId=${encodeURIComponent(activeSessionId)}`)
+                const result = await apiGet(`/api/history?sessionId=${encodeURIComponent(activeSessionId)}&raw=1`)
                 return (result.history || []).map((message, index) => ({
                   message_id: index,
+                  name: message.role === 'user' ? userName : message.role === 'assistant' ? (character?.name || 'assistant') : 'system',
                   role: message.role || 'assistant',
+                  is_user: message.role === 'user',
+                  is_system: message.role === 'system',
+                  mes: String(message.content || ''),
                   message: String(message.content || ''),
                   content: String(message.content || ''),
                 }))
@@ -2119,7 +2169,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       }, [])
       useEffect(() => {
         syncFrameState()
-      }, [mvuState])
+      }, [mvuState, userName, character, characterId, historyLength, sessionId])
       return h('iframe', {
         ref: frameRef,
         id: frameId.current,
@@ -2212,13 +2262,13 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
      * 角色卡的 markdownOnly 脚本只影响显示，promptOnly 脚本不会污染显示；
      * 普通 Markdown 继续走 marked + 白名单净化，角色卡前端进入独立
      * iframe；iframe 只负责自身排版，滚动仍由外层 .chat 统一负责。 */
-    function MessageContent({ content, role, character, sessionId = null, depth = 0, userName = '用户', mvuState = null, onVariablesChange = null }) {
+    function MessageContent({ content, role, character, characterId = '', historyLength = 0, sessionId = null, depth = 0, userName = '用户', mvuState = null, onVariablesChange = null }) {
       const processed = applyDisplayRegex(content, role === 'user' ? 1 : 2, character, depth, userName)
       const segments = compileDisplaySegments(processed)
       const rendered = segments.flatMap((segment, index) => {
         if (segment.kind === 'html') {
           return [h('div', { key: `html-surface-${index}`, className: 'msg-html-surface', 'data-surface-kind': 'content' },
-            h(CardHtmlSurface, { source: segment.source, mvuState, character, sessionId, surfaceKind: 'content', onVariablesChange }),
+            h(CardHtmlSurface, { source: segment.source, mvuState, character, characterId, historyLength, sessionId, userName, surfaceKind: 'content', onVariablesChange }),
           )]
         }
         const markdownHtml = marked.parse(segment.source, { gfm: true, breaks: true })
@@ -2234,7 +2284,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
      * corrected without losing them to the renderer.
      */
     function MessageFloor({
-      message, index, total, character, sessionId, userName, mvuState, onVariablesChange,
+      message, index, total, character, characterId, sessionId, userName, mvuState, onVariablesChange,
       disabled = false, onReroll = null, onSwipe = null, onSaveEdit, onDelete,
     }) {
       const [collapsed, setCollapsed] = useState(false)
@@ -2323,7 +2373,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           : collapsed
             ? h('div', { className: 'floor-collapsed-body' }, preview || '(空消息)')
             : h(MessageContent, {
-                content: message.content, role: message.role, character,
+                content: message.content, role: message.role, character, characterId, historyLength: total,
                 sessionId, depth: Math.max(0, total - index - 1), userName, mvuState, onVariablesChange,
               }),
       )
@@ -4170,7 +4220,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                 : history.map((m, i) => h(MessageFloor, {
                     key: `${m.role}-${i}`,
                     message: m, index: i, total: history.length,
-                    character: currentCharacter, sessionId: currentSessionId, userName: currentUserName, mvuState,
+                    character: currentCharacter, characterId: currentCharacterId, sessionId: currentSessionId, userName: currentUserName, mvuState,
                     onVariablesChange: onCardVariablesChange,
                     disabled: currentSessionId === null || loading,
                     onReroll: i === history.length - 1 && m.role === 'assistant' ? reroll : null,

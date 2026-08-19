@@ -238,6 +238,35 @@ test('event lifecycle waits for async listeners and exposes ST ordering controls
   assert.equal(frame.window.iframe_events.GENERATION_STARTED, 'js_generation_started')
 })
 
+test('SillyTavern context projection updates chat, character and extension prompts', () => {
+  const frame = createFrame()
+  frame.window.dispatchEvent({
+    type: 'message',
+    source: frame.parent,
+    data: {
+      type: 'agent-rp-card-context',
+      id: 'frame-test',
+      context: {
+        chat: [{ message_id: 0, name: '用户', is_user: true, is_system: false, mes: '你好' }],
+        characters: [{ name: '角色', description: '设定' }],
+        name1: '用户',
+        name2: '角色',
+        chatId: 'session-1',
+        extensionPrompts: { injected: { value: '提示词', position: 1, depth: 0, scan: true, role: 0 } },
+      },
+    },
+  })
+
+  const context = frame.window.SillyTavern.getContext()
+  assert.equal(context.chatId, 'session-1')
+  assert.deepEqual(plain(context.chat), [{ message_id: 0, name: '用户', is_user: true, is_system: false, mes: '你好' }])
+  assert.deepEqual(plain(context.characters), [{ name: '角色', description: '设定' }])
+  assert.equal(context.name1, '用户')
+  assert.equal(context.name2, '角色')
+  assert.equal(context.extensionPrompts.injected.value, '提示词')
+  assert.equal(frame.window.SillyTavern.chat[0].mes, '你好')
+})
+
 test('function-valued injection filters are evaluated at generation preparation', async () => {
   const frame = createFrame()
   frame.window.__agentRpCurrentScriptId = 'script-filter'

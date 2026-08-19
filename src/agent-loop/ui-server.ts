@@ -2302,7 +2302,14 @@ async function handleHistory(state: AppState, req: IncomingMessage, res: ServerR
   if (!state.sessionRecords.has(sessionId)) {
     return sendError(res, 404, `session not found: ${sessionId}`)
   }
-  const history = displayHistory(state, sessionId, state.sessions.getHistory(sessionId))
+  const storedHistory = state.sessions.getHistory(sessionId)
+  // The UI default remains the rendered view, but Tavern Helper/SillyTavern
+  // context readers need the canonical stored `mes` text before display
+  // regexes and [RENDER] directives. This keeps script context separate from
+  // what the conversation surface happens to show.
+  const history = url.searchParams.get('raw') === '1'
+    ? storedHistory.map(message => ({ ...message }))
+    : displayHistory(state, sessionId, storedHistory)
   const record = state.sessionRecords.get(sessionId)
   const mvuState = record === undefined
     ? undefined
