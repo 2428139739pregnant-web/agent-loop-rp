@@ -425,6 +425,41 @@ async function awaitBrowserGenerationHook(
   })
 }
 
+/** Project the resolved World Info matches into the public ST event shape.
+ * The imported path is retained as a stable uid because this project merges
+ * card, external and Tavern Helper books into one session store. */
+function buildWorldInfoActivatedEventEntries(
+  matches: ReadonlyArray<{
+    path: string
+    order: number
+    weight: number
+    content: string
+    source?: string
+    position?: number
+    depth?: number
+    role?: 'system' | 'user' | 'assistant'
+  }>,
+): readonly Record<string, unknown>[] {
+  return matches.map((match) => {
+    const slash = match.path.lastIndexOf('/')
+    const world = slash > 0 ? match.path.slice(0, slash) : match.path
+    return {
+      world,
+      uid: match.path,
+      key: [],
+      keysecondary: [],
+      comment: match.path,
+      content: match.content,
+      order: match.order,
+      weight: match.weight,
+      ...(match.source === undefined ? {} : { source: match.source }),
+      ...(match.position === undefined ? {} : { position: match.position }),
+      ...(match.depth === undefined ? {} : { depth: match.depth }),
+      ...(match.role === undefined ? {} : { role: match.role }),
+    }
+  })
+}
+
 /** Mirrors `loop.ts` buildContext — local copy so we don't need to export it.
  *  macros( {{user}}/{{char}} 宏源)与 worldbookSettings(绿灯扫描深度)为
  *  2.1/3 的 ST 语义适配新增,可选参数。 */
@@ -2002,8 +2037,8 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     )
   }
 
-  const helperState = ensureSessionTavernHelperState(record)
-  const helperPromptSelection = selectTavernInjectedPrompts(helperState)
+  let helperState = ensureSessionTavernHelperState(record)
+  let helperPromptSelection = selectTavernInjectedPrompts(helperState)
 
   // Reroll keeps the original user turn and looks up the successful
   // generation's reusable artifacts before opening SSE. This survives a
@@ -2371,6 +2406,28 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     }
     if (wb === null) { clearPendingWorldbookActivations(); res.end(); return }
     if (ctxSegs === null) { clearPendingWorldbookActivations(); res.end(); return }
+
+    // SillyTavern exposes the resolved World Info set before the final prompt
+    // is sent. Let card scripts observe it (and, if needed, add a same-turn
+    // Tavern Helper injection) before responseAgent snapshots its prompt.
+    if (uiClient && (wb as { matches: unknown[] }).matches.length > 0) {
+      const activated = buildWorldInfoActivatedEventEntries(
+        (wb as { matches: Array<{
+          path: string
+          order: number
+          weight: number
+          content: string
+          source?: string
+          position?: number
+          depth?: number
+          role?: 'system' | 'user' | 'assistant'
+        }> }).matches,
+      )
+      await awaitBrowserGenerationHook(state, res, sessionId, 'world_info_activated', [activated])
+      const refreshedHelperState = state.sessionRecords.get(sessionId)?.tavernHelperState
+      if (refreshedHelperState !== undefined) helperState = refreshedHelperState
+      helperPromptSelection = selectTavernInjectedPrompts(helperState)
+    }
 
     // The response agent receives standalone blue-light entries through
     // agentCtx.worldbook and injects them into the final system prompt. Keep
