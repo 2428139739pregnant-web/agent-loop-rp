@@ -4278,17 +4278,19 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                 ? h('div', { className: 'msg system' },
                     currentSessionId ? '会话已就绪。输入消息开始聊天 (⌘/Ctrl+Enter 发送)。' :
                     (currentCharacterId ? '已选中角色。点击右上「新建会话」开始聊天。' : '打开左侧「角色」面板选择一个角色开始。'))
-                : history.map((m, i) => h(MessageFloor, {
-                    key: `${m.role}-${i}`,
-                    message: m, index: i, total: history.length,
-                    character: currentCharacter, characterId: currentCharacterId, sessionId: currentSessionId, userName: currentUserName, mvuState,
-                    onVariablesChange: onCardVariablesChange,
-                    disabled: currentSessionId === null || loading,
-                    onReroll: i === history.length - 1 && m.role === 'assistant' ? reroll : null,
-                    onSwipe: switchSwipe,
-                    onSaveEdit: saveMessageEdit,
-                    onDelete: deleteMessage,
-                  })),
+                : history.map((m, i) => m.is_hidden
+                  ? null
+                  : h(MessageFloor, {
+                      key: `${m.role}-${i}`,
+                      message: m, index: i, total: history.length,
+                      character: currentCharacter, characterId: currentCharacterId, sessionId: currentSessionId, userName: currentUserName, mvuState,
+                      onVariablesChange: onCardVariablesChange,
+                      disabled: currentSessionId === null || loading,
+                      onReroll: i === history.length - 1 && m.role === 'assistant' ? reroll : null,
+                      onSwipe: switchSwipe,
+                      onSaveEdit: saveMessageEdit,
+                      onDelete: deleteMessage,
+                    })),
             ),
             h('div', { className: 'composer' },
               chatGreetingSwitcher,
