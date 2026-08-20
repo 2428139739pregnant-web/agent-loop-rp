@@ -4,6 +4,8 @@
 
 ### 修复
 
+- 修正 ST World Info 位置映射：`2/3` 现在进入 Author's Note 前后，`5/6` 进入示例消息前后；角色卡与独立世界书的蓝灯、绿灯命中条目统一使用同一套位置语义。
+- 补齐酒馆助手 `chatMetadata` 桥接：支持 `SillyTavern.getContext().chatMetadata` 与 `updateChatMetadata(values, reset)`，并将更新持久化到当前会话。
 - 按酒馆助手官方消息接口修正楼层语义：`setChatMessages` 现在按 `message_id` 做局部 patch，不会因为只更新 `data`/`is_hidden` 而清空正文、角色名或 swipe；`getChatMessages` 按真实楼层号处理负数深度、`role`、`hide_state` 和 `include_swipes`，隐藏楼层也不会进入 response/worldbook 的模型提示词。
 - 卡片 iframe 内的聊天楼层变更现在会按 `refresh: none/affected/all` 回刷宿主对话区；隐藏楼层继续保留上下文边界但不渲染、不送入模型，避免状态栏/插件修改后外层楼层停留在旧快照。
 - 隐藏楼层现在保留在会话和原始消息 API 中，但不会被普通对话表面渲染；编辑/删除仍按原始楼层索引操作，避免隐藏楼层导致后续消息错位。

@@ -69,11 +69,11 @@ test('splitWorldbookMatches preserves all SillyTavern insertion positions', () =
   const buckets = splitWorldbookMatches([
     { path: 'before', order: 1, weight: 0, content: '0', position: 0 },
     { path: 'after', order: 2, weight: 0, content: '1', position: 1 },
-    { path: 'examples-before', order: 3, weight: 0, content: '2', position: 2 },
-    { path: 'examples-after', order: 4, weight: 0, content: '3', position: 3 },
+    { path: 'author-before', order: 3, weight: 0, content: '2', position: 2 },
+    { path: 'author-after', order: 4, weight: 0, content: '3', position: 3 },
     { path: 'depth', order: 5, weight: 0, content: '4', position: 4, depth: 2 },
-    { path: 'author-before', order: 6, weight: 0, content: '5', position: 5 },
-    { path: 'author-after', order: 7, weight: 0, content: '6', position: 6 },
+    { path: 'examples-before', order: 6, weight: 0, content: '5', position: 5 },
+    { path: 'examples-after', order: 7, weight: 0, content: '6', position: 6 },
     { path: 'outlet', order: 8, weight: 0, content: '7', position: 7 },
     { path: 'legacy', order: 9, weight: 0, content: 'legacy' },
   ])
@@ -496,11 +496,11 @@ test('responseAgent places standalone constant entries in their ST message-tree 
     match: () => [],
     getContent: () => undefined,
     list: () => [
-      { path: 'book/em-top', keywords: [], order: 2, weight: 0, content: 'EM_TOP', constant: true, position: 2 },
-      { path: 'book/em-bottom', keywords: [], order: 3, weight: 0, content: 'EM_BOTTOM', constant: true, position: 3 },
+      { path: 'book/em-top', keywords: [], order: 2, weight: 0, content: 'EM_TOP', constant: true, position: 5 },
+      { path: 'book/em-bottom', keywords: [], order: 3, weight: 0, content: 'EM_BOTTOM', constant: true, position: 6 },
       { path: 'book/depth', keywords: [], order: 4, weight: 0, content: 'DEPTH', constant: true, position: 4, depth: 6, role: 'user' as const },
-      { path: 'book/an-before', keywords: [], order: 5, weight: 0, content: 'AN_BEFORE', constant: true, position: 5 },
-      { path: 'book/an-after', keywords: [], order: 6, weight: 0, content: 'AN_AFTER', constant: true, position: 6 },
+      { path: 'book/an-before', keywords: [], order: 5, weight: 0, content: 'AN_BEFORE', constant: true, position: 2 },
+      { path: 'book/an-after', keywords: [], order: 6, weight: 0, content: 'AN_AFTER', constant: true, position: 3 },
       { path: 'book/outlet', keywords: [], order: 7, weight: 0, content: 'OUTLET', constant: true, position: 7 },
     ],
     },
@@ -814,11 +814,11 @@ test('buildConstantWorldbookBlocks keeps enabled constants only, sorted order DE
 test('buildConstantWorldbookBlocks preserves ST positions for the message tree', () => {
   const store = {
     list: () => [
-      { path: 'book/em-top', keywords: [], order: 2, weight: 0, content: 'EM_TOP', constant: true, position: 2 },
-      { path: 'book/em-bottom', keywords: [], order: 3, weight: 0, content: 'EM_BOTTOM', constant: true, position: 3 },
+      { path: 'book/em-top', keywords: [], order: 2, weight: 0, content: 'EM_TOP', constant: true, position: 5 },
+      { path: 'book/em-bottom', keywords: [], order: 3, weight: 0, content: 'EM_BOTTOM', constant: true, position: 6 },
       { path: 'book/depth', keywords: [], order: 4, weight: 0, content: 'DEPTH', constant: true, position: 4, depth: 6, role: 'user' as const },
-      { path: 'book/an-before', keywords: [], order: 5, weight: 0, content: 'AN_BEFORE', constant: true, position: 5 },
-      { path: 'book/an-after', keywords: [], order: 6, weight: 0, content: 'AN_AFTER', constant: true, position: 6 },
+      { path: 'book/an-before', keywords: [], order: 5, weight: 0, content: 'AN_BEFORE', constant: true, position: 2 },
+      { path: 'book/an-after', keywords: [], order: 6, weight: 0, content: 'AN_AFTER', constant: true, position: 3 },
       { path: 'book/outlet', keywords: [], order: 7, weight: 0, content: 'OUTLET', constant: true, position: 7 },
     ],
   }

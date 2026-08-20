@@ -187,11 +187,12 @@ function constantWorldbookPlacement(position: number | undefined): ConstantWorld
   switch (st) {
     case 0: return 'persona'
     case 1: return 'worldview'
-    case 2: return 'beforeExamples'
-    case 3: return 'afterExamples'
+    // ST's current enum is ANTop/ANBottom at 2/3 and EMTop/EMBottom at 5/6.
+    case 2: return 'beforeAuthorNote'
+    case 3: return 'afterAuthorNote'
     case 4: return 'atDepth'
-    case 5: return 'beforeAuthorNote'
-    case 6: return 'afterAuthorNote'
+    case 5: return 'beforeExamples'
+    case 6: return 'afterExamples'
     case 7: return 'outlet'
     default: return 'outlet'
   }
@@ -610,11 +611,13 @@ export function splitWorldbookMatches(
     switch (match.position) {
       case 0: buckets.beforeCharacter.push(match); break
       case 1: buckets.afterCharacter.push(match); break
-      case 2: buckets.beforeExamples.push(match); break
-      case 3: buckets.afterExamples.push(match); break
+      // Keep these aligned with world-info.js: ANTop/ANBottom are 2/3,
+      // while EMTop/EMBottom are 5/6.
+      case 2: buckets.beforeAuthorNote.push(match); break
+      case 3: buckets.afterAuthorNote.push(match); break
       case 4: buckets.atDepth.push(match); break
-      case 5: buckets.beforeAuthorNote.push(match); break
-      case 6: buckets.afterAuthorNote.push(match); break
+      case 5: buckets.beforeExamples.push(match); break
+      case 6: buckets.afterExamples.push(match); break
       case 7: buckets.outlet.push(match); break
       default: buckets.unplaced.push(match); break
     }

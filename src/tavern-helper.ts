@@ -123,6 +123,12 @@ export interface TavernHiddenMessage {
 
 /** Browser request changing the model-visible roleplay transcript. */
 export type TavernChatMutationRequest =
+  | {
+    readonly format: 0
+    readonly operation: 'update-chat-metadata'
+    readonly values: JsonRecord
+    readonly reset: boolean
+  }
   | { readonly format: 0; readonly operation: 'set-chat-messages'; readonly messages: readonly TavernChatMessageInput[] }
   | {
     readonly format: 0
@@ -162,6 +168,8 @@ export interface TavernHelperState {
     /** Extension variables are namespaced by the official extension_id. */
     readonly extension: TavernExtensionVariables
   }
+  /** SillyTavern chat_metadata persisted with this Session. */
+  readonly chatMetadata?: JsonRecord
   readonly scripts: Readonly<Record<string, JsonRecord>>
   /** Session-local script-tree replacements; imported source files remain unchanged. */
   readonly scriptTrees?: Readonly<Partial<Record<TavernScriptTreeScope, readonly TavernScriptTree[]>>>
@@ -722,6 +730,7 @@ export function initializeTavernHelperState(
       message: sameCharacter ? previous.scopes.message : {},
       extension: previous?.scopes.extension ?? {},
     },
+    chatMetadata: previous?.chatMetadata ?? {},
     scripts,
     scriptTrees,
     ...(prompts === undefined ? {} : { injectedPrompts: prompts }),
@@ -1022,6 +1031,17 @@ export function parseTavernHelperMutationRequest(raw: string): TavernHelperMutat
     if (messages.some(message => message.message_id === undefined)) throw new Error('set-chat-messages requires message_id')
     return { format: 0, operation: value.operation, messages }
   }
+  if (value.format === 0 && value.operation === 'update-chat-metadata') {
+    if (value.reset !== undefined && typeof value.reset !== 'boolean') {
+      throw new Error('update-chat-metadata reset must be a boolean')
+    }
+    return {
+      format: 0,
+      operation: value.operation,
+      values: record(value.values ?? {}, 'Tavern Helper chat metadata'),
+      reset: value.reset === true,
+    }
+  }
   if (value.format === 0 && value.operation === 'create-chat-messages') {
     const rawInsertAt = value.insertAt ?? value.insert_at ?? 'end'
     const insertAt = rawInsertAt === 'end' ? rawInsertAt : integer(rawInsertAt, 'create-chat-messages insertAt')
@@ -1152,6 +1172,14 @@ export function applyTavernHelperMutation(
   request: TavernHelperMutationRequest,
 ): TavernHelperState {
   if ('operation' in request) {
+    if (request.operation === 'update-chat-metadata') {
+      return {
+        ...state,
+        revision: state.revision + 1,
+        chatMetadata: request.reset ? request.values : { ...(state.chatMetadata ?? {}), ...request.values },
+        lastMutation: { scope: 'chat' },
+      }
+    }
     if (request.operation === 'set-chat-messages' || request.operation === 'create-chat-messages'
       || request.operation === 'delete-chat-messages' || request.operation === 'rotate-chat-messages'
       || request.operation === 'set-chat-hidden') {
@@ -1299,6 +1327,8 @@ export function decodeTavernHelperState(text: string | undefined): TavernHelperS
     // empty namespace so existing sessions remain readable.
     extension: extensionVariables(scopes.extension, 'Tavern Helper extension variables'),
   } satisfies TavernHelperState['scopes']
+  const parsedChatMetadata = parsed.chatMetadata === undefined
+    ? undefined : record(parsed.chatMetadata, 'Tavern Helper chat metadata')
   const parsedScripts = Object.fromEntries(Object.entries(scripts).map(([id, value]) => [
     id,
     record(value, `Tavern Helper script ${id} variables`),
@@ -1390,6 +1420,7 @@ export function decodeTavernHelperState(text: string | undefined): TavernHelperS
     ...(parsed.presetScriptIds === undefined ? {} : { presetScriptIds: parsed.presetScriptIds as string[] }),
     revision: parsed.revision,
     scopes: parsedScopeSet,
+    ...(parsedChatMetadata === undefined ? {} : { chatMetadata: parsedChatMetadata }),
     scripts: parsedScripts,
     ...(parsedScriptTrees === undefined ? {} : { scriptTrees: parsedScriptTrees }),
     ...(parsedInjectedPrompts === undefined ? {} : { injectedPrompts: parsedInjectedPrompts }),

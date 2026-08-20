@@ -135,6 +135,34 @@ test('extension variables are isolated by the official extension_id option', () 
   })), /extension_id/)
 })
 
+test('chat metadata follows SillyTavern updateChatMetadata merge and reset semantics', () => {
+  const state = initializeTavernHelperState(frontend([]), 'character')
+  assert.deepEqual(state.chatMetadata, {})
+
+  const merge = parseTavernHelperMutationRequest(JSON.stringify({
+    format: 0,
+    operation: 'update-chat-metadata',
+    values: { scene: '雨夜', turn: 1 },
+  }))
+  const merged = applyTavernHelperMutation({ ...state, chatMetadata: { keep: true } }, merge)
+  assert.deepEqual(merged.chatMetadata, { keep: true, scene: '雨夜', turn: 1 })
+
+  const reset = parseTavernHelperMutationRequest(JSON.stringify({
+    format: 0,
+    operation: 'update-chat-metadata',
+    values: { scene: '白天' },
+    reset: true,
+  }))
+  const resetState = applyTavernHelperMutation(merged, reset)
+  assert.deepEqual(resetState.chatMetadata, { scene: '白天' })
+  assert.throws(() => parseTavernHelperMutationRequest(JSON.stringify({
+    format: 0,
+    operation: 'update-chat-metadata',
+    values: {},
+    reset: 'yes',
+  })), /reset must be a boolean/)
+})
+
 test('injectPrompts supports the official fields and call-level once option', () => {
   const state = initializeTavernHelperState(frontend([scriptTree('script')]), 'character')
   const request = parseTavernHelperMutationRequest(JSON.stringify({

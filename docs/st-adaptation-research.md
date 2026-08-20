@@ -103,14 +103,14 @@
 | ---: | --- | --- |
 | 0 | `beforeCharacter` | persona 段 |
 | 1 | `afterCharacter` | worldview 段 |
-| 2 | `beforeExamples` | `mes_example` 前 |
-| 3 | `afterExamples` | `mes_example` 后 |
+| 2 | `beforeAuthorNote` | Author's Note 前 |
+| 3 | `afterAuthorNote` | Author's Note 后 |
 | 4 | `atDepth` | 按 `depth`、`order`、`role` 插入聊天历史消息数组 |
-| 5 | `beforeAuthorNote` | `post_history_instructions` 段 |
-| 6 | `afterAuthorNote` | `post_history_instructions` 段 |
+| 5 | `beforeExamples` | `mes_example` 前 |
+| 6 | `afterExamples` | `mes_example` 后 |
 | 7 | `outlet` | 与 `unplaced` 合并进旧 `worldbook_block` |
 
-没有受支持 position 的条目进入 `unplaced`。默认消息树中，角色卡 `mes_example` 会解析成带 `name` 的独立 system 消息，并在示例前加入 `[Example Chat]` 标记；`post_history_instructions` 位于聊天历史之后。角色卡和独立世界书的 constant 条目现在都按 ST 的八个 position 生成计划：`0/1 → persona/worldview`、`2/3 → 示例前后`、`4 → atDepth`、`5/6 → Author's Note 前后（当前以 post-history 锚点承载）`、`7 → outlet/激活世界书段`。旧自定义扁平模板仍保留 `2–7 → style` 的兼容回退。
+没有受支持 position 的条目进入 `unplaced`。默认消息树中，角色卡 `mes_example` 会解析成带 `name` 的独立 system 消息，并在示例前加入 `[Example Chat]` 标记；`post_history_instructions` 位于聊天历史之后。角色卡和独立世界书的 constant 条目现在都按 ST 的八个 position 生成计划：`0/1 → persona/worldview`、`2/3 → Author's Note 前后（当前以 post-history 锚点承载）`、`4 → atDepth`、`5/6 → 示例前后`、`7 → outlet/激活世界书段`。旧自定义扁平模板仍保留 `2–7 → style` 的兼容回退。
 
 ## 5. 角色卡 V2/V3 字段与消费方式
 
@@ -168,7 +168,7 @@
 | recursive scanning | `src/import/lorebook.ts` 的 deterministic inspector 已执行 `recursiveScanning`、entry `scanDepth`、累计递归 buffer、`excludeRecursion`、`preventRecursion` 和 `delayUntilRecursion`；递归控制不再写成 inert。它不是跨轮 timed-effects 状态机 |
 | position / response buckets | `response.ts` 先将匹配结果分为 `beforeCharacter`、`afterCharacter`、`beforeExamples`、`afterExamples`、`beforeAuthorNote`、`afterAuthorNote`、`atDepth`、`outlet`、`unplaced`。默认 ST 消息树把这些桶分别接到角色定义、`mes_example` 前后、聊天历史深度插入、post-history 和激活世界书消息层；旧自定义模板仍使用兼容锚点 |
 | order 排序 | 匹配条目桶内按 `order` 升序、`weight` 降序和 path 稳定排序；独立 constant 文档块保留 ST 风格按 `order` 降序 |
-| mes_example | preprocess 提取 `<START>` 分组后的 `mes_example`，response 按 ST 的 speaker 行解析成独立 system 消息并保留 `name`，示例前加入 `[Example Chat]`；position 2/3 条目包在其前后 |
+| mes_example | preprocess 提取 `<START>` 分组后的 `mes_example`，response 按 ST 的 speaker 行解析成独立 system 消息并保留 `name`，示例前加入 `[Example Chat]`；position 5/6 条目包在其前后 |
 | system_prompt / post_history_instructions | preprocess 提取；默认消息树中 system_prompt 进入控制 system 消息，post_history 追加在历史之后（宏替换） |
 | {{user}}/{{char}} 宏 | 全链路替换：卡文本、世界书 content 与 key、开场白。与 A3 的 persona 联动（userPersona.name） |
 | probability / scanDepth / caseSensitive / matchWholeWords / useRegex / selectiveLogic | 参数进入确定性 ST lane 或统一 `ImportedLorebookEntry`/`WorldbookEntry`；概率在代码层收尾，regex 走隔离 deterministic lane，不能让 agent 重解释原生 regex 条目 |
@@ -190,7 +190,7 @@
 ### 与 ST 的明确差异（要写进代码注释）
 
 1. 普通绿灯匹配由世界书模式决定：strict 只走 ST，enhanced 为 ST + agent，native 只走 agent；Resolver 纯代码合并，probability 掷骰与宏替换在代码层收尾
-2. 默认 response 消息树已真实保留 position 2/3 的示例前后层、position 4 的 atDepth 深度插入和 post-history 顺序；position 5/6/7 仍因缺少独立 Author's Note/outlet host 而采用兼容合并
+2. 默认 response 消息树已真实保留 position 2/3 的 Author's Note 锚点、position 4 的 atDepth 深度插入、position 5/6 的示例前后层和 post-history 顺序；position 7 仍因缺少独立 outlet host 而采用兼容合并
 3. 基础 sticky/cooldown/delay 定时效应、包含组和六个全局扫描开关已支持；向量匹配和部分 chat_metadata/分支编辑边界暂不支持，递归扫描仍只实现确定性 entry/content 语义
 4. Tavern Helper 的任意函数型 `filter` 不能跨持久化 iframe 快照执行；当前宿主只保存并使用已解析的布尔筛选结果
 5. response 总预算和世界书预算使用字符/4（中文按字符）近似 tokenizer；模型专用 tokenizer 仍未完全复刻

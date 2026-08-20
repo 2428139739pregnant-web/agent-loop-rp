@@ -159,6 +159,27 @@ test('Tavern Helper injectPrompts and uninjectPrompts use the canonical mutation
   assert.equal(typeof frame.window.TavernHelper.rebindCharWorldbooks, 'function')
 })
 
+test('SillyTavern chat metadata uses the canonical persistent mutation bridge', () => {
+  const frame = createFrame()
+  const context = frame.window.SillyTavern.getContext()
+  const merged = context.updateChatMetadata({ scene: '雨夜', turn: 1 })
+  let request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.deepEqual(plain(merged), { scene: '雨夜', turn: 1 })
+  assert.equal(request?.method, 'tavern-helper-mutation')
+  assert.deepEqual(plain(request?.payload), {
+    format: 0,
+    operation: 'update-chat-metadata',
+    values: { scene: '雨夜', turn: 1 },
+    reset: false,
+  })
+
+  const reset = frame.window.SillyTavern.updateChatMetadata({ scene: '白天' }, true)
+  request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.deepEqual(plain(reset), { scene: '白天' })
+  assert.equal(request?.payload.reset, true)
+  assert.deepEqual(plain(frame.window.SillyTavern.getContext().chatMetadata), { scene: '白天' })
+})
+
 test('Tavern Helper chat tree APIs preserve message metadata and canonical RPC arguments', async () => {
   const frame = createFrame()
   await frame.window.setChatMessages([

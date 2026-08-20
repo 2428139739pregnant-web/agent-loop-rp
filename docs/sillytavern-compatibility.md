@@ -42,7 +42,7 @@ Classic scripts execute directly. ESM keeps its original module boundaries and m
 
 ### Tavern Helper prompt injection
 
-The Session bridge implements `injectPrompts`, `uninjectPrompts`, and per-script replacement. Prompt ids are global: injecting an existing id replaces that prompt while retaining unrelated prompts. Supported prompt state includes `position` (`in_chat` or `none`), `depth`, `role`, `shouldScan`/`should_scan`, `order`, `once`, and the JSON-safe `filter` flag.
+The Session bridge implements `injectPrompts`, `uninjectPrompts`, and per-script replacement. Prompt ids are global: injecting an existing id replaces that prompt while retaining unrelated prompts. Supported prompt state includes `position` (`in_chat` or `none`), `depth`, `role`, `shouldScan`/`should_scan`, `order`, `once`, and the JSON-safe `filter` flag. `SillyTavern.getContext().chatMetadata` and `SillyTavern.updateChatMetadata(values, reset)` are session-persistent: the default call merges keys, while `reset: true` replaces the metadata object and immediately syncs the iframe projection.
 
 Generation selection sorts by `order`, drops prompts with `filter: false`, and accepts a synchronous or asynchronous host predicate. The selected snapshot records exactly which `once` prompts were used. Completion consumes only those selected prompts, and matches id, script id, and content so a late completion cannot delete a newer replacement. The runtime also exposes projections for in-chat prompt insertion and scan text; a prompt with `position: none` can still contribute to the scan projection when `shouldScan` is true. A function-valued filter cannot cross the iframe/session JSON boundary, so it is supplied at selection time rather than persisted.
 
@@ -78,14 +78,14 @@ Activated World Info entries retain the ST position value and are split into exp
 |---:|---|---|
 | `0` | `beforeCharacter` | persona block |
 | `1` | `afterCharacter` | worldview block |
-| `2` | `beforeExamples` | immediately before `mes_example` |
-| `3` | `afterExamples` | immediately after `mes_example` |
+| `2` | `beforeAuthorNote` | before the Author's Note anchor |
+| `3` | `afterAuthorNote` | after the Author's Note anchor |
 | `4` | `atDepth` | `at_depth_worldbook` block |
-| `5` | `beforeAuthorNote` | post-history-instructions block |
-| `6` | `afterAuthorNote` | post-history-instructions block |
+| `5` | `beforeExamples` | immediately before `mes_example` |
+| `6` | `afterExamples` | immediately after `mes_example` |
 | `7` | `outlet` | merged into the legacy `worldbook_block` |
 
-Entries without a supported position go to `unplaced` and also use the legacy `worldbook_block`. The default ST message tree now keeps card-embedded and independent constant entries at their eight positions: `0/1` map to character-definition layers, `2/3` to example boundaries, `4` to real depth prompts, `5/6` to the post-history Author's Note anchor, and `7` to the outlet/worldbook layer. A custom flat template still gets the legacy `2–7 → style` fallback.
+Entries without a supported position go to `unplaced` and also use the legacy `worldbook_block`. The default ST message tree now keeps card-embedded and independent constant entries at their eight positions: `0/1` map to character-definition layers, `2/3` to the Author's Note anchor, `4` to real depth prompts, `5/6` to example boundaries, and `7` to the outlet/worldbook layer. A custom flat template still gets the legacy `2–7 → style` fallback.
 
 ## Security and degradation
 
