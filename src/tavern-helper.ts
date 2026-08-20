@@ -55,6 +55,9 @@ export type TavernScriptTree = TavernScript | TavernScriptFolder
 /** Script-tree storage scopes exposed by Tavern Helper. */
 export type TavernScriptTreeScope = 'global' | 'preset' | 'character'
 
+/** SillyTavern extension prompt positions used by setExtensionPrompt. */
+export type TavernInjectedPromptPosition = 'before_prompt' | 'in_prompt' | 'in_chat' | 'none'
+
 /** JSON-safe Tavern Helper worldbook entry retained in one roleplay Session. */
 export interface TavernWorldbookEntry {
   readonly uid: number
@@ -199,7 +202,7 @@ export interface TavernHelperState {
 export interface TavernInjectedPrompt {
   readonly id: string
   readonly scriptId: string
-  readonly position: 'in_chat' | 'none'
+  readonly position: TavernInjectedPromptPosition
   readonly depth: number
   readonly role: 'system' | 'assistant' | 'user'
   readonly content: string
@@ -628,7 +631,8 @@ function injectedPrompt(
   const prompt = nested(value)
   const id = text(prompt.id, `injected prompt[${index}].id`).trim()
   if (id === '' || id.length > 512) throw new Error(`injected prompt[${index}].id is invalid`)
-  if (prompt.position !== 'in_chat' && prompt.position !== 'none') {
+  if (prompt.position !== 'before_prompt' && prompt.position !== 'in_prompt'
+    && prompt.position !== 'in_chat' && prompt.position !== 'none') {
     throw new Error(`injected prompt[${index}].position is invalid`)
   }
   if (prompt.role !== 'system' && prompt.role !== 'assistant' && prompt.role !== 'user') {
@@ -1445,6 +1449,22 @@ export function tavernInjectedInChatPrompts(
   return selectTavernInjectedPrompts(state, options).prompts.flatMap(prompt => prompt.position === 'in_chat' && prompt.content.trim() !== ''
     ? [{ role: prompt.role, content: prompt.content, depth: prompt.depth, order: prompt.order }]
     : [])
+}
+
+/**
+ * Return the non-chat extension prompt content for ST's IN_PROMPT and
+ * BEFORE_PROMPT anchors after applying the current filter snapshot.
+ */
+export function tavernInjectedPromptContent(
+  state: TavernHelperState | undefined,
+  position: Exclude<TavernInjectedPromptPosition, 'in_chat' | 'none'>,
+  options: TavernInjectedPromptSelectionOptions = {},
+): string {
+  return selectTavernInjectedPrompts(state, options).prompts
+    .filter(prompt => prompt.position === position && prompt.content.trim() !== '')
+    .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+    .map(prompt => prompt.content.trim())
+    .join('\n')
 }
 
 /**

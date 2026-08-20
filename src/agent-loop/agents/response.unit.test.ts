@@ -252,6 +252,7 @@ interface CtxOpts {
   readonly promptBody?: string
   readonly turnCount?: number
   readonly worldbook?: AgentContext['worldbook']
+  readonly tavernHelperState?: AgentContext['tavernHelperState']
 }
 
 function makeCtx(opts: CtxOpts): AgentContext {
@@ -277,6 +278,7 @@ function makeCtx(opts: CtxOpts): AgentContext {
     },
     worldbook: opts.worldbook ?? { match: () => [], getContent: () => undefined, list: () => [] },
     sessionId: 'test',
+    ...(opts.tavernHelperState === undefined ? {} : { tavernHelperState: opts.tavernHelperState }),
   }
 }
 
@@ -405,6 +407,42 @@ test('responseAgent applies plugin prompt injections in the same single response
   assert.equal(calls, 1)
   assert.equal(captured[0]?.content, 'SPECIAL')
   assert.equal(captured.at(-1)?.role, 'user')
+})
+
+test('responseAgent maps ST extension prompt anchors into the message tree', async () => {
+  let captured: ChatMessage[] = []
+  const provider: LLMProvider = {
+    name: 'spy',
+    async chat(messages) {
+      captured = messages
+      return { content: 'r' }
+    },
+  }
+  const ctx = makeCtx({
+    provider,
+    promptBody: `${ST_MESSAGE_TREE_MARKER}\nMAIN_PROMPT`,
+    tavernHelperState: {
+      format: 0,
+      characterSourceId: 'character',
+      revision: 1,
+      scopes: { global: {}, preset: {}, character: {}, chat: {}, message: {}, extension: {} },
+      scripts: {},
+      injectedPrompts: [
+        { id: 'before', scriptId: 'script', position: 'before_prompt', depth: 0, role: 'system', content: 'BEFORE_PROMPT', shouldScan: false, once: false, order: 100 },
+        { id: 'after', scriptId: 'script', position: 'in_prompt', depth: 0, role: 'system', content: 'IN_PROMPT', shouldScan: false, once: false, order: 100 },
+      ],
+    },
+  })
+  await responseAgent.run({
+    intent: makeIntent(),
+    worldbook: { matches: [] },
+    contextSegmentation: { segments: [] },
+    userInput: 'hi',
+    character: makeCharacter(),
+  }, ctx)
+  assert.equal(captured[0]?.content, 'BEFORE_PROMPT')
+  assert.ok(captured.some(message => message.content === 'MAIN_PROMPT'))
+  assert.ok(captured.some(message => message.content === 'IN_PROMPT'))
 })
 
 test('responseAgent sends selected context as a real chatHistory message layer', async () => {

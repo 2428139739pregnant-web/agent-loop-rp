@@ -1675,6 +1675,9 @@
     const normalized={...prompt};
     if(typeof normalized.id!=='string'||normalized.id.trim()==='')return null;
     normalized.id=normalized.id.trim();
+    const filterKey=__currentScriptId()+'\u0000'+normalized.id;
+    __injectionFilters.delete(filterKey);
+    if(normalized.filter===null||normalized.filter===undefined)delete normalized.filter;
     if(typeof normalized.filter==='function'){
       const scriptId=__currentScriptId();
       const filter=normalized.filter;
@@ -1698,17 +1701,30 @@
     }
     __post('agent-rp-card-injection-filter-result',{hasFilters:__injectionFilters.size>0,filters});
   };
+  const __extensionPromptNumber=position=>position==='none'?-1:position==='in_prompt'?0:position==='before_prompt'?2:1;
+  const __publishLocalExtensionPrompt=prompt=>{__stContext.extensionPrompts[prompt.id]={value:String(prompt.content??''),position:__extensionPromptNumber(prompt.position),depth:Number(prompt.depth)||0,scan:(prompt.shouldScan??prompt.should_scan)!==false,role:prompt.role==='user'?1:prompt.role==='assistant'?2:0,filter:prompt.filter!==false};window.SillyTavern.extensionPrompts=__stContext.extensionPrompts;};
+  const __clearLocalExtensionPrompts=ids=>{for(const id of ids)delete __stContext.extensionPrompts[id];window.SillyTavern.extensionPrompts=__stContext.extensionPrompts;};
   const __injectPrompts=(prompts,options={})=>{
     const scriptId=__currentScriptId();
     const normalized=(Array.isArray(prompts)?prompts:[]).map(__normalizeInjectionPrompt).filter(Boolean);
     const ids=normalized.map(prompt=>prompt.id);
+    normalized.forEach(__publishLocalExtensionPrompt);
     const payload={format:0,operation:'inject-prompts',scriptId,prompts:__clone(normalized),...(typeof options?.once==='boolean'?{once:options.once}:{})};
     void __rpc('tavern-helper-mutation',payload).catch(error=>console.error('[agent-rp Tavern Helper injectPrompts]',error));
-    return {uninject:()=>{if(!ids.length)return;__removeInjectionFilters(ids,scriptId);void __rpc('tavern-helper-mutation',{format:0,operation:'uninject-prompts',ids}).catch(error=>console.error('[agent-rp Tavern Helper uninjectPrompts]',error));}};
+    return {uninject:()=>{if(!ids.length)return;__removeInjectionFilters(ids,scriptId);__clearLocalExtensionPrompts(ids);void __rpc('tavern-helper-mutation',{format:0,operation:'uninject-prompts',ids}).catch(error=>console.error('[agent-rp Tavern Helper uninjectPrompts]',error));}};
   };
-  const __uninjectPrompts=ids=>{const normalized=(Array.isArray(ids)?ids:[]).map(String).filter(Boolean);if(!normalized.length)return;__removeInjectionFilters(normalized);void __rpc('tavern-helper-mutation',{format:0,operation:'uninject-prompts',ids:normalized}).catch(error=>console.error('[agent-rp Tavern Helper uninjectPrompts]',error));};
+  const __uninjectPrompts=ids=>{const normalized=(Array.isArray(ids)?ids:[]).map(String).filter(Boolean);if(!normalized.length)return;__removeInjectionFilters(normalized);__clearLocalExtensionPrompts(normalized);void __rpc('tavern-helper-mutation',{format:0,operation:'uninject-prompts',ids:normalized}).catch(error=>console.error('[agent-rp Tavern Helper uninjectPrompts]',error));};
+  const __extensionPromptPosition=position=>{const value=Number(position);if(value===-1)return 'none';if(value===0)return 'in_prompt';if(value===1)return 'in_chat';if(value===2)return 'before_prompt';throw new Error('unsupported extension prompt position');};
+  const __setExtensionPrompt=async(key,value,position,depth,scan=false,role=0,filter=null)=>{
+    const id=String(key??'').trim();if(!id)throw new Error('extension prompt id is required');
+    const prompt={id,position:__extensionPromptPosition(position),depth:Number(depth),role:Number(role??0)===1?'user':Number(role??0)===2?'assistant':'system',content:String(value??''),should_scan:Boolean(scan),...(typeof filter==='function'?{filter}: {})};
+    const normalized=__normalizeInjectionPrompt(prompt);if(!normalized)throw new Error('extension prompt is invalid');
+    __publishLocalExtensionPrompt(normalized);
+    await __rpc('tavern-helper-mutation',{format:0,operation:'inject-prompts',scriptId:__currentScriptId(),prompts:[__clone(normalized)]});
+  };
   window.injectPrompts=__injectPrompts;
   window.uninjectPrompts=__uninjectPrompts;
+  window.setExtensionPrompt=__setExtensionPrompt;
   window.getLocaleMessage=(key)=>String(key??'');
   window.updateVariables=value=>__replace(value);
   window.getMvuVariable=window.getVariable;
@@ -1806,6 +1822,10 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
   window.SillyTavern=Object.assign({},__parent?.SillyTavern||{}, {eventSource:__stEventSource,eventTypes:window.tavern_events,getContext:()=>__stContext,chat:__stContext.chat,characters:__stContext.characters,characterId:0,name2:'',chatMetadata:__stContext.chatMetadata,extensionSettings:{},chatCompletionSettings:{},getCurrentChatId:()=>__chatId,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),updateChatMetadata:__updateChatMetadata,saveChat:async()=>undefined,saveSettingsDebounced:async()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined});
   const __wrap=items=>{const list=Array.from(items||[]),api={length:list.length};list.forEach((el,i)=>api[i]=el);api.toArray=()=>list.slice();api.get=index=>index===undefined?list.slice():list[index];api.each=fn=>{list.forEach((el,i)=>fn.call(el,i,el));return api;};api.clone=()=>__wrap(list.map(el=>el.cloneNode?.(true)).filter(Boolean));api.appendTo=target=>{const destination=typeof target==='string'?__query(target):target?.length!==undefined?target:__wrap([target]);destination?.each?.((_i,el)=>list.forEach(item=>el.append(item)));return api;};api.find=sel=>__wrap(list.flatMap(el=>[...el.querySelectorAll(sel)]));api.parent=()=>__wrap(list.map(el=>el.parentElement).filter(Boolean));api.siblings=()=>__wrap(list.flatMap(el=>el.parentElement?[...el.parentElement.children].filter(x=>x!==el):[]));api.addClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.add(x)));api.removeClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.remove(x)));api.toggleClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.toggle(x)));api.hasClass=v=>!!list[0]?.classList.contains(String(v||''));api.html=v=>v===undefined?(list[0]?.innerHTML||''):api.each((_i,el)=>el.innerHTML=String(v));api.text=v=>v===undefined?(list[0]?.textContent||''):api.each((_i,el)=>el.textContent=String(v));api.val=v=>v===undefined?(list[0]?.value||''):api.each((_i,el)=>el.value=String(v));api.attr=(k,v)=>v===undefined?list[0]?.getAttribute(k):api.each((_i,el)=>el.setAttribute(k,String(v)));api.data=(k,v)=>v===undefined?list[0]?.dataset?.[k]:api.each((_i,el)=>el.dataset[k]=String(v));api.empty=()=>api.each((_i,el)=>el.replaceChildren());api.append=v=>api.each((_i,el)=>typeof v==='string'?el.insertAdjacentHTML('beforeend',v):v?.nodeType&&el.append(v));api.css=(k,v)=>v===undefined?(list[0]?getComputedStyle(list[0])[k]:undefined):api.each((_i,el)=>el.style[k]=String(v));api.show=()=>api.each((_i,el)=>el.style.display='');api.hide=()=>api.each((_i,el)=>el.style.display='none');api.on=(type,fn)=>api.each((_i,el)=>el.addEventListener(type,fn));api.off=(type,fn)=>api.each((_i,el)=>el.removeEventListener(type,fn));api.trigger=type=>api.each((_i,el)=>el.dispatchEvent(new Event(type,{bubbles:true})));api.sortable=()=>api;return api;};
   const __query=value=>{if(typeof value==='function'){if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',value,{once:true});else queueMicrotask(value);return __wrap([]);}if(value?.nodeType)return __wrap([value]);if(Array.isArray(value))return __wrap(value);try{return __wrap(document.querySelectorAll(String(value||'')));}catch{return __wrap([]);}};
+  __stContext.setExtensionPrompt=__setExtensionPrompt;
+  window.TavernHelper.setExtensionPrompt=__setExtensionPrompt;
+  window.SillyTavern.setExtensionPrompt=__setExtensionPrompt;
+  window.SillyTavern.extensionPrompts=__stContext.extensionPrompts;
   if(!window.$){window.$=__query;window.jQuery=__query;}
   window.addEventListener('message',event=>{
     if(event.source!==window.parent||!event.data||event.data.id!==__frameId)return;
@@ -1834,6 +1854,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       const context=event.data.context&&typeof event.data.context==='object'?event.data.context:{};
       for(const key of ['name1','name2','characterId','chatId','chatMetadata','extensionPrompts','character'])if(context[key]!==undefined)__stContext[key]=__clone(context[key]);
       if(context.chatMetadata!==undefined)window.SillyTavern.chatMetadata=__stContext.chatMetadata;
+      if(context.extensionPrompts!==undefined)window.SillyTavern.extensionPrompts=__stContext.extensionPrompts;
       if(Array.isArray(context.chat)){__stContext.chat=__clone(context.chat);window.SillyTavern.chat=__stContext.chat;}
       if(Array.isArray(context.characters)){__stContext.characters=__clone(context.characters);window.SillyTavern.characters=__stContext.characters;}
       window.SillyTavern.name1=__stContext.name1||'';window.SillyTavern.name2=__stContext.name2||'';window.SillyTavern.characterId=__stContext.characterId||0;
@@ -2086,7 +2107,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                 ? helperState.chatMetadata : {},
                 extensionPrompts: Object.fromEntries((Array.isArray(helperState.injectedPrompts) ? helperState.injectedPrompts : []).map((prompt) => [
                   prompt.id,
-                  { value: prompt.content, position: prompt.position === 'none' ? -1 : 1, depth: prompt.depth || 0, scan: prompt.shouldScan !== false, role: prompt.role === 'system' ? 0 : prompt.role === 'user' ? 1 : 2, filter: prompt.filter !== false },
+                  { value: prompt.content, position: prompt.position === 'none' ? -1 : prompt.position === 'in_prompt' ? 0 : prompt.position === 'before_prompt' ? 2 : 1, depth: prompt.depth || 0, scan: prompt.shouldScan !== false, role: prompt.role === 'system' ? 0 : prompt.role === 'user' ? 1 : 2, filter: prompt.filter !== false },
                 ])),
               },
             }, '*')

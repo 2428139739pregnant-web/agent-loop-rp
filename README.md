@@ -239,6 +239,7 @@ PNG 中同时存在 `ccv3` 和旧 `chara` 元数据时，优先使用 `ccv3`。�
 - Tavern Helper 事件桥支持 `eventOn`/`eventOnce`、`eventMakeFirst`/`eventMakeLast`、监听清理和可等待 `eventEmit`；生成前宿主会等待卡片帧处理完异步事件及其提示词/变量 RPC，再开始 response 请求，避免 `GENERATION_AFTER_COMMANDS` 注入丢失。
 - `SillyTavern.getContext()` 会同步当前会话的 ST 形状消息、角色/用户名称、`chatId`、`extensionPrompts`、变量接口和世界书读取接口；当前仍是安全的 Session 投影，不执行父页面 DOM 或任意宿主 API。消息树基础操作按官方语义提供：`getChatMessages` 支持楼层范围、角色/隐藏状态筛选和 swipe，`setChatMessages` 按 `message_id` 局部更新，另有插入、删除、旋转和隐藏操作；楼层元数据会持久化，隐藏楼层不进入模型提示词。
 - 角色卡 iframe 同时暴露官方全局 `injectPrompts`/`uninjectPrompts` 与 `TavernHelper.injectPrompts`/`TavernHelper.uninjectPrompts`，通过宿主 RPC 写入当前聊天；函数型 `filter` 不能跨 JSON 边界持久化，当前对同步 `false` 做安全快照，其余情况按启用处理。
+- 同时桥接酒馆原生 `SillyTavern.getContext().setExtensionPrompt`：`-1/0/1/2` 分别对应 `NONE/IN_PROMPT/IN_CHAT/BEFORE_PROMPT`，并沿用 ST 的深度、角色、扫描开关和函数过滤器语义。
 - 角色卡 iframe 暴露 `SillyTavern.getContext().chatMetadata` 与 `updateChatMetadata(values, reset)`，按酒馆语义默认合并、`reset: true` 替换，并持久化到当前会话。
 - `[GENERATE:BEFORE/AFTER]` 和常见 `@@generate_*` 别名。
 - `[RENDER:BEFORE/AFTER]` 和常见 `@@render_*` 别名。

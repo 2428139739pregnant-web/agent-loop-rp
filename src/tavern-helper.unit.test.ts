@@ -12,6 +12,7 @@ import {
   replaceScriptTrees,
   selectTavernInjectedPrompts,
   selectTavernInjectedPromptsAsync,
+  tavernInjectedPromptContent,
   tavernInjectedInChatPrompts,
   tavernInjectedScanText,
   uninjectPrompts,
@@ -161,6 +162,26 @@ test('chat metadata follows SillyTavern updateChatMetadata merge and reset seman
     values: {},
     reset: 'yes',
   })), /reset must be a boolean/)
+})
+
+test('extension prompt anchors preserve ST before/in/none positions', () => {
+  const state = initializeTavernHelperState(frontend([scriptTree('script-a')]), 'character')
+  const request = parseTavernHelperMutationRequest(JSON.stringify({
+    format: 0,
+    operation: 'inject-prompts',
+    scriptId: 'script-a',
+    prompts: [
+      { id: 'before', position: 'before_prompt', depth: 0, role: 'system', content: 'BEFORE' },
+      { id: 'inside', position: 'in_prompt', depth: 0, role: 'system', content: 'IN' },
+      { id: 'none', position: 'none', depth: 0, role: 'system', content: 'SCAN', should_scan: true },
+    ],
+  }))
+  const updated = applyTavernHelperMutation(state, request)
+
+  assert.equal(tavernInjectedPromptContent(updated, 'before_prompt'), 'BEFORE')
+  assert.equal(tavernInjectedPromptContent(updated, 'in_prompt'), 'IN')
+  assert.deepEqual(tavernInjectedInChatPrompts(updated), [])
+  assert.deepEqual(tavernInjectedScanText(updated), ['SCAN'])
 })
 
 test('injectPrompts supports the official fields and call-level once option', () => {

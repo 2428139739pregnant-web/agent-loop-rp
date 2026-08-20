@@ -173,7 +173,7 @@
 | {{user}}/{{char}} 宏 | 全链路替换：卡文本、世界书 content 与 key、开场白。与 A3 的 persona 联动（userPersona.name） |
 | probability / scanDepth / caseSensitive / matchWholeWords / useRegex / selectiveLogic | 参数进入确定性 ST lane 或统一 `ImportedLorebookEntry`/`WorldbookEntry`；概率在代码层收尾，regex 走隔离 deterministic lane，不能让 agent 重解释原生 regex 条目 |
 | 世界书级 scan_depth | 世界书匹配设置默认扫描最近 2 条消息；角色卡/独立书的 parser 另保留书级递归开关和已支持的 entry-level override |
-| Tavern Helper `injectPrompts` | Host state 实现 `injectPrompts`、`uninjectPrompts`、按 script replacement；prompt id 全局唯一，重复 id 替换，其他脚本 prompt 保留；生成时 `should_scan` 进入 World Info 扫描，`in_chat` 按 ST 的 depth/order/role 插入 response 消息，`none` 仅扫描 |
+| Tavern Helper `injectPrompts` / ST `setExtensionPrompt` | Host state 实现 `injectPrompts`、`uninjectPrompts`、按 script replacement 与原生 `setExtensionPrompt`；prompt id 全局唯一，重复 id 替换，其他脚本 prompt 保留；生成时 `should_scan` 进入 World Info 扫描，`in_chat` 按 ST 的 depth/order/role 插入 response 消息，`none` 仅扫描，`in_prompt`/`before_prompt` 进入消息树对应锚点 |
 | `once` / `filter` | selection 按 `order` 排序，`filter:false` 和同步/异步 host predicate 都可排除；只消费本次实际选中的 once snapshot，并按 id + script id + content 防止晚到完成事件删除新替换；iframe API 已接通官方 `injectPrompts`/`uninjectPrompts`，函数型 filter 跨 JSON bridge 时仅保留同步 false 快照 |
 | iframe variable scopes | iframe bridge 实现 `global`、`preset`、`character`、`chat`、`message`、`script`、`extension` 七类 scope；`message_id` 默认 `latest`，`script_id` 默认当前脚本，`extension` 必须带 `extension_id` 并按 id 隔离 |
 

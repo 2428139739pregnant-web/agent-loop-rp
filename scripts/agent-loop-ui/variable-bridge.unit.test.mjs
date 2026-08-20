@@ -180,6 +180,28 @@ test('SillyTavern chat metadata uses the canonical persistent mutation bridge', 
   assert.deepEqual(plain(frame.window.SillyTavern.getContext().chatMetadata), { scene: '白天' })
 })
 
+test('SillyTavern setExtensionPrompt preserves the four official insertion positions', async () => {
+  const frame = createFrame()
+  const context = frame.window.SillyTavern.getContext()
+  await context.setExtensionPrompt('story-after', 'after story', 0, 0, true, 1)
+  let request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'tavern-helper-mutation')
+  assert.deepEqual(plain(request?.payload.prompts), [{
+    id: 'story-after', position: 'in_prompt', depth: 0, role: 'user', content: 'after story', should_scan: true,
+  }])
+
+  await frame.window.setExtensionPrompt('story-before', 'before story', 2, 3)
+  request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.deepEqual(plain(request?.payload.prompts), [{
+    id: 'story-before', position: 'before_prompt', depth: 3, role: 'system', content: 'before story', should_scan: false,
+  }])
+  await frame.window.setExtensionPrompt('scan-only', 'scan', -1, 0)
+  request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.payload.prompts[0].position, 'none')
+  assert.equal(typeof frame.window.setExtensionPrompt, 'function')
+  assert.equal(typeof frame.window.TavernHelper.setExtensionPrompt, 'function')
+})
+
 test('Tavern Helper chat tree APIs preserve message metadata and canonical RPC arguments', async () => {
   const frame = createFrame()
   await frame.window.setChatMessages([

@@ -39,7 +39,7 @@ import {
 import type { Agent, AgentContext } from './types.ts'
 import { applyPromptTemplateInjections } from '../../extensions/prompt-template-adapter.ts'
 import { classifyWorldbookEntry } from '../worldbook-compat.ts'
-import { applyTavernInjectedInChatPrompts } from '../../tavern-helper.ts'
+import { applyTavernInjectedInChatPrompts, tavernInjectedPromptContent } from '../../tavern-helper.ts'
 
 /** Input contract for {@link responseAgent}. */
 export interface ResponseInput {
@@ -770,6 +770,8 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
       + macro(input.character.postHistoryInstructions ?? '')
       + worldbookAfterAuthorNote
       + constantBlocks.afterAuthorNote
+    const extensionBeforePrompt = macro(tavernInjectedPromptContent(ctx.tavernHelperState, 'before_prompt'))
+    const extensionInPrompt = macro(tavernInjectedPromptContent(ctx.tavernHelperState, 'in_prompt'))
     const exampleDialogue = worldbookBeforeExamples
       + constantBlocks.beforeExamples
       + (mesExample.length > 0 ? mesExample : NO_EXAMPLE_DIALOGUE)
@@ -816,6 +818,10 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     const systemPrompt = template.includes('{{response_settings}}')
       ? renderedSystemPrompt
       : `${renderedSystemPrompt}\n\n## 当前回复设置（用户可配置）\n\n${responseSettingsInstruction}`
+    const flatSystemPrompt = [extensionBeforePrompt, systemPrompt, extensionInPrompt]
+      .map(value => value.trim())
+      .filter(Boolean)
+      .join('\n\n')
 
     const promptUserInput = renderCharacterPromptView(
       input.userInput,
@@ -859,7 +865,9 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
         : historyBase.map(message => ({ ...message }))
       const structuredMessages: ChatMessage[] = useStMessageTree
         ? [
+          ...(extensionBeforePrompt.trim() ? [{ role: 'system' as const, content: extensionBeforePrompt.trim() }] : []),
           { role: 'system', content: renderedSystemPrompt.replace(ST_MESSAGE_TREE_MARKER, '').trim() },
+          ...(extensionInPrompt.trim() ? [{ role: 'system' as const, content: extensionInPrompt.trim() }] : []),
           ...(worldbookBeforeCharacter.trim() ? [{ role: 'system' as const, content: worldbookBeforeCharacter.trim() }] : []),
           { role: 'system', content: `角色名：${macro(input.character.name)}\n\n${macro(input.character.persona) + constantBlocks.persona}` },
           ...(worldbookAfterCharacter.trim() ? [{ role: 'system' as const, content: worldbookAfterCharacter.trim() }] : []),
@@ -877,7 +885,7 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
           ...(postHistoryInstructions.trim() ? [{ role: 'system' as const, content: postHistoryInstructions.trim() }] : []),
         ]
         : [
-          { role: 'system', content: systemPrompt },
+          { role: 'system', content: flatSystemPrompt },
           ...historyAndCurrent,
         ]
       const promptTemplateMessages = applyPromptTemplateInjections(structuredMessages, pluginOutput)

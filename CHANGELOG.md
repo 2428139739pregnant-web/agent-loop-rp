@@ -4,6 +4,7 @@
 
 ### 修复
 
+- 补齐酒馆原生 `setExtensionPrompt` 位置语义：`NONE`、`IN_PROMPT`、`IN_CHAT`、`BEFORE_PROMPT`（`-1/0/1/2`）现在会分别进入扫描、主提示词后、聊天深度和主提示词前锚点；保留深度、角色、扫描开关与函数过滤器。
 - 修正 ST World Info 位置映射：`2/3` 现在进入 Author's Note 前后，`5/6` 进入示例消息前后；角色卡与独立世界书的蓝灯、绿灯命中条目统一使用同一套位置语义。
 - 补齐酒馆助手 `chatMetadata` 桥接：支持 `SillyTavern.getContext().chatMetadata` 与 `updateChatMetadata(values, reset)`，并将更新持久化到当前会话。
 - 按酒馆助手官方消息接口修正楼层语义：`setChatMessages` 现在按 `message_id` 做局部 patch，不会因为只更新 `data`/`is_hidden` 而清空正文、角色名或 swipe；`getChatMessages` 按真实楼层号处理负数深度、`role`、`hide_state` 和 `include_swipes`，隐藏楼层也不会进入 response/worldbook 的模型提示词。
