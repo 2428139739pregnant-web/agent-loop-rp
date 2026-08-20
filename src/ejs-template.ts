@@ -45,6 +45,8 @@ export interface EjsTemplateWorldInfoBook {
     readonly name?: string
     readonly comment?: string
     readonly content: string
+    /** Original ST-shaped metadata used by Prompt Template data helpers. */
+    readonly data?: JsonValue
   }[]
 }
 
@@ -175,6 +177,7 @@ export function createEjsWorldInfoBooks(books: readonly {
       readonly name?: string
       readonly comment?: string
       readonly content: string
+      readonly data?: JsonValue
     }[]
   }
 }[]): EjsTemplateWorldInfoBook[] {
@@ -186,6 +189,7 @@ export function createEjsWorldInfoBooks(books: readonly {
       ...(entry.name === undefined ? {} : { name: entry.name }),
       ...(entry.comment === undefined ? {} : { comment: entry.comment }),
       content: entry.content,
+      ...(entry.data === undefined ? {} : { data: entry.data }),
     })),
   }))
 }
@@ -282,6 +286,13 @@ const TEMPLATE_RESERVED_LOCALS = new Set([
   'stat_data', 'getvar', 'getWorldInfo', 'getwi', 'getCharData', 'getchar', 'getChara',
   'getpreset', 'getPresetPrompt', 'getChatMessage', 'getChatMessages', 'print', 'YAML', '_',
   'injectPrompt', 'getPromptsInjected', 'hasPromptsInjected',
+  'getWorldInfoData', 'getWorldInfoActivatedData', 'getEnabledWorldInfoEntries',
+  'selectActivatedEntries', 'activewi', 'activateWorldInfo', 'activateWorldInfoByKeywords',
+  'parseJSON', 'jsonPatch', 'patchVariables', 'setvar', 'setLocalVar', 'setGlobalVar',
+  'setMessageVar', 'incvar', 'decvar', 'incLocalVar', 'incGlobalVar', 'incMessageVar',
+  'decLocalVar', 'decGlobalVar', 'decMessageVar', 'delvar', 'delLocalVar', 'delGlobalVar',
+  'delMessageVar', 'insvar', 'insertLocalVar', 'insertGlobalVar', 'insertMessageVar',
+  'matchChatMessages', 'execute',
   '__input', '__output', '__append', '__escape', '__transcript', '__templateData',
 ])
 const TEMPLATE_RESOURCE_LOCALS = [
@@ -580,9 +591,14 @@ function compileTemplate(
       });
     };
     const YAML = Object.freeze({ stringify: value => value === undefined ? undefined : __yamlLines(value).join('\\n') + '\\n' });
+    const __sourceScopes = __input.scopes ?? Object.create(null);
+    const __scopes = Object.create(null);
+    for (const scopeName of ['global', 'preset', 'character', 'initial', 'chat', 'message']) {
+      __set(__scopes, scopeName, __cloneDeep(__sourceScopes[scopeName] ?? Object.create(null)));
+    }
     const variables = [
-      variableScopes.global, variableScopes.preset, variableScopes.character,
-      variableScopes.initial, variableScopes.chat, variableScopes.message, __input.variables,
+      __scopes.global, __scopes.preset, __scopes.character,
+      __scopes.initial, __scopes.chat, __scopes.message, __input.variables,
     ].reduce((result, record) => __merge(result, record), Object.create(null));
     if (stat_data !== undefined) __set(variables, 'stat_data', stat_data);
     const __read = (record, name, fallback) => {
@@ -597,30 +613,30 @@ function compileTemplate(
       return current;
     };
     const __scopeNames = new Set(['cache', 'global', 'preset', 'character', 'local', 'chat', 'message', 'initial']);
+    const __scopeName = (value, fallback = 'cache') => {
+      const option = __plain(value) ? value : {};
+      const requested = typeof value === 'string' ? value
+        : typeof option.scope === 'string' ? option.scope
+          : typeof option.type === 'string' ? option.type : fallback;
+      if (requested === 'local' || requested === 'chat') return 'chat';
+      if (__scopeNames.has(requested)) return requested;
+      return fallback;
+    };
     const __fallback = value => __plain(value)
       ? (__owns(value, 'defaults') ? value.defaults : undefined)
       : typeof value === 'string' && __scopeNames.has(value) ? undefined : value;
     const __scope = value => {
-      const option = __plain(value) ? value : {};
-      const requested = typeof value === 'string' ? value
-        : typeof option.scope === 'string' ? option.scope
-          : typeof option.type === 'string' ? option.type : 'cache';
-      if (requested === 'global') return variableScopes.global ?? {};
-      if (requested === 'preset') return variableScopes.preset ?? {};
-      if (requested === 'character') return variableScopes.character ?? {};
-      if (requested === 'local' || requested === 'chat') return variableScopes.chat ?? {};
-      if (requested === 'message') return variableScopes.message ?? {};
-      if (requested === 'initial') return variableScopes.initial ?? {};
-      return variables;
+      const requested = __scopeName(value);
+      return requested === 'cache' ? variables : (__scopes[requested] ?? variables);
     };
     const getvar = (name, options = undefined) => __read(__scope(options), name, __fallback(options));
     const __scoped = scope => (name, options = undefined) => __read(scope, name, __fallback(options));
-    const getchatvar = __scoped(variableScopes.chat ?? {});
-    const getglobalvar = __scoped(variableScopes.global ?? {});
+    const getchatvar = __scoped(__scopes.chat);
+    const getglobalvar = __scoped(__scopes.global);
     const getlocalvar = getchatvar;
-    const getpresetvar = __scoped(variableScopes.preset ?? {});
-    const getcharactervar = __scoped(variableScopes.character ?? {});
-    const getmessagevar = __scoped(variableScopes.message ?? {});
+    const getpresetvar = __scoped(__scopes.preset);
+    const getcharactervar = __scoped(__scopes.character);
+    const getmessagevar = __scoped(__scopes.message);
     const getVar = getvar;
     const getChatVar = getchatvar;
     const getGlobalVar = getglobalvar;
@@ -628,8 +644,472 @@ function compileTemplate(
     const getPresetVar = getpresetvar;
     const getCharacterVar = getcharactervar;
     const getMessageVar = getmessagevar;
+    const __missing = {};
+    const __hasPath = (record, path) => __readPath(record, path, __missing) !== __missing;
+    const __replaceRoot = (record, value) => {
+      if (record === value) return record;
+      for (const key of Object.keys(record)) delete record[key];
+      if (__plain(value)) __merge(record, value);
+      return record;
+    };
+    const __optionNames = new Set([
+      'nx', 'xx', 'n', 'nxs', 'xxs', 'old', 'new', 'fullcache',
+      'global', 'local', 'message', 'cache', 'initial', 'true', 'false',
+    ]);
+    const __optionObject = (options, defaults = {}) => {
+      if (typeof options === 'string') {
+        if (__scopeNames.has(options)) {
+          return { ...defaults, ...(options === 'local' ? { scope: 'local' } : { scope: options }) };
+        }
+        if (options === 'nx' || options === 'xx' || options === 'n' || options === 'nxs' || options === 'xxs') {
+          return { ...defaults, flags: options };
+        }
+        if (options === 'old' || options === 'new' || options === 'fullcache') {
+          return { ...defaults, results: options };
+        }
+      }
+      if (typeof options === 'boolean') return { ...defaults, dryRun: options };
+      return __plain(options) ? { ...defaults, ...options } : { ...defaults };
+    };
+    const __resultValue = (oldValue, newValue, options) =>
+      options.results === 'old' ? oldValue
+        : options.results === 'fullcache' ? variables : newValue;
+    const __writeVariable = (key, value, options, forcedScope = undefined) => {
+      const normalized = __optionObject(options, { scope: 'message', flags: 'n', results: 'new' });
+      const targetScope = forcedScope ?? __scopeName(normalized.scope, 'message');
+      const target = targetScope === 'cache' ? variables : (__scopes[targetScope] ?? variables);
+      const cacheExists = __hasPath(variables, key);
+      const scopeExists = key === null ? true : __hasPath(target, key);
+      const flags = normalized.flags ?? 'n';
+      if ((flags === 'nx' && cacheExists) || (flags === 'xx' && !cacheExists)
+        || (flags === 'nxs' && scopeExists) || (flags === 'xxs' && !scopeExists)) return undefined;
+      const oldValue = key === null ? __cloneDeep(variables) : __cloneDeep(__readPath(variables, key, undefined));
+      let nextValue = value === undefined ? undefined : __cloneDeep(value);
+      if (normalized.index !== undefined && key !== null) {
+        const indexed = __cloneDeep(__readPath(target, key, {}));
+        const index = String(normalized.index);
+        if (nextValue === undefined) __deletePath(indexed, index);
+        else __writePath(indexed, index, nextValue);
+        nextValue = indexed;
+      }
+      if (normalized.merge && __plain(nextValue)) {
+        const merged = __plain(oldValue) ? __cloneDeep(oldValue) : Object.create(null);
+        nextValue = __merge(merged, nextValue);
+      }
+      const apply = record => {
+        if (key === null) {
+          if (nextValue === undefined) __replaceRoot(record, Object.create(null));
+          else __replaceRoot(record, nextValue);
+        } else if (nextValue === undefined) __deletePath(record, key);
+        else __writePath(record, key, nextValue);
+      };
+      apply(target);
+      if (target !== variables) apply(variables);
+      return __resultValue(oldValue, nextValue, normalized);
+    };
+    const setvar = (key, value, options = {}) => __writeVariable(key, value, options);
+    const setLocalVar = (key, value, options = {}) => __writeVariable(key, value, options, 'chat');
+    const setGlobalVar = (key, value, options = {}) => __writeVariable(key, value, options, 'global');
+    const setMessageVar = (key, value, options = {}) => __writeVariable(key, value, options, 'message');
+    const __updateNumber = (key, delta, options, sign) => {
+      const normalized = __optionObject(options, { inscope: 'cache', outscope: 'message', defaults: 0, flags: 'n', results: 'new' });
+      const readScope = __scopeName(normalized.inscope, 'cache');
+      const readRecord = readScope === 'cache' ? variables : (__scopes[readScope] ?? variables);
+      const cacheExists = __hasPath(variables, key);
+      const scopeExists = __hasPath(readRecord, key);
+      const flags = normalized.flags ?? 'n';
+      if ((flags === 'nx' && cacheExists) || (flags === 'xx' && !cacheExists)
+        || (flags === 'nxs' && scopeExists) || (flags === 'xxs' && !scopeExists)) return undefined;
+      const current = __readPath(readRecord, key, normalized.defaults ?? 0);
+      const next = Number(current ?? 0) + sign * Number(delta ?? 1);
+      const bounded = Math.max(normalized.min ?? -Infinity, Math.min(normalized.max ?? Infinity, next));
+      return __writeVariable(key, bounded, { ...normalized, scope: normalized.outscope ?? 'message', flags: 'n' });
+    };
+    const __updateArgs = (value, options) => {
+      if (__plain(value) || (typeof value === 'string' && __optionNames.has(value))) return { value: 1, options: value };
+      return { value: value === undefined ? 1 : value, options };
+    };
+    const incvar = (key, value = 1, options = {}) => {
+      const args = __updateArgs(value, options); return __updateNumber(key, args.value, args.options, 1);
+    };
+    const decvar = (key, value = 1, options = {}) => {
+      const args = __updateArgs(value, options); return __updateNumber(key, args.value, args.options, -1);
+    };
+    const incLocalVar = (key, value = 1, options = {}) => {
+      const args = __updateArgs(value, options); return __updateNumber(key, args.value, { ...__optionObject(args.options), outscope: 'local' }, 1);
+    };
+    const incGlobalVar = (key, value = 1, options = {}) => {
+      const args = __updateArgs(value, options); return __updateNumber(key, args.value, { ...__optionObject(args.options), outscope: 'global' }, 1);
+    };
+    const incMessageVar = (key, value = 1, options = {}) => {
+      const args = __updateArgs(value, options); return __updateNumber(key, args.value, { ...__optionObject(args.options), outscope: 'message' }, 1);
+    };
+    const decLocalVar = (key, value = 1, options = {}) => {
+      const args = __updateArgs(value, options); return __updateNumber(key, args.value, { ...__optionObject(args.options), outscope: 'local' }, -1);
+    };
+    const decGlobalVar = (key, value = 1, options = {}) => {
+      const args = __updateArgs(value, options); return __updateNumber(key, args.value, { ...__optionObject(args.options), outscope: 'global' }, -1);
+    };
+    const decMessageVar = (key, value = 1, options = {}) => {
+      const args = __updateArgs(value, options); return __updateNumber(key, args.value, { ...__optionObject(args.options), outscope: 'message' }, -1);
+    };
+    const __deleteValue = (key, index, options, forcedScope = undefined) => {
+      const normalized = __optionObject(options, { scope: forcedScope ?? 'message' });
+      const targetScope = forcedScope ?? __scopeName(normalized.scope, 'message');
+      if (index === undefined) return __writeVariable(key, undefined, normalized, targetScope);
+      const source = forcedScope === undefined && (options === undefined || (__plain(options) && Object.keys(options).length === 0))
+        ? variables : targetScope === 'cache' ? variables : (__scopes[targetScope] ?? variables);
+      let current = __cloneDeep(__readPath(source, key, undefined));
+      if (Array.isArray(current)) {
+        const numericIndex = Number(index);
+        const at = Number.isSafeInteger(numericIndex) && numericIndex >= 0 && numericIndex < current.length
+          ? numericIndex : current.indexOf(index);
+        if (at < 0 || at >= current.length) return undefined;
+        current.splice(at, 1);
+      } else if (__plain(current)) {
+        delete current[String(index)];
+      } else if (typeof current === 'string' && typeof index === 'string') {
+        current = current.split(index).join('');
+      } else if (typeof current === 'string') {
+        const at = Number(index);
+        if (!Number.isSafeInteger(at) || at < 0 || at >= current.length) return undefined;
+        current = current.slice(0, at) + current.slice(at + 1);
+      } else return undefined;
+      return __writeVariable(key, current, normalized, targetScope);
+    };
+    const delvar = (key, index = undefined, options = {}) => __deleteValue(key, index, options);
+    const delLocalVar = (key, index = undefined, options = {}) => __deleteValue(key, index, options, 'chat');
+    const delGlobalVar = (key, index = undefined, options = {}) => __deleteValue(key, index, options, 'global');
+    const delMessageVar = (key, index = undefined, options = {}) => __deleteValue(key, index, options, 'message');
+    const __insertValue = (key, value, index, options, forcedScope = undefined) => {
+      const normalized = __optionObject(options, { scope: forcedScope ?? 'message' });
+      const targetScope = forcedScope ?? __scopeName(normalized.scope, 'message');
+      const target = targetScope === 'cache' ? variables : (__scopes[targetScope] ?? variables);
+      const source = forcedScope === undefined && (options === undefined || (__plain(options) && Object.keys(options).length === 0)) ? variables : target;
+      let current = __cloneDeep(__readPath(source, key, undefined));
+      if (Array.isArray(current)) {
+        const at = index === undefined ? current.length : Math.max(0, Math.min(current.length, Number(index) < 0 ? current.length + Number(index) : Number(index)));
+        current.splice(Number.isFinite(at) ? at : current.length, 0, __cloneDeep(value));
+      } else if (__plain(current) && index !== undefined) {
+        const name = String(index);
+        const normalized = __optionObject(options);
+        if ((normalized.flags === 'nx' && __owns(current, name)) || (normalized.flags === 'xx' && !__owns(current, name))) return undefined;
+        __set(current, name, __cloneDeep(value));
+      } else if (typeof current === 'string') {
+        if (index === undefined) current += String(value ?? '');
+        else {
+          const at = Number(index) < 0 ? Math.max(0, current.length + Number(index)) : Math.min(current.length, Number(index));
+          if (!Number.isFinite(at)) return undefined;
+          current = current.slice(0, at) + String(value ?? '') + current.slice(at);
+        }
+      } else return undefined;
+      return __writeVariable(key, current, normalized, targetScope);
+    };
+    const insvar = (key, value, index = undefined, options = {}) => __insertValue(key, value, index, options);
+    const insertLocalVar = (key, value, index = undefined, options = {}) => __insertValue(key, value, index, options, 'chat');
+    const insertGlobalVar = (key, value, index = undefined, options = {}) => __insertValue(key, value, index, options, 'global');
+    const insertMessageVar = (key, value, index = undefined, options = {}) => __insertValue(key, value, index, options, 'message');
     const getWorldInfo = async (...args) => globalThis.__agentRpGetWorldInfo(...args);
     const getwi = getWorldInfo;
+    const getWorldInfoData = async (name = undefined) => {
+      const raw = await globalThis.__agentRpGetWorldInfoData(name);
+      try { const value = JSON.parse(raw); return Array.isArray(value) ? value : []; }
+      catch { return []; }
+    };
+    const __worldInfoKeywords = value => (Array.isArray(value) ? value : [value])
+      .map(item => String(item ?? '').trim()).filter(Boolean);
+    const __worldInfoText = keywords => __worldInfoKeywords(keywords).join('\\n');
+    const __worldInfoCondition = (entry, condition = {}) => {
+      if (condition && typeof condition === 'object') {
+        if (condition.constant !== undefined && Boolean(entry.constant) !== Boolean(condition.constant)) return false;
+        if (condition.disabled !== undefined && Boolean(entry.disable) !== Boolean(condition.disabled)) return false;
+        if (condition.vectorized !== undefined && Boolean(entry.vectorized) !== Boolean(condition.vectorized)) return false;
+      }
+      return true;
+    };
+    const __worldInfoLogic = value => {
+      if (value === 'NOT_ALL' || value === 'not-all' || Number(value) === 1) return 'not-all';
+      if (value === 'NOT_ANY' || value === 'not-any' || Number(value) === 2) return 'not-any';
+      if (value === 'AND_ALL' || value === 'and-all' || Number(value) === 3) return 'and-all';
+      return 'and-any';
+    };
+    const __worldInfoKeyList = (entry, primary) => {
+      const value = primary
+        ? (entry.key ?? entry.keys)
+        : (entry.keysecondary ?? entry.secondaryKeys);
+      return Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
+    };
+    const __worldInfoLiteralHit = (text, key, caseSensitive, wholeWords) => {
+      const needle = String(key ?? '');
+      if (needle === '') return false;
+      const haystack = caseSensitive ? text : text.toLocaleLowerCase();
+      const normalizedNeedle = caseSensitive ? needle : needle.toLocaleLowerCase();
+      if (!wholeWords || /\\s/u.test(normalizedNeedle)) return haystack.includes(normalizedNeedle);
+      let offset = haystack.indexOf(normalizedNeedle);
+      while (offset >= 0) {
+        const before = offset === 0 ? '' : haystack[offset - 1];
+        const end = offset + normalizedNeedle.length;
+        const after = end >= haystack.length ? '' : haystack[end];
+        if (!/[\\p{L}\\p{N}_]/u.test(before) && !/[\\p{L}\\p{N}_]/u.test(after)) return true;
+        offset = haystack.indexOf(normalizedNeedle, offset + 1);
+      }
+      return false;
+    };
+    const __worldInfoRegexHit = (text, key, caseSensitive) => {
+      try {
+        if (key instanceof RegExp) {
+          key.lastIndex = 0;
+          return key.test(text);
+        }
+        const source = String(key ?? '');
+        if (source === '') return false;
+        let pattern = source;
+        let flags = caseSensitive ? '' : 'i';
+        if (source[0] === '/') {
+          const end = source.lastIndexOf('/');
+          if (end > 0) {
+            pattern = source.slice(1, end);
+            flags = source.slice(end + 1) + (caseSensitive ? '' : 'i');
+          }
+        }
+        return new RegExp(pattern, flags).test(text);
+      } catch { return false; }
+    };
+    const __worldInfoKeyMatches = (entry, keywords) => {
+      if (Boolean(entry.constant)) return true;
+      const text = __worldInfoText(keywords);
+      const caseSensitive = entry.caseSensitive === true;
+      const wholeWords = entry.matchWholeWords === true;
+      const useRegex = entry.useRegex === true;
+      const hit = key => useRegex
+        ? __worldInfoRegexHit(text, key, caseSensitive)
+        : __worldInfoLiteralHit(text, key, caseSensitive, wholeWords);
+      const primary = __worldInfoKeyList(entry, true);
+      if (!primary.some(hit)) return false;
+      const secondary = __worldInfoKeyList(entry, false);
+      if (entry.selective !== true || secondary.length === 0) return true;
+      const matched = secondary.map(hit);
+      switch (__worldInfoLogic(entry.selectiveLogic)) {
+        case 'and-all': return matched.every(Boolean);
+        case 'not-any': return matched.every(value => !value);
+        case 'not-all': return matched.some(value => !value);
+        default: return matched.some(Boolean);
+      }
+    };
+    const selectActivatedEntries = (entries, keywords, condition = {}) =>
+      (Array.isArray(entries) ? entries : []).filter(entry => entry && typeof entry === 'object'
+        && __worldInfoCondition(entry, condition)
+        && (entry.disable !== true || condition?.disabled === true)
+        && __worldInfoKeyMatches(entry, keywords));
+    const getWorldInfoActivatedData = async (name, keywords, condition = {}) =>
+      selectActivatedEntries(await getWorldInfoData(name), keywords, condition);
+    const getEnabledWorldInfoEntries = async (...args) => {
+      void args;
+      return getWorldInfoData();
+    };
+    const __findWorldInfoEntry = async (book, title, force = false) => {
+      const entries = await getWorldInfoData(book);
+      const text = String(title ?? '');
+      return entries.find(entry => (force || entry.disable !== true)
+        && (String(entry.uid) === text || String(entry.comment ?? '') === text
+          || String(entry.name ?? '') === text)) ?? null;
+    };
+    const activewi = async (...args) => {
+      const explicitBook = args.length >= 2 && (typeof args[0] === 'string' || typeof args[0] === 'number');
+      return __findWorldInfoEntry(explicitBook ? args[0] : undefined,
+        explicitBook ? args[1] : args[0], explicitBook ? args[2] === true : args[1] === true);
+    };
+    const activateWorldInfo = activewi;
+    const activateWorldInfoByKeywords = async (keywords, condition = {}) =>
+      selectActivatedEntries(await getEnabledWorldInfoEntries(), keywords, condition);
+    const __stripJsonComments = text => {
+      let output = '';
+      let quote = '';
+      let escaped = false;
+      for (let index = 0; index < text.length; index += 1) {
+        const character = text[index];
+        const next = text[index + 1];
+        if (quote !== '') {
+          output += character;
+          if (escaped) escaped = false;
+          else if (character === '\\\\') escaped = true;
+          else if (character === quote) quote = '';
+          continue;
+        }
+        if (character === '"' || character === "'") { quote = character; output += character; continue; }
+        if (character === '/' && next === '/') {
+          index += 1;
+          while (index + 1 < text.length && text[index + 1] !== '\\n' && text[index + 1] !== '\\r') index += 1;
+          continue;
+        }
+        if (character === '/' && next === '*') {
+          index += 2;
+          while (index + 1 < text.length && !(text[index] === '*' && text[index + 1] === '/')) index += 1;
+          index += 1;
+          continue;
+        }
+        output += character;
+      }
+      return output;
+    };
+    const __singleQuoteJson = text => {
+      let output = '';
+      let quote = '';
+      let escaped = false;
+      for (let index = 0; index < text.length; index += 1) {
+        const character = text[index];
+        if (quote === '') {
+          if (character === "'") { quote = "'"; output += '"'; }
+          else if (character === '"') { quote = '"'; output += character; }
+          else { output += character; }
+          continue;
+        }
+        if (quote === '"') {
+          output += character;
+          if (escaped) escaped = false;
+          else if (character === '\\\\') escaped = true;
+          else if (character === '"') quote = '';
+          continue;
+        }
+        if (escaped) {
+          output += character === "'" ? "'" : character === '"' ? '\\\\"' : '\\\\' + character;
+          escaped = false;
+          continue;
+        }
+        if (character === '\\\\') { escaped = true; continue; }
+        if (character === "'") { quote = ''; output += '"'; continue; }
+        if (character === '"') output += '\\\\"';
+        else output += character;
+      }
+      if (escaped) output += '\\\\\\\\';
+      if (quote !== '') return null;
+      return output;
+    };
+    const parseJSON = text => {
+      if (typeof text !== 'string') return text;
+      try { return JSON.parse(text); } catch {}
+      let normalized = text.trim().replace(/^\\x60{3}(?:json|javascript)?\\s*/iu, '').replace(/\\s*\\x60{3}$/u, '')
+        .replace(/[“”]/gu, '"').replace(/[‘’]/gu, "'");
+      normalized = __stripJsonComments(normalized).replace(/([{,]\\s*)([A-Za-z_$][\\w$-]*)(\\s*:)/gu, '$1"$2"$3');
+      const singleQuoted = __singleQuoteJson(normalized);
+      if (singleQuoted === null) return null;
+      normalized = singleQuoted.replace(/,\\s*([}\\]])/gu, '$1').trim();
+      try { return JSON.parse(normalized); } catch { return null; }
+    };
+    const __jsonPointer = value => {
+      const text = String(value ?? '');
+      if (text === '') return [];
+      if (!text.startsWith('/')) throw new Error('invalid JSON Pointer');
+      return text.slice(1).split('/').map(part => part.replace(/~1/gu, '/').replace(/~0/gu, '~'));
+    };
+    const __jsonPointerParent = (root, parts) => {
+      if (parts.length === 0) return { parent: undefined, key: undefined };
+      let parent = root;
+      for (let index = 0; index < parts.length - 1; index += 1) {
+        const key = parts[index];
+        if (parent === null || typeof parent !== 'object' || !__owns(parent, key)) throw new Error('JSON Patch path not found');
+        parent = parent[key];
+      }
+      if (parent === null || typeof parent !== 'object') throw new Error('JSON Patch parent is not an object');
+      return { parent, key: parts[parts.length - 1] };
+    };
+    const __jsonPointerValue = (root, parts) => {
+      let current = root;
+      for (const key of parts) {
+        if (current === null || typeof current !== 'object' || !__owns(current, key)) throw new Error('JSON Patch path not found');
+        current = current[key];
+      }
+      return current;
+    };
+    const __jsonPatchAdd = (root, parts, value) => {
+      if (parts.length === 0) return __cloneDeep(value);
+      const { parent, key } = __jsonPointerParent(root, parts);
+      if (Array.isArray(parent)) {
+        if (key === '-') { parent.push(__cloneDeep(value)); return root; }
+        const index = Number(key);
+        if (!Number.isSafeInteger(index) || index < 0 || index > parent.length) throw new Error('invalid JSON Patch array index');
+        parent.splice(index, 0, __cloneDeep(value));
+      } else __set(parent, key, __cloneDeep(value));
+      return root;
+    };
+    const __jsonPatchRemove = (root, parts) => {
+      if (parts.length === 0) return undefined;
+      const { parent, key } = __jsonPointerParent(root, parts);
+      if (!__owns(parent, key)) throw new Error('JSON Patch path not found');
+      if (Array.isArray(parent)) {
+        const index = Number(key);
+        if (!Number.isSafeInteger(index) || index < 0 || index >= parent.length) throw new Error('invalid JSON Patch array index');
+        parent.splice(index, 1);
+      } else delete parent[key];
+      return root;
+    };
+    const __jsonDeepEqual = (left, right) => {
+      if (Object.is(left, right)) return true;
+      if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') return false;
+      if (Array.isArray(left) !== Array.isArray(right)) return false;
+      const leftKeys = Object.keys(left);
+      const rightKeys = Object.keys(right);
+      return leftKeys.length === rightKeys.length
+        && leftKeys.every(key => __owns(right, key) && __jsonDeepEqual(left[key], right[key]));
+    };
+    const jsonPatch = (dest, changes) => {
+      if (!Array.isArray(changes) || changes.length > 512) throw new Error('invalid JSON Patch');
+      let result = __cloneDeep(dest);
+      for (const change of changes) {
+        if (!change || typeof change !== 'object') throw new Error('invalid JSON Patch operation');
+        const operation = String(change.op ?? '');
+        const path = __jsonPointer(change.path);
+        if (operation === 'add') result = __jsonPatchAdd(result, path, change.value);
+        else if (operation === 'remove') result = __jsonPatchRemove(result, path);
+        else if (operation === 'replace') {
+          if (path.length === 0) result = __cloneDeep(change.value);
+          else { __jsonPointerValue(result, path); result = __jsonPatchRemove(result, path); result = __jsonPatchAdd(result, path, change.value); }
+        } else if (operation === 'move') {
+          const from = __jsonPointer(change.from);
+          if (from.length < path.length && from.every((part, index) => part === path[index])) throw new Error('invalid JSON Patch move');
+          const value = __cloneDeep(__jsonPointerValue(result, from));
+          result = __jsonPatchRemove(result, from);
+          result = __jsonPatchAdd(result, path, value);
+        } else if (operation === 'copy') {
+          result = __jsonPatchAdd(result, path, __jsonPointerValue(result, __jsonPointer(change.from)));
+        } else if (operation === 'test') {
+          if (!__jsonDeepEqual(__jsonPointerValue(result, path), change.value)) throw new Error('JSON Patch test failed');
+        } else throw new Error('unsupported JSON Patch operation');
+      }
+      return result;
+    };
+    const patchVariables = (key, changes, options = {}) => {
+      const current = key === null ? variables : __readPath(variables, key, undefined);
+      return __writeVariable(key, jsonPatch(current, changes), options);
+    };
+    const __matchPattern = (value, pattern) => {
+      if (pattern instanceof RegExp) { pattern.lastIndex = 0; return pattern.test(value); }
+      return value.includes(String(pattern ?? ''));
+    };
+    const matchChatMessages = (pattern, options = {}) => {
+      const patterns = Array.isArray(pattern) ? pattern : [pattern];
+      if (patterns.length === 0) return false;
+      const hasId = Number.isSafeInteger(Number(options?.id));
+      let selected;
+      if (hasId) {
+        const id = Number(options.id);
+        const index = id < 0 ? __transcript.length + id : id;
+        selected = index >= 0 && index < __transcript.length ? [__transcript[index].content] : [];
+      } else {
+        const rawStart = Number.isSafeInteger(Number(options?.start)) ? Number(options.start) : -2;
+        const rawEnd = Number.isSafeInteger(Number(options?.end)) ? Number(options.end) : __transcript.length;
+        const start = rawStart < 0 ? __transcript.length + rawStart : rawStart;
+        const end = rawEnd < 0 ? __transcript.length + rawEnd : rawEnd;
+        const role = options?.role === undefined ? 'assistant' : options.role === 'any' ? undefined : options.role;
+        selected = start <= end
+          ? __transcript.slice(Math.max(0, start), Math.min(__transcript.length, end))
+            .filter(message => role === undefined || message.role === role).map(message => message.content)
+          : [];
+      }
+      return selected.some(value => options?.and === true
+        ? patterns.every(item => __matchPattern(value, item))
+        : patterns.some(item => __matchPattern(value, item)));
+    };
     const __decodeCharacterData = raw => raw === '' ? null : JSON.parse(raw);
     const getCharData = async (name = char) =>
       __decodeCharacterData(await globalThis.__agentRpGetCharData(name));
@@ -900,6 +1380,36 @@ export class EjsTemplateEngine implements LorebookRegexEngine {
       })
       vm.setProp(vm.global, '__agentRpGetWorldInfo', lookup)
       lookup.dispose()
+      const getWorldInfoData = vm.newFunction('__agentRpGetWorldInfoData', (...handles) => {
+        const args = handles.map(handle => vm.dump(handle) as unknown)
+        const books = context.worldInfoBooks ?? []
+        const selector = resourceSelector(args[0])
+        const selectedBooks = selector === undefined
+          ? books
+          : books.filter(book => book.id === String(selector) || book.name === String(selector))
+        const data = selectedBooks.flatMap(book => book.entries.map((entry, index) => {
+          const source = jsonRecord(entry.data)
+          const uid = source?.uid ?? (Number.isSafeInteger(Number(entry.sourceId)) ? Number(entry.sourceId) : index)
+          return {
+            ...(source ?? {}),
+            uid,
+            key: Array.isArray(source?.key) ? source.key : [],
+            keysecondary: Array.isArray(source?.keysecondary) ? source.keysecondary : [],
+            comment: source?.comment ?? entry.comment ?? entry.name ?? '',
+            content: entry.content,
+            disable: source?.disable === true,
+            world: source?.world ?? book.name ?? book.id,
+            worldbook: book.id,
+            sourceId: entry.sourceId,
+            ...(entry.name === undefined ? {} : { name: entry.name }),
+          }
+        }))
+        const serialized = JSON.stringify(data)
+        chargeResource(serialized.length)
+        return vm.newString(serialized)
+      })
+      vm.setProp(vm.global, '__agentRpGetWorldInfoData', getWorldInfoData)
+      getWorldInfoData.dispose()
       const getCharacterData = vm.newFunction('__agentRpGetCharData', (...handles) => {
         const args = handles.map(handle => vm.dump(handle) as unknown)
         const selected = selectCharacter(args[0])

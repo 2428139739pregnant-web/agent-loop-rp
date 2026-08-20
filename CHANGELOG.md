@@ -12,12 +12,14 @@
 - 独立 Tavern Helper 生成现在会在 provider 调用前接入当前会话规范化世界书的确定性 ST matcher：常量条目、卡内/外部/助手来源的当前可触发条目按既有概率、递归、位置和去重规则组装到私有生成输入，不调用世界书语义 agent，也不增加额外 LLM 调用；这不等同于支持从 iframe 内动态执行任意 World Info 激活。
 - 补齐独立生成的结构化请求子集：`custom_api` 支持显式 `apiurl`/`key`，以及 `model`、数值型 `temperature`/`max_tokens` 覆盖；`tools` 支持 JSON 安全的 function 定义、`tool_choice`，并把 provider 返回的 `tool_calls` 原样返回；`json_schema` 转换为 OpenAI-compatible `response_format=json_schema`。`tools` 与 `json_schema` 互斥，当前只完成一次调用和结果透传，不执行工具或自动追加工具调用回合。
 - 记录 standalone 边界：`custom_api.proxy_preset` 只做协议校验，不连接酒馆的代理预设仓库；没有显式 `apiurl` 时会拒绝该请求，`custom_api.source` 不负责切换 provider；官方 `image` 输入不进入请求，也不从卡片 iframe 获取或转发图片。
+- 补齐 Tavern Helper 的模型发现和停止语义：`getModelList({ apiurl, key })` 通过现有 OpenAI-compatible `/models` 端点返回模型 id；`stopGenerationById()`/`stopAllGeneration()` 会把停止请求传到宿主并中止对应的后端 fetch，而不是只在 iframe 内标记取消；standalone 没有代理预设仓库，因此 `getProxyPresetNames()` 明确返回空列表。
 - 角色卡前端现在在 iframe 启动前获得与酒馆一致的原始卡片快照：详情/切换角色接口提供 `RawCharacter`，`SillyTavern.getContext().character`/`characters[0]` 保留 `data`、`extensions`、`character_book` 等字段，并补齐隔离环境中的 `getCharData()`、`getchar()`/`getChara()`；不会把原始卡片注入模型提示词，也不会增加 LLM 调用。
 - 将 EJS 当前角色资源快照真正接入服务端 renderer：`getCharData()`/`getchar()` 现在可以读取角色卡原始 JSON（含扩展字段与 `character_book`），不会回退读取文件或增加模型调用；卡片 iframe 在没有酒馆宿主时提供受限的 `triggerSlash()` 兼容子集，宿主存在时优先转发官方实现。
 - Tavern Helper 聊天 mutation 现在保留并规范化 `refresh: none/affected/all`，兼容旧的布尔值和 `options.refresh` 写法；服务端响应会回传最终 refresh 模式，避免宿主在解析或响应阶段丢失刷新语义。
 - 对齐酒馆助手公开的 `setChatMessage(fieldValues, messageId, options)` 签名：支持局部更新 `message`、`data`、`extra` 等楼层字段，保留旧版 `(messageId, message)` 调用兼容；`getChatMessages` 同时支持 `0-` 形式的开放末端范围。
 - 修正 ST-Prompt-Template 的 `[GENERATE:REGEX:*]`：正则型生成条目现在由自身消息扫描激活，不再被普通蓝/绿灯过滤提前丢弃，仍由本地插件 lane 处理且不增加 LLM 调用。
 - 角色卡/酒馆助手 iframe 不再提供原样返回的 `EjsTemplate` 占位：补齐隔离沙盒内的 `evalTemplate`、`prepareContext`、`compileTemplate`、EJS 条件/循环/输出、楼层读取、变量读取/更新和世界书条目读取；不会额外调用 LLM，也不会开放父页面或网络能力。
+- 扩展 EJS Prompt Template 兼容基础层：补齐 `parseJSON`、`jsonPatch`/`patchVariables`、`matchChatMessages`、`selectActivatedEntries`、世界书数据读取及常用变量增删改助手；角色卡、外部书和酒馆助手书统一投影 ST 形状的条目元数据，变量修改仅作用于当前模板渲染副本，不写回 Session，也不增加 LLM 调用。
 - 补齐酒馆原生 `setExtensionPrompt` 位置语义：`NONE`、`IN_PROMPT`、`IN_CHAT`、`BEFORE_PROMPT`（`-1/0/1/2`）现在会分别进入扫描、主提示词后、聊天深度和主提示词前锚点；保留深度、角色、扫描开关与函数过滤器。
 - 修正 ST World Info 位置映射：`2/3` 现在进入 Author's Note 前后，`5/6` 进入示例消息前后；角色卡与独立世界书的蓝灯、绿灯命中条目统一使用同一套位置语义。
 - 补齐酒馆助手 `chatMetadata` 桥接：支持 `SillyTavern.getContext().chatMetadata` 与 `updateChatMetadata(values, reset)`，并将更新持久化到当前会话。

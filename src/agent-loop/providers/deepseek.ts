@@ -44,6 +44,7 @@ export class DeepSeekProvider implements LLMProvider {
     }
     const response = await fetch(`${this.config.baseUrl}/chat/completions`, {
       method: 'POST',
+      ...(options?.signal === undefined ? {} : { signal: options.signal }),
       headers: {
         'content-type': 'application/json',
         authorization: `Bearer ${this.config.apiKey}`,

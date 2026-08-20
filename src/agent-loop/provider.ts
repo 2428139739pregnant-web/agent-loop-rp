@@ -56,6 +56,8 @@ export interface ChatOptions {
   temperature?: number
   /** OpenAI-compatible completion cap; the response prompt still carries the soft length target. */
   max_tokens?: number
+  /** Abort an in-flight provider request when a Tavern Helper generation is stopped. */
+  signal?: AbortSignal
   response_format?: { type: 'json_object' } | { type: 'text' }
   /** Optional OpenAI-compatible function calling for isolated helper generation. */
   tools?: readonly ToolDefinition[]

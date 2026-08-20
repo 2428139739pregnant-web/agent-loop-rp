@@ -76,7 +76,7 @@ test('EJS character and preset getters read only JSON snapshots', async () => {
       name: '主提示词',
       content: '<%= name %>|<%= mood %>|<%= getvar("affinity") %>',
     }],
-  } as const
+  }
 
   assert.deepEqual(
     engine.render('<%- JSON.stringify(await getCharData()) %>', context),
@@ -160,4 +160,154 @@ test('EJS Prompt Template injection uid replaces the same entry', async () => {
     { characterName: '莉娜', userName: '小明', messages: [], promptInjections },
   )
   assert.deepEqual(result, { ok: true, text: 'new' })
+})
+
+test('EJS parseJSON accepts bounded JSON5 and jsonPatch stays immutable', async () => {
+  const engine = await EjsTemplateEngine.create()
+  const result = engine.render(
+    `<% const original = { user: { name: '莉娜' }, items: [1, 2] }; const patched = jsonPatch(original, [
+      { op: 'replace', path: '/user/name', value: '晓' },
+      { op: 'add', path: '/items/-', value: 3 },
+      { op: 'copy', from: '/user/name', path: '/alias' },
+      { op: 'test', path: '/items/0', value: 1 },
+    ]); const loose = parseJSON("{foo: 'bar', items: [1, 2,],}"); %><%- JSON.stringify({ original, patched, loose }) %>`,
+    { characterName: '莉娜', userName: '小明', messages: [] },
+  )
+  assert.deepEqual(result, {
+    ok: true,
+    text: '{"original":{"user":{"name":"莉娜"},"items":[1,2]},"patched":{"user":{"name":"晓"},"items":[1,2,3],"alias":"晓"},"loose":{"foo":"bar","items":[1,2]}}',
+  })
+})
+
+test('EJS matchChatMessages honors default assistant scope, ranges, ids, and all-pattern matching', async () => {
+  const engine = await EjsTemplateEngine.create()
+  const result = engine.render(
+    '<%= matchChatMessages("needle one", { id: 2 }) %>|<%= matchChatMessages(["needle one", "other"], { start: -5, role: "assistant", and: true }) %>|<%= matchChatMessages("needle user", { role: "user", start: -3 }) %>|<%= matchChatMessages("needle user") %>',
+    {
+      characterName: '莉娜',
+      userName: '小明',
+      messages: [],
+      transcript: [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'hello' },
+        { role: 'assistant', content: 'needle one' },
+        { role: 'user', content: 'needle user' },
+        { role: 'assistant', content: 'needle one other' },
+      ],
+    },
+  )
+  assert.deepEqual(result, { ok: true, text: 'true|true|true|false' })
+})
+
+test('EJS selectActivatedEntries matches ST key and secondary-key logic without host state', async () => {
+  const engine = await EjsTemplateEngine.create()
+  const result = engine.render(
+    `<% const entries = [
+      { id: 'all', key: ['Magic'], keysecondary: ['Fire', 'Ice'], selective: true, selectiveLogic: 3 },
+      { id: 'not-any', key: ['Magic'], keysecondary: ['Fire', 'Ice'], selective: true, selectiveLogic: 2 },
+      { id: 'constant', constant: true, key: [] },
+      { id: 'disabled', disable: true, key: ['Magic'] },
+    ]; %><%- JSON.stringify(selectActivatedEntries(entries, 'magic fire ice').map(entry => entry.id)) %>|<%- JSON.stringify(selectActivatedEntries(entries, 'magic').map(entry => entry.id)) %>`,
+    { characterName: '莉娜', userName: '小明', messages: [] },
+  )
+    assert.deepEqual(result, { ok: true, text: '["all","constant"]|["not-any","constant"]' })
+})
+
+test('EJS variable mutations are render-local and support set/inc/dec/del/ins/patch', async () => {
+  const engine = await EjsTemplateEngine.create()
+  const context = {
+    characterName: '莉娜',
+    userName: '小明',
+    messages: [],
+    variableScopes: {
+      global: { score: 1 },
+      message: { count: 2, items: ['a'], profile: { name: '莉娜' } },
+    },
+  }
+  const result = engine.render(
+    `<% setvar('count', 3); incvar('count', 2); decvar('count', 1); insvar('items', 'b'); insvar('items', 'x', 1); delvar('items', 0); patchVariables('profile', [{ op: 'add', path: '/level', value: 2 }]); setGlobalVar('score', 5); %><%- JSON.stringify({ count: getvar('count', { scope: 'message' }), items: getvar('items', { scope: 'message' }), profile: getvar('profile', { scope: 'message' }), score: getvar('score', { scope: 'global' }) }) %>`,
+    context,
+  )
+  assert.deepEqual(result, {
+    ok: true,
+    text: '{"count":4,"items":["x","b"],"profile":{"name":"莉娜","level":2},"score":5}',
+  })
+  assert.deepEqual(
+    engine.render('<%= getvar("count", { scope: "message" }) %>|<%= getvar("score", { scope: "global" }) %>', context),
+    { ok: true, text: '2|1' },
+  )
+})
+
+test('EJS pure JSON helpers tolerate common LLM JSON and keep jsonPatch immutable', async () => {
+  const engine = await EjsTemplateEngine.create()
+  const result = engine.render(
+    `<% const fence = String.fromCharCode(96).repeat(3); const parsed = parseJSON(fence + "json\\n{foo: 'bar', list: [1, 2,],}\\n" + fence);
+       const original = { profile: { score: 1 }, list: ['a'] };
+       const patched = jsonPatch(original, [
+         { op: 'replace', path: '/profile/score', value: 2 },
+         { op: 'add', path: '/list/-', value: 'b' },
+       ]); %><%- JSON.stringify(parsed) %>|<%- JSON.stringify(original) %>|<%- JSON.stringify(patched) %>`,
+    { characterName: '莉娜', userName: '小明', messages: [] },
+  )
+  assert.deepEqual(result, {
+    ok: true,
+    text: '{"foo":"bar","list":[1,2]}|{"profile":{"score":1},"list":["a"]}|{"profile":{"score":2},"list":["a","b"]}',
+  })
+})
+
+test('EJS matchChatMessages follows ST range, role, and same-message AND semantics', async () => {
+  const engine = await EjsTemplateEngine.create()
+  const result = engine.render(
+    '<%= matchChatMessages("assistant-hit") %>|<%= matchChatMessages(["assistant-hit", "second"], { and: true }) %>|<%= matchChatMessages(["assistant-hit", "second"], { and: true, role: "assistant" }) %>|<%= matchChatMessages("user-hit", { start: 0, end: 2, role: "user" }) %>',
+    {
+      characterName: '莉娜',
+      userName: '小明',
+      messages: [],
+      transcript: [
+        { role: 'user', content: 'user-hit' },
+        { role: 'assistant', content: 'assistant-hit second' },
+        { role: 'assistant', content: 'other' },
+      ],
+    },
+  )
+  assert.deepEqual(result, { ok: true, text: 'true|true|true|true' })
+})
+
+test('EJS selectActivatedEntries uses ST constant, primary, secondary, and disabled fields', async () => {
+  const engine = await EjsTemplateEngine.create()
+  const result = engine.render(
+    `<% const entries = [
+      { uid: 1, comment: 'primary', key: ['魔法'], constant: false, disable: false },
+      { uid: 2, comment: 'secondary-any', key: ['魔法'], keysecondary: ['火'], selective: true, selectiveLogic: 0, constant: false, disable: false },
+      { uid: 3, comment: 'secondary-miss', key: ['魔法'], keysecondary: ['冰'], selective: true, selectiveLogic: 0, constant: false, disable: false },
+      { uid: 4, comment: 'constant', key: [], constant: true, disable: false },
+      { uid: 5, comment: 'disabled', key: ['魔法'], constant: false, disable: true },
+    ]; %><%- JSON.stringify(selectActivatedEntries(entries, '魔法 火').map(entry => entry.comment)) %>|<%- JSON.stringify(selectActivatedEntries(entries, '魔法', { disabled: true }).map(entry => entry.comment)) %>`,
+    { characterName: '莉娜', userName: '小明', messages: [] },
+  )
+  assert.deepEqual(result, { ok: true, text: '["primary","secondary-any","constant"]|["disabled"]' })
+})
+
+test('EJS variable helpers are render-local and support update, insert, delete, and patch', async () => {
+  const engine = await EjsTemplateEngine.create()
+  const context = {
+    characterName: '莉娜',
+    userName: '小明',
+    messages: [],
+    variables: { state: { score: 1, list: ['a', 'b'] } },
+  }
+  const updated = engine.render(
+    `<% setvar('state.score', 2); incvar('state.score', 3); decvar('state.score', 1);
+       insvar('state.list', 'c'); delvar('state.list', 0);
+       patchVariables('state', [{ op: 'add', path: '/ready', value: true }]); %><%- JSON.stringify(variables) %>|<%= getvar('state.score') %>`,
+    context,
+  )
+  assert.deepEqual(updated, {
+    ok: true,
+    text: '{"state":{"score":4,"list":["b","c"],"ready":true}}|4',
+  })
+  assert.deepEqual(
+    engine.render('<%- JSON.stringify(variables) %>|<%= getvar("state.score") %>', context),
+    { ok: true, text: '{"state":{"score":1,"list":["a","b"]}}|1' },
+  )
 })

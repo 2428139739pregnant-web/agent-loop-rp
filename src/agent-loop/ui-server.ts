@@ -168,6 +168,7 @@ class OpenAICompatibleProvider implements LLMProvider {
     }
     const resp = await fetch(url, {
       method: 'POST',
+      ...(options?.signal === undefined ? {} : { signal: options.signal }),
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${this.apiKey}`,
@@ -587,6 +588,72 @@ function syncAssistantSwipe(message: ChatMessage, content: string): ChatMessage 
   return { ...message, content, swipe_id: swipeId, swipes, swipe_info: swipeInfo }
 }
 
+/** Project normalized WorldbookEntry metadata into the shape used by
+ * ST-Prompt-Template's getWorldInfoData/selectActivatedEntries helpers. */
+function ejsWorldInfoData(entry: WorldbookEntry, sourceId = entry.path): JsonValue {
+  const selectiveLogic = entry.selectiveLogic === 'and-all' ? 3
+    : entry.selectiveLogic === 'not-all' ? 1
+      : entry.selectiveLogic === 'not-any' ? 2 : 0
+  const uid = Number.isSafeInteger(Number(sourceId)) ? Number(sourceId) : sourceId
+  const data: Record<string, JsonValue> = {
+    uid,
+    key: [...entry.keywords],
+    keysecondary: [...(entry.secondaryKeywords ?? [])],
+    comment: entry.comment ?? '',
+    content: entry.content,
+    constant: entry.constant === true,
+    vectorized: false,
+    selective: entry.selective === true,
+    selectiveLogic,
+    order: entry.order,
+    position: entry.position ?? 1,
+    disable: entry.enabled === false,
+    probability: entry.probability ?? 100,
+    useProbability: entry.useProbability ?? true,
+    depth: entry.depth ?? 0,
+    caseSensitive: entry.caseSensitive ?? false,
+    matchWholeWords: entry.matchWholeWords ?? false,
+    useRegex: entry.useRegex ?? false,
+    excludeRecursion: entry.excludeRecursion === true,
+    preventRecursion: entry.preventRecursion === true,
+    ...(entry.scanDepth === undefined ? {} : { scanDepth: entry.scanDepth }),
+    ...(entry.group === undefined ? {} : { group: entry.group }),
+    ...(entry.groupOverride === undefined ? {} : { groupOverride: entry.groupOverride }),
+    ...(entry.groupWeight === undefined ? {} : { groupWeight: entry.groupWeight }),
+  }
+  return snapshotJsonValue(data) as JsonValue
+}
+
+function ejsImportedLorebookData(
+  bookName: string | undefined,
+  entry: ImportedLorebookEntry,
+): JsonValue {
+  const normalized: WorldbookEntry = {
+    path: `${bookName ?? 'worldbook'}/${entry.name ?? entry.sourceId}`,
+    ...(entry.comment === undefined && entry.name === undefined ? {} : { comment: entry.comment ?? entry.name! }),
+    keywords: [...entry.keys],
+    order: entry.insertionOrder,
+    weight: entry.priority ?? 0,
+    content: entry.content,
+    constant: entry.constant,
+    enabled: entry.enabled,
+    secondaryKeywords: [...entry.secondaryKeys],
+    selective: entry.selective,
+    selectiveLogic: entry.secondaryLogic,
+    caseSensitive: entry.caseSensitive,
+    matchWholeWords: entry.matchWholeWords,
+    useRegex: entry.useRegex,
+    ...(entry.probability === undefined ? {} : { probability: entry.probability }),
+    ...(entry.useProbability === undefined ? {} : { useProbability: entry.useProbability }),
+    position: entry.stPosition ?? (entry.position === 'before_char' ? 0 : 1),
+    ...(entry.depth === undefined ? {} : { depth: entry.depth }),
+    ...(entry.scanDepth === undefined ? {} : { scanDepth: entry.scanDepth }),
+    ...(entry.excludeRecursion === undefined ? {} : { excludeRecursion: entry.excludeRecursion }),
+    ...(entry.preventRecursion === undefined ? {} : { preventRecursion: entry.preventRecursion }),
+  }
+  return ejsWorldInfoData(normalized, entry.sourceId)
+}
+
 /** Bind one bounded EJS context to the active character/session. */
 function buildCharacterTemplateRenderer(
   state: AppState,
@@ -637,11 +704,12 @@ function buildCharacterTemplateRenderer(
     readonly name?: string
     readonly lorebook: {
       readonly entries: readonly {
-        readonly sourceId: string
-        readonly name?: string
-        readonly comment?: string
-        readonly content: string
-      }[]
+      readonly sourceId: string
+      readonly name?: string
+      readonly comment?: string
+      readonly content: string
+      readonly data?: JsonValue
+    }[]
     }
   }> = []
   const activeCharacterId = record?.characterId ?? safeFileName(character.name)
@@ -651,7 +719,15 @@ function buildCharacterTemplateRenderer(
     worldInfoSources.push({
       id: `character:${safeFileName(character.name)}`,
       name: cardBook.name ?? character.name,
-      lorebook: cardBook,
+      lorebook: {
+        entries: cardBook.entries.map(entry => ({
+          sourceId: entry.sourceId,
+          ...(entry.name === undefined ? {} : { name: entry.name }),
+          ...(entry.comment === undefined ? {} : { comment: entry.comment }),
+          content: entry.content,
+          data: ejsImportedLorebookData(cardBook.name ?? character.name, entry),
+        })),
+      },
     })
   }
   const fixtureEntries = state.fixtureWorldbook.list()
@@ -663,7 +739,9 @@ function buildCharacterTemplateRenderer(
         entries: fixtureEntries.map(entry => ({
           sourceId: entry.path,
           ...(entry.comment === undefined ? {} : { name: entry.comment }),
+          ...(entry.comment === undefined ? {} : { comment: entry.comment }),
           content: entry.content,
+          data: ejsWorldInfoData(entry),
         })),
       },
     })
@@ -673,7 +751,19 @@ function buildCharacterTemplateRenderer(
     // book must not become visible through getwi() just because it exists in
     // the global catalogue.
     if (disabledImportedBooks !== null && disabledImportedBooks.has(bookId)) continue
-    worldInfoSources.push({ id: `worldbook:${bookId}`, name: book.name ?? bookId, lorebook: book })
+    worldInfoSources.push({
+      id: `worldbook:${bookId}`,
+      name: book.name ?? bookId,
+      lorebook: {
+        entries: book.entries.map(entry => ({
+          sourceId: entry.sourceId,
+          ...(entry.name === undefined ? {} : { name: entry.name }),
+          ...(entry.comment === undefined ? {} : { comment: entry.comment }),
+          content: entry.content,
+          data: ejsImportedLorebookData(book.name ?? bookId, entry),
+        })),
+      },
+    })
   }
   const activeHelperBooks = new Set(helperState === undefined ? [] : tavernHelperActiveWorldbookNames(helperState))
   const deletedHelperBooks = new Set(helperState?.deletedWorldbookNames ?? [])
@@ -687,6 +777,7 @@ function buildCharacterTemplateRenderer(
           sourceId: String(entry.uid),
           name: entry.name,
           content: entry.content,
+          data: ejsWorldInfoData(tavernHelperWorldbookEntryToWorldbookEntry(bookName, entry), String(entry.uid)),
         })),
       },
     })
@@ -802,6 +893,8 @@ const MOCK_MODELS: ReadonlyArray<{ id: string }> = [
   { id: 'mock-model' },
   { id: 'mock-2' },
 ]
+/** In-flight private Tavern Helper generations, keyed by session + generation id. */
+const tavernGenerationControllers = new Map<string, AbortController>()
 
 /** Default config used when no env hints are present. */
 function defaultMockConfig(): ApiConfig {
@@ -2819,11 +2912,18 @@ async function handleTavernGenerateRaw(state: AppState, id: string, req: Incomin
   } catch (error: unknown) {
     return sendError(res, 400, error instanceof Error ? error.message : 'invalid generateRaw request')
   }
+  const generationKey = request.generation_id === undefined ? undefined : `${id}:${request.generation_id}`
+  const controller = new AbortController()
+  if (generationKey !== undefined) {
+    tavernGenerationControllers.get(generationKey)?.abort()
+    tavernGenerationControllers.set(generationKey, controller)
+  }
   try {
     const result = await generateTavernRaw(
       resolveTavernGenerationProvider(state, request),
       request,
       tavernGenerationSources(state, id, request.user_input),
+      controller.signal,
     )
     sendJson(res, 200, {
       content: result.content,
@@ -2833,8 +2933,30 @@ async function handleTavernGenerateRaw(state: AppState, id: string, req: Incomin
       shouldSilence: request.should_silence === true,
     })
   } catch (error: unknown) {
-    sendError(res, 502, `generateRaw failed: ${error instanceof Error ? error.message : String(error)}`)
+    if (controller.signal.aborted) {
+      sendError(res, 499, 'generateRaw stopped')
+    } else {
+      sendError(res, 502, `generateRaw failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  } finally {
+    if (generationKey !== undefined && tavernGenerationControllers.get(generationKey) === controller) {
+      tavernGenerationControllers.delete(generationKey)
+    }
   }
+}
+
+/** POST /api/sessions/:id/tavern-helper/stop-generation — abort one private call. */
+async function handleTavernStopGeneration(state: AppState, id: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!state.sessionRecords.has(id)) return sendError(res, 404, `session not found: ${id}`)
+  const payload = parseJsonBody(await readBody(req, 16 * 1024))
+  const generationId = typeof payload?.generation_id === 'string' ? payload.generation_id.trim() : ''
+  if (generationId.length === 0 || generationId.length > 256) return sendError(res, 400, 'generation_id is invalid')
+  const key = `${id}:${generationId}`
+  const controller = tavernGenerationControllers.get(key)
+  if (controller === undefined) return sendJson(res, 200, { stopped: false, generation_id: generationId })
+  controller.abort()
+  tavernGenerationControllers.delete(key)
+  sendJson(res, 200, { stopped: true, generation_id: generationId })
 }
 
 /** PUT /api/sessions/:id/greeting — replace the active opening greeting. */
@@ -5816,6 +5938,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
         const m = /^\/api\/sessions\/([^/]+)\/tavern-helper\/generate-raw$/u.exec(url.pathname)
         if (method === 'POST' && m !== null) {
           return await handleTavernGenerateRaw(state, decodeURIComponent(m[1] ?? ''), req, res)
+        }
+        const stopMatch = /^\/api\/sessions\/([^/]+)\/tavern-helper\/stop-generation$/u.exec(url.pathname)
+        if (method === 'POST' && stopMatch !== null) {
+          return await handleTavernStopGeneration(state, decodeURIComponent(stopMatch[1] ?? ''), req, res)
         }
       }
       {

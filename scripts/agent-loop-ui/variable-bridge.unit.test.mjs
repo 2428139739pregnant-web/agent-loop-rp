@@ -593,6 +593,24 @@ test('Tavern Helper generate supplies the official default placeholder order', a
   assert.equal(frame.window.TavernHelper.generate, frame.window.generate)
 })
 
+test('Tavern Helper model discovery and generation stop use the host bridge', async () => {
+  const frame = createFrame()
+  assert.deepEqual(plain(await frame.window.getModelList({ apiurl: 'https://example.com/v1', key: 'secret' })), [])
+  let request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'get-model-list')
+  assert.deepEqual(plain(request?.payload), {
+    custom_api: { apiurl: 'https://example.com/v1', key: 'secret' },
+  })
+  assert.deepEqual(plain(frame.window.getProxyPresetNames()), [])
+
+  const pending = frame.window.generateRaw({ user_input: '需要停止' })
+  assert.equal(frame.window.stopGenerationById('frame-test-generation-1'), true)
+  request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'stop-generation')
+  assert.deepEqual(plain(request?.payload), { generation_id: 'frame-test-generation-1' })
+  await assert.rejects(pending, /generation stopped/u)
+})
+
 test('function-valued injection filters are evaluated at generation preparation', async () => {
   const frame = createFrame()
   frame.window.__agentRpCurrentScriptId = 'script-filter'

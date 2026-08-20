@@ -473,6 +473,7 @@ export async function generateTavernRaw(
   provider: LLMProvider,
   request: TavernGenerateRawRequest,
   sources: TavernGenerationSources = {},
+  signal?: AbortSignal,
 ): Promise<LLMResult> {
   const model = request.model ?? request.custom_api?.model
   const temperature = request.temperature ?? (typeof request.custom_api?.temperature === 'number' ? request.custom_api.temperature : undefined)
@@ -481,6 +482,7 @@ export async function generateTavernRaw(
     ...(model === undefined ? {} : { model }),
     ...(temperature === undefined ? {} : { temperature }),
     ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
+    ...(signal === undefined ? {} : { signal }),
     ...(request.response_format === undefined ? {} : { response_format: request.response_format }),
     ...(request.tools === undefined ? {} : { tools: request.tools }),
     ...(request.tool_choice === undefined ? {} : { tool_choice: request.tool_choice }),
