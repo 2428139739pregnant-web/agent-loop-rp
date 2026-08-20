@@ -355,7 +355,7 @@
             applyPpSettingsResponse(r)
           } catch { /* ignore */ }
         })()
-      }, [currentSessionId])
+      }, [])
       useEffect(() => {
         (async () => {
           try {
@@ -363,7 +363,7 @@
             if (r && typeof r === 'object') setMvuSettings((prev) => ({ ...prev, ...r }))
           } catch (err) { setError(String(err.message || err)) }
         })()
-      }, [currentSessionId])
+      }, [])
       useEffect(() => {
         (async () => {
           try {

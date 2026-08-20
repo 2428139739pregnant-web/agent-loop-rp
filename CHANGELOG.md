@@ -4,6 +4,7 @@
 
 ### 修复
 
+- 修复模型面板渲染回归：全局后处理/MVU 设置加载不再引用不存在的 `currentSessionId`，切换到“模型”菜单时不会再触发 `ReferenceError`。
 - 对齐 Prompt Template 与 Tavern Helper 的本轮 World Info 动态激活：`activewi()`/`activateWorldInfoByKeywords()` 会把命中的完整条目加入当前 response prompt；iframe 调用经宿主 RPC 进入同一个 generation-scoped activation 集合，`getEnabledWorldInfoEntries()` 支持官方来源开关。激活集合只在本轮存在，不写入持久世界书、不污染重 roll，也不增加 LLM 调用。
 
 - 接通提示词模板扩展的动态提示词注入：同一轮生成内，世界书 EJS 的 `injectPrompt()` 可以按 key/order/uid 写入隔离存储，后续预设通过 `getPromptsInjected()`/`hasPromptsInjected()` 读取，并支持字符串型 postprocess；注入只在当前轮共享，不落盘、不污染重 roll，也不增加 LLM 调用。
