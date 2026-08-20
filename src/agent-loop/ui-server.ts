@@ -79,6 +79,7 @@ import {
   readMvuStateWithSessionOverride,
   type MvuMacroContext,
 } from '../mvu.ts'
+import { generateTavernRaw, parseTavernGenerateRawRequest } from './tavern-generation.ts'
 import { PersonaStore, substituteUserCharMacros } from './persona-store.ts'
 import { RegexScriptStore, applyRegexScripts, type RegexPlacement } from './regex-scripts.ts'
 import {
@@ -2601,6 +2602,32 @@ function handleGetSessionTavernHelper(state: AppState, id: string, res: ServerRe
   })
 }
 
+/** POST /api/sessions/:id/tavern-helper/generate-raw — one isolated
+ * Tavern Helper generation. It deliberately does not append a floor or enter
+ * intent/worldbook/context/response/postprocess/MVU, matching ST's helper
+ * escape hatch for scripts that need a private auxiliary completion. */
+async function handleTavernGenerateRaw(state: AppState, id: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!state.sessionRecords.has(id)) return sendError(res, 404, `session not found: ${id}`)
+  let request: ReturnType<typeof parseTavernGenerateRawRequest>
+  try {
+    const payload = parseJsonBody(await readBody(req, 8 * 1024 * 1024))
+    request = parseTavernGenerateRawRequest(payload)
+  } catch (error: unknown) {
+    return sendError(res, 400, error instanceof Error ? error.message : 'invalid generateRaw request')
+  }
+  try {
+    const result = await generateTavernRaw(resolveProvider(getGlobalConfig(state)), request)
+    sendJson(res, 200, {
+      content: result.content,
+      text: result.content,
+      ...(result.usage === undefined ? {} : { usage: result.usage }),
+      shouldSilence: request.should_silence === true,
+    })
+  } catch (error: unknown) {
+    sendError(res, 502, `generateRaw failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 /** PUT /api/sessions/:id/greeting — replace the active opening greeting. */
 async function handlePutSessionGreeting(state: AppState, id: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const record = state.sessionRecords.get(id)
@@ -2963,7 +2990,9 @@ function handleGetCharacter(state: AppState, id: CharacterId, res: ServerRespons
     name: rec.name,
     createdAt: rec.createdAt,
     updatedAt: rec.updatedAt,
-    character: serializeCharacter(rec.preprocessed),
+    // The library list stays compact, while the detail endpoint mirrors
+    // Tavern's RawCharacter contract for card frontends and helper scripts.
+    character: serializeCharacter(rec.preprocessed, { includeRaw: true }),
   })
 }
 
@@ -2980,7 +3009,7 @@ async function handleSelectCharacter(state: AppState, id: CharacterId, res: Serv
   sendJson(res, 200, {
     currentCharacterId: state.currentCharacterId,
     currentSessionId: state.currentSessionId,
-    character: serializeCharacter(rec.preprocessed),
+    character: serializeCharacter(rec.preprocessed, { includeRaw: true }),
   })
 }
 
@@ -4440,7 +4469,7 @@ function autoLabel(character: PreprocessedCharacter): string {
 }
 
 /** Strip the bulk raw card and trim the preprocessed docs for transport. */
-function serializeCharacter(character: PreprocessedCharacter): {
+function serializeCharacter(character: PreprocessedCharacter, options: { readonly includeRaw?: boolean } = {}): {
   name: string
   persona: string
   worldview: string
@@ -4462,6 +4491,8 @@ function serializeCharacter(character: PreprocessedCharacter): {
   }
   lorebook: { name: string; entryCount: number; enabledCount: number } | null
   preprocessedAt: string
+  /** Exact V2/V3 root JSON, only returned by detail/select endpoints. */
+  raw?: JsonValue
 } {
   return {
     name: character.name,
@@ -4496,6 +4527,7 @@ function serializeCharacter(character: PreprocessedCharacter): {
           enabledCount: character.lorebook.entries.filter(e => e.enabled).length,
         },
     preprocessedAt: character.preprocessedAt,
+    ...(options.includeRaw ? { raw: character.raw.raw } : {}),
   }
 }
 
@@ -5569,6 +5601,12 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
           const sid = decodeURIComponent(m[1] ?? '')
           if (method === 'GET') return await handleGetSessionVariables(state, sid, res)
           if (method === 'PUT' || method === 'POST') return await handlePutSessionVariables(state, sid, req, res)
+        }
+      }
+      {
+        const m = /^\/api\/sessions\/([^/]+)\/tavern-helper\/generate-raw$/u.exec(url.pathname)
+        if (method === 'POST' && m !== null) {
+          return await handleTavernGenerateRaw(state, decodeURIComponent(m[1] ?? ''), req, res)
         }
       }
       {
