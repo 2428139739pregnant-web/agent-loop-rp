@@ -1,7 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MemoryWorldbookStore } from './session.ts'
-import { buildWorldInfoActivatedEntries, buildWorldInfoScanDoneEvent } from './world-info-event.ts'
+import {
+  buildWorldInfoActivatedEntries,
+  buildWorldInfoEntriesLoadedEvent,
+  buildWorldInfoScanDoneEvent,
+} from './world-info-event.ts'
 
 test('WORLD_INFO_ACTIVATED projects green, constant, and forced entries with ST metadata', () => {
   const store = new MemoryWorldbookStore([
@@ -56,4 +60,19 @@ test('WORLDINFO_SCAN_DONE projects activated entries into a JSON-safe payload', 
   assert.equal(result.budget.overflowed, true)
   assert.equal(result.activated.entries['book.book/a']?.uid, 'book/a')
   assert.deepEqual(result.timedEffects, { sticky: { 'book/a': { start: 1, end: 2 } } })
+})
+
+test('WORLDINFO_ENTRIES_LOADED groups merged books by their source prefix', () => {
+  const store = new MemoryWorldbookStore([
+    { path: 'character/a', sourceBookId: 'character:卡', keywords: [], order: 2, weight: 1, content: 'A' },
+    { path: 'worldbook/b', sourceBookId: 'worldbook:外部', keywords: [], order: 1, weight: 1, content: 'B' },
+    { path: 'chat/c', sourceBookId: 'chat:当前', keywords: [], order: 3, weight: 1, content: 'C' },
+    { path: 'persona/d', sourceBookId: 'persona:用户', keywords: [], order: 4, weight: 1, content: 'D' },
+  ])
+  const result = buildWorldInfoEntriesLoadedEvent(store)
+
+  assert.deepEqual(result.characterLore.map(entry => entry.uid), ['character/a'])
+  assert.deepEqual(result.globalLore.map(entry => entry.uid), ['worldbook/b'])
+  assert.deepEqual(result.chatLore.map(entry => entry.uid), ['chat/c'])
+  assert.deepEqual(result.personaLore.map(entry => entry.uid), ['persona/d'])
 })

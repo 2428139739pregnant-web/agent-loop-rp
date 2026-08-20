@@ -2414,8 +2414,8 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
               ...(Array.isArray(message.swipes) ? { swipes: message.swipes } : {}),
               ...(Array.isArray(message.swipe_info) ? { swipe_info: message.swipe_info } : {}),
             }))
-            const helperState = helperSnapshot.tavernHelperState || {}
-            frame.contentWindow?.postMessage({
+             const helperState = helperSnapshot.tavernHelperState || {}
+             frame.contentWindow?.postMessage({
               type: 'agent-rp-card-context',
               id: frameId.current,
               context: {
@@ -2437,14 +2437,22 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                 ])),
               },
             }, '*')
-            frame.contentWindow?.postMessage({
-              type: 'agent-rp-card-helper-state',
+             frame.contentWindow?.postMessage({
+               type: 'agent-rp-card-helper-state',
               id: frameId.current,
               scopes: helperSnapshot.variableScopes || helperSnapshot.tavernHelperState?.scopes || {},
               scripts: helperSnapshot.tavernHelperState?.scripts || {},
               scriptTrees: helperSnapshot.tavernHelperState?.scriptTrees || {},
-              mvuState: helperSnapshot.mvuState,
-            }, '*')
+               mvuState: helperSnapshot.mvuState,
+             }, '*')
+             if (helperSnapshot.worldInfoEntries && typeof helperSnapshot.worldInfoEntries === 'object') {
+               frame.contentWindow?.postMessage({
+                 type: 'agent-rp-card-host-event',
+                 id: frameId.current,
+                 eventName: 'worldinfo_entries_loaded',
+                 args: [helperSnapshot.worldInfoEntries],
+               }, '*')
+             }
           }).catch(() => { /* a card may render before a session is available */ })
         }
         return Promise.resolve()

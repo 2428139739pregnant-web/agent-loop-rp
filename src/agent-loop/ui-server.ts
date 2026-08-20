@@ -104,7 +104,11 @@ import {
   type TavernWorldbookEntry,
 } from '../tavern-helper.ts'
 import { buildWorldbookKeyIndex, renderWorldbookKeyOnlyMd } from './worldbook-key-index.ts'
-import { buildWorldInfoActivatedEntries, buildWorldInfoScanDoneEvent } from './world-info-event.ts'
+import {
+  buildWorldInfoActivatedEntries,
+  buildWorldInfoEntriesLoadedEvent,
+  buildWorldInfoScanDoneEvent,
+} from './world-info-event.ts'
 import { tavernHelperWorldbookMetadata } from './worldbook-position.ts'
 import {
   normalizeTimedEffectState,
@@ -2913,6 +2917,7 @@ function handleGetSessionTavernHelper(state: AppState, id: string, res: ServerRe
   sendJson(res, 200, {
     ...sessionVariablesPayload(state, record),
     tavernHelperState: helperState,
+    worldInfoEntries: buildWorldInfoEntriesLoadedEvent(state.worldbook),
   })
 }
 

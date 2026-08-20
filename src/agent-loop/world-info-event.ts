@@ -69,6 +69,14 @@ export interface WorldInfoScanDoneEvent {
   readonly timedEffects: Readonly<Record<string, unknown>>
 }
 
+/** Public World Info collection shape used by WORLDINFO_ENTRIES_LOADED. */
+export interface WorldInfoEntriesLoadedEvent {
+  readonly globalLore: readonly WorldInfoActivatedEntry[]
+  readonly characterLore: readonly WorldInfoActivatedEntry[]
+  readonly chatLore: readonly WorldInfoActivatedEntry[]
+  readonly personaLore: readonly WorldInfoActivatedEntry[]
+}
+
 function selectiveLogicValue(value: WorldbookEntry['selectiveLogic']): number {
   switch (value) {
     case 'not-all': return 1
@@ -203,4 +211,41 @@ export function buildWorldInfoScanDoneEvent(
     },
     timedEffects: { ...timedEffects },
   }
+}
+
+/**
+ * Project the current merged store into Tavern's four loaded-lore buckets.
+ * The source-book prefix is the stable boundary used by the importer and
+ * helper bridge; books without a prefix are global lore by default.
+ */
+export function buildWorldInfoEntriesLoadedEvent(
+  worldbook: { list(): readonly WorldbookEntry[] },
+): WorldInfoEntriesLoadedEvent {
+  const result: Record<keyof WorldInfoEntriesLoadedEvent, WorldInfoActivatedEntry[]> = {
+    globalLore: [],
+    characterLore: [],
+    chatLore: [],
+    personaLore: [],
+  }
+  for (const entry of worldbook.list()) {
+    const sourceKind = entry.sourceBookId?.split(':', 1)[0]
+    const bucket: keyof WorldInfoEntriesLoadedEvent = sourceKind === 'character'
+      ? 'characterLore'
+      : sourceKind === 'chat'
+        ? 'chatLore'
+        : sourceKind === 'persona'
+          ? 'personaLore'
+          : 'globalLore'
+    result[bucket].push(toWorldInfoActivatedEntry({
+      path: entry.path,
+      order: entry.order,
+      weight: entry.weight,
+      content: entry.content,
+      source: 'st',
+      ...(entry.position === undefined ? {} : { position: entry.position }),
+      ...(entry.depth === undefined ? {} : { depth: entry.depth }),
+      ...(entry.role === undefined ? {} : { role: entry.role }),
+    }, entry))
+  }
+  return result
 }
