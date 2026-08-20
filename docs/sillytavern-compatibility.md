@@ -52,6 +52,8 @@ It also awaits `WORLDINFO_SCAN_DONE` immediately before `WORLD_INFO_ACTIVATED`. 
 
 Worldbook UI mutations now follow Tavern's notification split: global scan-setting saves emit `WORLDINFO_SETTINGS_UPDATED` without arguments, while worldbook/entry/link changes emit `WORLDINFO_UPDATED`. Both are delivered to the active card iframe after the host mutation succeeds.
 
+Main UI generations carry a bounded `generation_id` through the card event handshake and `/api/run`. `activewi()` / `activateWorldInfoByKeywords()` include that id in their host RPC, so pending forced activations are isolated per generation; callers that use the legacy host RPC without an id retain the session-scoped fallback.
+
 ### Standalone private generation options
 
 The standalone `generate()`/`generateRaw()` path supports the following structured options for its one independent OpenAI-compatible provider call:

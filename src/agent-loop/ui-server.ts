@@ -403,6 +403,7 @@ async function awaitBrowserGenerationHook(
   sessionId: string,
   eventName: string,
   args: readonly unknown[],
+  generationId?: string,
 ): Promise<void> {
   if (res.writableEnded) return
   const hookId = randomUUID()
@@ -424,6 +425,7 @@ async function awaitBrowserGenerationHook(
         sessionId,
         eventName,
         args: [...args],
+        ...(generationId === undefined ? {} : { generationId }),
       })
     } catch {
       complete(false)
@@ -1440,6 +1442,15 @@ interface PendingGenerationHook {
   readonly complete: (ok: boolean) => void
 }
 
+/**
+ * Keep extension-triggered World Info activations isolated from concurrent
+ * generations in the same chat. The session-only key remains the legacy
+ * fallback for callers that do not provide a generation id.
+ */
+function pendingWorldbookActivationKey(sessionId: string, generationId?: string): string {
+  return generationId === undefined ? sessionId : `${sessionId}\u0000${generationId}`
+}
+
 interface AppState {
   /** Runtime API config keyed by tenant id. The demo only ever uses 'global'. */
   readonly configs: Map<string, ApiConfig>
@@ -1449,7 +1460,7 @@ interface AppState {
   readonly worldbook: WorldbookStore
   readonly sessions: MemorySessionStore
   readonly sessionRecords: Map<string, SessionRecord>
-  /** Ephemeral Prompt Template/Tavern Helper World Info activations for the in-flight generation. */
+  /** Ephemeral Prompt Template/Tavern Helper World Info activations keyed by generation. */
   readonly pendingWorldbookActivations: Map<string, Map<string, boolean>>
   /** Awaited browser acknowledgements for prompt-manager generation hooks. */
   readonly pendingGenerationHooks: Map<string, PendingGenerationHook>
@@ -1949,6 +1960,10 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
   if (payload === null) return sendError(res, 400, 'invalid JSON body')
 
   const reroll = payload.reroll === true
+  const generationId = readStringField(payload, 'generation_id')
+  if (generationId !== undefined && (generationId.length === 0 || generationId.length > 256)) {
+    return sendError(res, 400, 'generation_id is invalid')
+  }
   const uiClient = req.headers['x-agent-rp-ui'] === '1'
   let userInput = readStringField(payload, 'userInput') ?? ''
   if (userInput.length === 0 && !reroll) {
@@ -2025,11 +2040,12 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
   // activewi() records its one-generation activation in this ephemeral map.
   // Reuse the same object while response EJS is rendering, then discard it
   // before postprocess/MVU and the next turn.
-  const worldbookActivationPaths = state.pendingWorldbookActivations.get(sessionId) ?? new Map<string, boolean>()
-  state.pendingWorldbookActivations.set(sessionId, worldbookActivationPaths)
+  const activationKey = pendingWorldbookActivationKey(sessionId, generationId)
+  const worldbookActivationPaths = state.pendingWorldbookActivations.get(activationKey) ?? new Map<string, boolean>()
+  state.pendingWorldbookActivations.set(activationKey, worldbookActivationPaths)
   const clearPendingWorldbookActivations = (): void => {
-    if (state.pendingWorldbookActivations.get(sessionId) === worldbookActivationPaths) {
-      state.pendingWorldbookActivations.delete(sessionId)
+    if (state.pendingWorldbookActivations.get(activationKey) === worldbookActivationPaths) {
+      state.pendingWorldbookActivations.delete(activationKey)
     }
   }
 
@@ -2123,7 +2139,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     ...(uiClient ? {
       refreshTavernHelperState: () => state.sessionRecords.get(sessionId)?.tavernHelperState,
       onGenerationEvent: async (eventName: string, args: readonly unknown[]) => {
-        await awaitBrowserGenerationHook(state, res, sessionId, eventName, args)
+        await awaitBrowserGenerationHook(state, res, sessionId, eventName, args, generationId)
       },
     } : {}),
     ...(timedEffects === undefined ? {} : { worldbookTimedEffects: timedEffects }),
@@ -2406,7 +2422,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
         (wb as { budget?: { usedTokens?: number; droppedPaths?: string[] } }).budget,
         (timedEffects ?? {}) as Record<string, unknown>,
       )
-      await awaitBrowserGenerationHook(state, res, sessionId, 'worldinfo_scan_done', [scanDone])
+      await awaitBrowserGenerationHook(state, res, sessionId, 'worldinfo_scan_done', [scanDone], generationId)
       const activated = buildWorldInfoActivatedEntries(
         (wb as { matches: Array<{
           path: string
@@ -2423,7 +2439,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
         allowedConstantPaths,
       )
       if (activated.length > 0) {
-        await awaitBrowserGenerationHook(state, res, sessionId, 'world_info_activated', [activated])
+        await awaitBrowserGenerationHook(state, res, sessionId, 'world_info_activated', [activated], generationId)
       }
       const refreshedHelperState = state.sessionRecords.get(sessionId)?.tavernHelperState
       if (refreshedHelperState !== undefined) helperState = refreshedHelperState
@@ -2964,6 +2980,10 @@ async function handleActivateWorldInfoForGeneration(
   const requestedPath = typeof payload?.path === 'string' ? payload.path.trim() : ''
   const world = typeof payload?.world === 'string' ? payload.world.trim() : undefined
   const uid = typeof payload?.uid === 'string' || typeof payload?.uid === 'number' ? payload.uid : undefined
+  const generationId = typeof payload?.generation_id === 'string' ? payload.generation_id.trim() : undefined
+  if (generationId !== undefined && (generationId.length === 0 || generationId.length > 256)) {
+    return sendError(res, 400, 'generation_id is invalid')
+  }
   const path = requestedPath.length > 0
     ? requestedPath
     : resolveWorldInfoEntryPath(state.worldbook, world, uid) ?? ''
@@ -2971,10 +2991,11 @@ async function handleActivateWorldInfoForGeneration(
   const entry = state.worldbook.list().find(candidate => candidate.path === path)
   if (entry === undefined) return sendJson(res, 200, { activated: false, path })
   const force = payload?.force === true
-  const pending = state.pendingWorldbookActivations.get(id) ?? new Map<string, boolean>()
+  const activationKey = pendingWorldbookActivationKey(id, generationId)
+  const pending = state.pendingWorldbookActivations.get(activationKey) ?? new Map<string, boolean>()
   pending.set(path, (pending.get(path) ?? false) || force)
-  state.pendingWorldbookActivations.set(id, pending)
-  sendJson(res, 200, { activated: true, path, force: pending.get(path) === true })
+  state.pendingWorldbookActivations.set(activationKey, pending)
+  sendJson(res, 200, { activated: true, path, force: pending.get(path) === true, ...(generationId === undefined ? {} : { generation_id: generationId }) })
 }
 
 /** Reconstruct the read-only prompt sources exposed by the active ST session.
