@@ -159,6 +159,46 @@ test('Tavern Helper injectPrompts and uninjectPrompts use the canonical mutation
   assert.equal(typeof frame.window.TavernHelper.rebindCharWorldbooks, 'function')
 })
 
+test('Tavern Helper chat tree APIs preserve message metadata and canonical RPC arguments', async () => {
+  const frame = createFrame()
+  await frame.window.setChatMessages([
+    { message_id: 7, role: 'assistant', name: '角色', message: '正文', is_hidden: true, data: { source: 'card' }, extra: { floor: 1 }, swipes: ['正文', '替代'], swipes_info: [{ send_date: 1 }] },
+  ], { refresh: false })
+  let request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'set-chat-messages')
+  assert.equal(request?.payload.options.refresh, false)
+  assert.deepEqual(plain(request?.payload.messages), [{
+    message_id: 7,
+    name: '角色',
+    role: 'assistant',
+    message: '正文',
+    is_hidden: true,
+    data: { source: 'card' },
+    extra: { floor: 1 },
+    swipes: ['正文', '替代'],
+    swipes_info: [{ send_date: 1 }],
+  }])
+
+  await frame.window.createChatMessages([{ role: 'user', content: '插入' }], { insert_before: 1 })
+  request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'create-chat-messages')
+  assert.equal(request?.payload.options.insert_before, 1)
+  assert.equal(request?.payload.messages[0].message, '插入')
+
+  await frame.window.deleteChatMessages([7], { refresh: false })
+  request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'delete-chat-messages')
+  assert.deepEqual(plain(request?.payload.messageIds), [7])
+  assert.equal(request?.payload.options.refresh, false)
+
+  await frame.window.rotateChatMessages(0, 1, 2)
+  request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'rotate-chat-messages')
+  assert.deepEqual(plain({ begin: request?.payload.begin, middle: request?.payload.middle, end: request?.payload.end }), { begin: 0, middle: 1, end: 2 })
+  assert.equal(typeof frame.window.TavernHelper.createChatMessages, 'function')
+  assert.equal(typeof frame.window.SillyTavern.getContext().deleteChatMessages, 'function')
+})
+
 test('host lifecycle events cross the iframe bridge with SillyTavern names and arguments', () => {
   const frame = createFrame()
   const seen = []

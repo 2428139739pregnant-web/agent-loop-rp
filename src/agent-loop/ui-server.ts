@@ -92,6 +92,7 @@ import {
   type TavernHelperVariableMutationRequest,
   type TavernHelperMutationRequest,
   type TavernHelperState,
+  type TavernChatMessageInput,
   type TavernWorldbookEntry,
 } from '../tavern-helper.ts'
 import { buildWorldbookKeyIndex, renderWorldbookKeyOnlyMd } from './worldbook-key-index.ts'
@@ -454,6 +455,47 @@ function displayHistory(
       ? applyWorldbookRenderDirectives(message.content, directives)
       : message.content,
   }))
+}
+
+/** Convert the public Tavern Helper message shape into the durable session
+ * shape without dropping card/plugin metadata.  The session store remains
+ * the single source of truth; the iframe bridge only translates at its edge. */
+function tavernChatMessageToInternal(message: TavernChatMessageInput): ChatMessage {
+  return {
+    ...(message.message_id === undefined ? {} : { message_id: message.message_id }),
+    role: message.role ?? 'assistant',
+    content: message.message ?? '',
+    ...(message.name === undefined ? {} : { name: message.name }),
+    ...(message.is_hidden === undefined ? {} : { is_hidden: message.is_hidden }),
+    ...(message.data === undefined ? {} : { data: { ...message.data } }),
+    ...(message.extra === undefined ? {} : { extra: { ...message.extra } }),
+    ...(message.swipe_id === undefined ? {} : { swipe_id: message.swipe_id }),
+    ...(message.swipes === undefined ? {} : { swipes: [...message.swipes] }),
+    ...(message.swipes_info === undefined ? {} : { swipes_info: message.swipes_info.map(item => ({ ...item })) }),
+    ...(message.swipes_data === undefined ? {} : { swipes_data: message.swipes_data.map(item => ({ ...item })) }),
+    ...(message.swipes_info === undefined ? {} : { swipe_info: message.swipes_info as unknown as SwipeInfo[] }),
+  }
+}
+
+function tavernMessageId(message: ChatMessage, index: number): number {
+  return Number.isSafeInteger(message.message_id) ? message.message_id as number : index
+}
+
+function chatIndicesForIds(history: readonly ChatMessage[], messageIds: readonly number[]): Set<number> {
+  const wanted = new Set(messageIds)
+  return new Set(history.flatMap((message, index) => wanted.has(tavernMessageId(message, index)) ? [index] : []))
+}
+
+function rotateChatHistory(history: readonly ChatMessage[], begin: number, middle: number, end: number): ChatMessage[] {
+  if (begin < 0 || middle < begin || end < middle || end > history.length) {
+    throw new Error('rotate-chat-messages range is invalid')
+  }
+  return [
+    ...history.slice(0, begin),
+    ...history.slice(middle, end),
+    ...history.slice(begin, middle),
+    ...history.slice(end),
+  ]
 }
 
 function swipeInfoNow(): SwipeInfo {
@@ -2442,12 +2484,39 @@ async function handlePutSessionTavernHelper(
     ...(directStatData === undefined ? {} : { mvuState: directStatData }),
   }
   const previousHistory = [...state.sessions.getHistory(id)]
-  if ('operation' in mutation && mutation.operation === 'set-chat-messages') {
-    const messages = (mutation as Extract<TavernHelperMutationRequest, { operation: 'set-chat-messages' }>).messages
-    const nextHistory: ChatMessage[] = messages.map((message: { role?: 'system' | 'assistant' | 'user'; message?: string }) => ({
-      role: message.role ?? 'assistant',
-      content: message.message ?? '',
-    }))
+  let nextHistory = previousHistory
+  let historyChanged = false
+  if ('operation' in mutation) {
+    if (mutation.operation === 'set-chat-messages') {
+      nextHistory = mutation.messages.map(tavernChatMessageToInternal)
+      historyChanged = true
+    } else if (mutation.operation === 'create-chat-messages') {
+      const insertAt = mutation.insertAt === 'end' ? previousHistory.length : mutation.insertAt
+      if (insertAt < 0 || insertAt > previousHistory.length) {
+        return sendError(res, 400, 'create-chat-messages insertAt is out of range')
+      }
+      nextHistory = [
+        ...previousHistory.slice(0, insertAt),
+        ...mutation.messages.map(tavernChatMessageToInternal),
+        ...previousHistory.slice(insertAt),
+      ]
+      historyChanged = mutation.messages.length > 0
+    } else if (mutation.operation === 'delete-chat-messages') {
+      const indices = chatIndicesForIds(previousHistory, mutation.messageIds)
+      nextHistory = previousHistory.filter((_, index) => !indices.has(index))
+      historyChanged = nextHistory.length !== previousHistory.length
+    } else if (mutation.operation === 'rotate-chat-messages') {
+      nextHistory = rotateChatHistory(previousHistory, mutation.begin, mutation.middle, mutation.end)
+      historyChanged = JSON.stringify(nextHistory) !== JSON.stringify(previousHistory)
+    } else if (mutation.operation === 'set-chat-hidden') {
+      if (mutation.end > previousHistory.length) return sendError(res, 400, 'set-chat-hidden end is out of range')
+      nextHistory = previousHistory.map((message, index) => index >= mutation.start && index < mutation.end
+        ? { ...message, is_hidden: mutation.hidden }
+        : message)
+      historyChanged = true
+    }
+  }
+  if (historyChanged) {
     state.sessions.setHistory(id, nextHistory)
     try { await rewriteHistoryJsonl(id, nextHistory) } catch (error: unknown) {
       state.sessions.setHistory(id, previousHistory)
@@ -2468,12 +2537,14 @@ async function handlePutSessionTavernHelper(
     }
   } catch (error: unknown) {
     state.sessionRecords.set(id, record)
-    if ('operation' in mutation && mutation.operation === 'set-chat-messages') state.sessions.setHistory(id, previousHistory)
+    if (historyChanged) state.sessions.setHistory(id, previousHistory)
     return sendError(res, 500, `failed to persist Tavern Helper mutation: ${error instanceof Error ? error.message : String(error)}`)
   }
   sendJson(res, 200, {
     ...sessionVariablesPayload(state, nextRecord),
     tavernHelperState: nextHelperState,
+    operation: 'operation' in mutation ? mutation.operation : undefined,
+    history: historyChanged ? nextHistory : undefined,
     ...(nextHelperState.worldbookBindings === undefined ? {} : { worldbookBindings: nextHelperState.worldbookBindings }),
   })
 }
@@ -4129,18 +4200,38 @@ async function loadSessionFromDisk(id: string): Promise<{ record: SessionRecord;
         const obj = JSON.parse(line) as {
           role: string
           content: string
+          message_id?: unknown
+          name?: unknown
+          is_hidden?: unknown
+          data?: unknown
+          extra?: unknown
           swipe_id?: unknown
           swipes?: unknown
           swipe_info?: unknown
+          swipes_data?: unknown
+          swipes_info?: unknown
         }
-        if ((obj.role === 'user' || obj.role === 'assistant') && typeof obj.content === 'string') {
-          const message: ChatMessage = { role: obj.role, content: obj.content }
+        if ((obj.role === 'user' || obj.role === 'assistant' || obj.role === 'system' || obj.role === 'tool') && typeof obj.content === 'string') {
+          const message: ChatMessage = {
+            role: obj.role,
+            content: obj.content,
+            ...(Number.isSafeInteger(obj.message_id) ? { message_id: Number(obj.message_id) } : {}),
+            ...(typeof obj.name === 'string' ? { name: obj.name } : {}),
+            ...(typeof obj.is_hidden === 'boolean' ? { is_hidden: obj.is_hidden } : {}),
+            ...(obj.data !== null && typeof obj.data === 'object' && !Array.isArray(obj.data) ? { data: obj.data as Record<string, unknown> } : {}),
+            ...(obj.extra !== null && typeof obj.extra === 'object' && !Array.isArray(obj.extra) ? { extra: obj.extra as Record<string, unknown> } : {}),
+          }
           if (obj.role === 'assistant') {
             if (Array.isArray(obj.swipes) && obj.swipes.every(item => typeof item === 'string')) {
               message.swipes = [...obj.swipes]
             }
             if (Number.isInteger(obj.swipe_id)) message.swipe_id = Number(obj.swipe_id)
             if (Array.isArray(obj.swipe_info)) message.swipe_info = obj.swipe_info as SwipeInfo[]
+            if (Array.isArray(obj.swipes_data)) message.swipes_data = obj.swipes_data as Record<string, unknown>[]
+            if (Array.isArray(obj.swipes_info)) {
+              message.swipes_info = obj.swipes_info as Record<string, unknown>[]
+              if (message.swipe_info === undefined) message.swipe_info = obj.swipes_info as SwipeInfo[]
+            }
           }
           history.push(message)
         }

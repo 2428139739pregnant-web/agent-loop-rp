@@ -12,12 +12,21 @@ export interface SwipeInfo {
 export interface ChatMessage {
   role: ChatRole
   content: string
+  /** Stable SillyTavern floor id when a card supplies one. */
+  message_id?: number
   /** Optional OpenAI-compatible message name, used by ST example/group messages. */
   name?: string
+  /** SillyTavern hidden-floor marker. Hidden floors remain durable but are not rendered by the chat surface. */
+  is_hidden?: boolean
+  /** Card/plugin-owned message metadata retained across Tavern Helper mutations. */
+  data?: Record<string, unknown>
+  extra?: Record<string, unknown>
   /** SillyTavern-compatible assistant alternatives. User/system messages do not use swipes. */
   swipe_id?: number
   swipes?: string[]
   swipe_info?: SwipeInfo[]
+  swipes_data?: Record<string, unknown>[]
+  swipes_info?: Record<string, unknown>[]
 }
 
 export interface ChatOptions {

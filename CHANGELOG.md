@@ -4,6 +4,7 @@
 
 ### 修复
 
+- 对齐 Tavern Helper 的聊天消息树基础 API：`getChatMessages` 支持范围、隐藏状态和 swipe 选项，新增 `createChatMessages`、`deleteChatMessages`、`rotateChatMessages`、`setChatHidden`；插入/删除/旋转/隐藏/整段替换统一写入会话 JSONL，并保留 `message_id`、角色名、`data`、`extra` 和 swipe 元数据。
 - iframe 内的 `SillyTavern.getContext()` 不再只是 `{ chat: [] }` 占位：宿主会同步当前会话消息、角色/用户投影、chat id、extension prompts、MVU/变量读写和 World Info 查询入口；消息按 ST 常用的 `name`/`mes`/`is_user`/`is_system` 形状提供给卡片脚本。
 - Tavern Helper iframe 事件桥对齐酒馆助手的可等待生命周期：`eventEmit` 现在等待异步监听器和注入/变量 RPC，补齐 `eventMakeFirst`、`eventMakeLast`、移除/清理监听 API 与完整 `tavern_events` 常量；生成前事件会等待所有卡片帧确认后再进入 `/api/run`，避免提示词注入竞态。
 - 世界书全局扫描设置补齐 ST 的 `min_activations`/深度上限、`recursive`、`max_recursion_steps`、`include_names` 和 `use_group_scoring`；全部由确定性 matcher 执行，不增加 LLM 调用，并在 UI/API 中可持久化配置。
