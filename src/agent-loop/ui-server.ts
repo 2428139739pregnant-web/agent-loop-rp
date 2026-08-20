@@ -67,7 +67,9 @@ import {
 import type { ImportedLorebook, ImportedLorebookEntry } from '../import/types.ts'
 import {
   createEjsWorldInfoBooks,
+  createEjsTemplatePromptInjectionStore,
   EjsTemplateEngine,
+  type EjsTemplatePromptInjectionStore,
   type EjsTemplateResult,
   type EjsTemplateTarget,
 } from '../ejs-template.ts'
@@ -373,6 +375,8 @@ function buildAgentContext(deps: {
   onProgress?: import('./agents/types.ts').AgentProgressCallback
   /** Isolated EJS renderer bound to the active card/session. */
   renderTemplate?: (template: string, target?: EjsTemplateTarget) => EjsTemplateResult
+  /** Per-generation Prompt Template injection store shared by all EJS renders. */
+  promptInjections?: EjsTemplatePromptInjectionStore
   /** Current MVU stat_data for this card/session. */
   statData?: import('@deepseek-ai/dsh-session').JsonValue
 }): import('./agents/types.ts').AgentContext {
@@ -394,6 +398,7 @@ function buildAgentContext(deps: {
     ...(deps.postprocessSettings !== undefined ? { postprocessSettings: deps.postprocessSettings } : {}),
     ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
     ...(deps.renderTemplate !== undefined ? { renderTemplate: deps.renderTemplate } : {}),
+    ...(deps.promptInjections !== undefined ? { promptInjections: deps.promptInjections } : {}),
     ...(deps.statData === undefined ? {} : { statData: deps.statData }),
   }
 }
@@ -555,6 +560,7 @@ function buildCharacterTemplateRenderer(
   session: MemorySessionStore,
   sessionId: string,
   userName: string,
+  promptInjections?: EjsTemplatePromptInjectionStore,
 ): ReturnType<EjsTemplateEngine['createRenderer']> | undefined {
   if (state.ejsEngine === undefined) return undefined
   const history = session.getHistory(sessionId)
@@ -680,6 +686,7 @@ function buildCharacterTemplateRenderer(
       message: helperState?.scopes.message ?? {},
     },
     worldInfoBooks: createEjsWorldInfoBooks(worldInfoSources),
+    ...(promptInjections === undefined ? {} : { promptInjections }),
     ...(mvu === undefined ? {} : { statData: mvu.statData }),
   })
 }
@@ -1837,12 +1844,18 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
   // **不再传 onProgress** — postprocess 子环节改由 ui-server 的
   // runPostprocessPipeline 用 runStageWithTrace 逐个包,每个子环节独立 stage
   // 独立 trace,前端能像 5 阶段一样独立追踪。
+  // Prompt Template's injectPrompt store belongs to this generation only.
+  // World Info EJS runs before response.md, so the response preset can read
+  // values written by activated entries without persisting them into chat
+  // state or leaking them into a later reroll.
+  const promptInjections = createEjsTemplatePromptInjectionStore()
   const templateRenderer = buildCharacterTemplateRenderer(
     state,
     character,
     session,
     sessionId,
     activeUserName,
+    promptInjections,
   )
   const mvuState = readSessionMvuState(record, session.getHistory(sessionId), mvuMacros)?.statData
   const agentCtx = buildAgentContext({
@@ -1861,6 +1874,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     ...(timedEffects === undefined ? {} : { worldbookTimedEffects: timedEffects }),
     postprocessSettings: state.postprocessSettings,
     ...(templateRenderer === undefined ? {} : { renderTemplate: templateRenderer }),
+    promptInjections,
     ...(mvuState === undefined ? {} : { statData: mvuState }),
   })
 

@@ -2002,7 +2002,12 @@
      window.RawCharacter=__clone(__rawCharacter());
       window.getchar=async(name=__stContext.name2,template,data={})=>{const characterData=await __getCharData(name);if(!characterData)return '';const source=typeof template==='string'?template:'<% if (name) { %><<%- name %>><% if (system_prompt) { %>System: <%- system_prompt %><% } %>name: <%- name %><% if (personality) { %>personality: <%- personality %><% } %><% if (description) { %>description: <%- description %><% } %><% if (message_example) { %>example:<%- message_example %><% } %><% if (depth_prompt) { %>System: <%- depth_prompt %><% } %></<%- name %>>';const context=await window.EjsTemplate.prepareContext(Object.assign({},characterData&&typeof characterData==='object'?characterData:{},data&&typeof data==='object'?data:{},{char:String(characterData?.name||name||__stContext.name2||'')}));const result=await window.EjsTemplate.evalTemplate(source,context);return result?.ok===false?'':String(result?.text??result??'');};
       window.getChara=window.getchar;
-      window.generateRaw=async(config={})=>{const result=await __rpc('generate-raw',__clone(config||{}));return String(result?.content??result?.text??'');};
+      const __generationRequests=new Map();let __generationSeq=0;
+      const __generationId=config=>{const requested=config&&typeof config==='object'?String(config.generation_id||'').trim():'';return requested||(__frameId+'-generation-'+(++__generationSeq));};
+      const __generateRaw=async(config={})=>{const request=__clone(config&&typeof config==='object'?config:{});const generationId=__generationId(request);request.generation_id=generationId;__generationRequests.set(generationId,{cancelled:false});await __emit(window.iframe_events.GENERATION_STARTED,generationId);try{const result=await __rpc('generate-raw',request);const text=String(result?.content??result?.text??'');const state=__generationRequests.get(generationId);if(state?.cancelled)throw new Error('generation stopped: '+generationId);if(request.should_stream===true){await __emit(window.iframe_events.STREAM_TOKEN_RECEIVED_FULLY,text,generationId);await __emit(window.iframe_events.STREAM_TOKEN_RECEIVED_INCREMENTALLY,text,generationId);}await __emit(window.iframe_events.GENERATION_ENDED,text,generationId);return text;}finally{__generationRequests.delete(generationId);}};
+      window.generateRaw=__generateRaw;window.generate=__generateRaw;
+      window.stopGenerationById=generationId=>{const id=String(generationId??'');const state=__generationRequests.get(id);if(!state)return false;state.cancelled=true;return true;};
+      window.stopAllGeneration=()=>{let stopped=false;for(const state of __generationRequests.values()){state.cancelled=true;stopped=true;}return stopped;};
   }
 if(!window.showdown)window.showdown={Converter:class{constructor(options={}){this.options=options;}makeHtml(value){return String(value??'').replace(/&/gu,'&amp;').replace(/</gu,'&lt;').replace(/>/gu,'&gt;').replace(/\\*\\*(.+?)\\*\\*/gu,'<strong>$1</strong>').replace(/\\*(.+?)\\*/gu,'<em>$1</em>').replace(/\\n/gu,'<br>');}}};
   const __events={VARIABLE_INITIALIZED:'mag_variable_initialized',VARIABLE_UPDATE_STARTED:'mag_variable_update_started',VARIABLE_UPDATE_ENDED:'mag_variable_update_ended'};
@@ -2039,7 +2044,8 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
   window.SillyTavern.setExtensionPrompt=__setExtensionPrompt;
   window.SillyTavern.extensionPrompts=__stContext.extensionPrompts;
   if(!window.$){window.$=__query;window.jQuery=__query;}
-   window.TavernHelper.getCharData=window.getCharData;window.TavernHelper.getchar=window.getchar;window.TavernHelper.getChara=window.getChara;window.TavernHelper.generateRaw=window.generateRaw;
+   window.TavernHelper.getCharData=window.getCharData;window.TavernHelper.getchar=window.getchar;window.TavernHelper.getChara=window.getChara;window.TavernHelper.generate=window.generate;window.TavernHelper.generateRaw=window.generateRaw;window.TavernHelper.stopGenerationById=window.stopGenerationById;window.TavernHelper.stopAllGeneration=window.stopAllGeneration;
+   window.SillyTavern.generate=window.generate;window.SillyTavern.generateRaw=window.generateRaw;window.SillyTavern.stopGenerationById=window.stopGenerationById;window.SillyTavern.stopAllGeneration=window.stopAllGeneration;
    // These APIs deliberately use a remote, jQuery-like handle.  Card iframes
   // never receive a live parent-DOM node, but can still inspect and mutate the
   // displayed floor through the host's existing render pipeline.

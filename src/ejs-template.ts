@@ -63,6 +63,108 @@ export interface EjsTemplatePresetPromptResource {
   readonly data?: JsonValue
 }
 
+/**
+ * Per-generation prompt-template injection store.
+ *
+ * ST-Prompt-Template keeps these values in memory while the prompt is being
+ * assembled: a World Info entry can call injectPrompt('key', content), and a
+ * later preset/EJS block can read it with getPromptsInjected('key').  Keeping
+ * the store outside QuickJS lets nested template renders share the same
+ * values without exposing host objects to the sandbox.
+ */
+export interface EjsTemplatePromptInjectionStore {
+  inject(key: string, prompt: string, order?: number, sticky?: number, uid?: string): void
+  get(key: string, postprocess?: unknown): string
+  has(key: string): boolean
+}
+
+interface StoredPromptInjection {
+  readonly key: string
+  readonly prompt: string
+  readonly order: number
+  readonly sticky: number
+  readonly uid: string
+  readonly sequence: number
+}
+
+const MAX_PROMPT_INJECTION_KEY_CHARS = 256
+const MAX_PROMPT_INJECTION_CHARS = 256 * 1024
+const MAX_PROMPT_INJECTIONS = 512
+
+function injectionText(value: unknown): string {
+  return typeof value === 'string' ? value : String(value ?? '')
+}
+
+function applyPromptInjectionPostprocess(value: string, postprocess: unknown): string {
+  if (!Array.isArray(postprocess)) return value
+  let result = value
+  for (const item of postprocess) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) continue
+    const record = item as Record<string, unknown>
+    const search = record.search
+    const replace = record.replace
+    if (typeof search !== 'string' || typeof replace !== 'string' || search === '') continue
+    result = result.replaceAll(search, replace)
+  }
+  return result
+}
+
+/** Create the bounded store shared by one prompt-generation/render pass. */
+export function createEjsTemplatePromptInjectionStore(): EjsTemplatePromptInjectionStore {
+  const entries: StoredPromptInjection[] = []
+  let sequence = 0
+  return {
+    inject(key, prompt, order = 100, sticky = 0, uid = '') {
+      const normalizedKey = injectionText(key).trim()
+      if (normalizedKey === '' || normalizedKey.length > MAX_PROMPT_INJECTION_KEY_CHARS) return
+      const normalizedPrompt = injectionText(prompt)
+      if (normalizedPrompt.length > MAX_PROMPT_INJECTION_CHARS) return
+      const normalizedOrder = Number.isFinite(order) ? Math.trunc(order) : 100
+      const normalizedSticky = Number.isFinite(sticky) ? Math.max(0, Math.trunc(sticky)) : 0
+      const normalizedUid = injectionText(uid)
+      // The official uid form updates an existing injection. Calls without a
+      // uid remain independent entries and are joined in order, matching the
+      // extension's grouped injection behavior.
+      if (normalizedUid !== '') {
+        const existing = entries.findIndex(item => item.key === normalizedKey && item.uid === normalizedUid)
+        if (existing >= 0) {
+          entries[existing] = {
+            key: normalizedKey,
+            prompt: normalizedPrompt,
+            order: normalizedOrder,
+            sticky: normalizedSticky,
+            uid: normalizedUid,
+            sequence: entries[existing]!.sequence,
+          }
+          return
+        }
+      }
+      if (entries.length >= MAX_PROMPT_INJECTIONS) return
+      entries.push({
+        key: normalizedKey,
+        prompt: normalizedPrompt,
+        order: normalizedOrder,
+        sticky: normalizedSticky,
+        uid: normalizedUid,
+        sequence: sequence++,
+      })
+    },
+    get(key, postprocess) {
+      const normalizedKey = injectionText(key).trim()
+      const combined = entries
+        .filter(item => item.key === normalizedKey)
+        .sort((left, right) => left.order - right.order || left.sequence - right.sequence)
+        .map(item => item.prompt)
+        .join('\n')
+      return applyPromptInjectionPostprocess(combined, postprocess)
+    },
+    has(key) {
+      const normalizedKey = injectionText(key).trim()
+      return entries.some(item => item.key === normalizedKey)
+    },
+  }
+}
+
 /** Project normalized Session lorebooks into the read-only EJS resource index. */
 export function createEjsWorldInfoBooks(books: readonly {
   readonly id: string
@@ -118,6 +220,8 @@ export interface EjsTemplateContext {
   readonly characterCards?: readonly EjsTemplateCharacterResource[]
   /** Optional preset prompt snapshots; contents are rendered in the same sandbox. */
   readonly presetPrompts?: readonly EjsTemplatePresetPromptResource[]
+  /** Prompt Template's per-generation dependency-injection store. */
+  readonly promptInjections?: EjsTemplatePromptInjectionStore
   /** Internal JSON-only locals used while formatting a character or preset resource. */
   readonly templateData?: Readonly<Record<string, JsonValue>>
 }
@@ -177,6 +281,7 @@ const TEMPLATE_RESERVED_LOCALS = new Set([
   'char', 'user', 'charName', 'userName', 'runType', 'messages', 'variables', 'variableScopes',
   'stat_data', 'getvar', 'getWorldInfo', 'getwi', 'getCharData', 'getchar', 'getChara',
   'getpreset', 'getPresetPrompt', 'getChatMessage', 'getChatMessages', 'print', 'YAML', '_',
+  'injectPrompt', 'getPromptsInjected', 'hasPromptsInjected',
   '__input', '__output', '__append', '__escape', '__transcript', '__templateData',
 ])
 const TEMPLATE_RESOURCE_LOCALS = [
@@ -534,6 +639,11 @@ function compileTemplate(
     const getChara = getchar;
     const getpreset = async (name, data = {}) => globalThis.__agentRpGetPreset(name, data);
     const getPresetPrompt = getpreset;
+    const injectPrompt = (key, prompt, order = 100, sticky = 0, uid = '') =>
+      globalThis.__agentRpInjectPrompt(key, prompt, order, sticky, uid);
+    const getPromptsInjected = (key, postprocess = []) =>
+      globalThis.__agentRpGetPromptsInjected(key, postprocess);
+    const hasPromptsInjected = key => globalThis.__agentRpHasPromptsInjected(key);
     const print = (...values) => { for (const value of values) __append(value); };
     globalThis.Date = undefined;
     Math.random = () => { throw new Error('__AGENT_RP_EJS_NONDETERMINISTIC__'); };
@@ -845,6 +955,31 @@ export class EjsTemplateEngine implements LorebookRegexEngine {
       })
       vm.setProp(vm.global, '__agentRpGetPreset', getPreset)
       getPreset.dispose()
+      const injectPrompt = vm.newFunction('__agentRpInjectPrompt', (...handles) => {
+        const args = handles.map(handle => vm.dump(handle) as unknown)
+        context.promptInjections?.inject(
+          injectionText(args[0]),
+          injectionText(args[1]),
+          typeof args[2] === 'number' ? args[2] : 100,
+          typeof args[3] === 'number' ? args[3] : 0,
+          injectionText(args[4]),
+        )
+        return vm.undefined
+      })
+      vm.setProp(vm.global, '__agentRpInjectPrompt', injectPrompt)
+      injectPrompt.dispose()
+      const getPromptsInjected = vm.newFunction('__agentRpGetPromptsInjected', (...handles) => {
+        const args = handles.map(handle => vm.dump(handle) as unknown)
+        return vm.newString(context.promptInjections?.get(injectionText(args[0]), args[1]) ?? '')
+      })
+      vm.setProp(vm.global, '__agentRpGetPromptsInjected', getPromptsInjected)
+      getPromptsInjected.dispose()
+      const hasPromptsInjected = vm.newFunction('__agentRpHasPromptsInjected', (...handles) => {
+        const args = handles.map(handle => vm.dump(handle) as unknown)
+        return context.promptInjections?.has(injectionText(args[0])) === true ? vm.true : vm.false
+      })
+      vm.setProp(vm.global, '__agentRpHasPromptsInjected', hasPromptsInjected)
+      hasPromptsInjected.dispose()
       const result = vm.evalCode(code, 'agent-rp:ejs')
       const errorHandle = result.error
       if (errorHandle !== undefined) {

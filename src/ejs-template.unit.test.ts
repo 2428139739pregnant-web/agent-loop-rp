@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { EjsTemplateEngine } from './ejs-template.ts'
+import { createEjsTemplatePromptInjectionStore, EjsTemplateEngine } from './ejs-template.ts'
 
 test('EJS getwi reads the active card/imported worldbook projection', async () => {
   const engine = await EjsTemplateEngine.create()
@@ -126,4 +126,38 @@ test('EJS runType follows the explicit render target and defaults to generate', 
     engine.render('<%= runType %>', context, { runType: 'preparation' }),
     { ok: true, text: 'preparation' },
   )
+})
+
+test('EJS Prompt Template injection is shared across renders in one generation', async () => {
+  const engine = await EjsTemplateEngine.create()
+  const promptInjections = createEjsTemplatePromptInjectionStore()
+  const renderer = engine.createRenderer({
+    characterName: '莉娜',
+    userName: '小明',
+    messages: [],
+    promptInjections,
+  })
+
+  assert.deepEqual(
+    renderer('<% injectPrompt("CoT", "第二条", 20); injectPrompt("CoT", "第一条", 10); %>'),
+    { ok: true, text: '' },
+  )
+  assert.deepEqual(
+    renderer('<%= hasPromptsInjected("CoT") %>|<%- getPromptsInjected("CoT") %>'),
+    { ok: true, text: 'true|第一条\n第二条' },
+  )
+  assert.deepEqual(
+    renderer('<%- getPromptsInjected("CoT", [{search:"第一条", replace:"替换"}]) %>'),
+    { ok: true, text: '替换\n第二条' },
+  )
+})
+
+test('EJS Prompt Template injection uid replaces the same entry', async () => {
+  const engine = await EjsTemplateEngine.create()
+  const promptInjections = createEjsTemplatePromptInjectionStore()
+  const result = engine.render(
+    '<% injectPrompt("status", "old", 1, 0, "stable"); injectPrompt("status", "new", 1, 0, "stable"); %><%= getPromptsInjected("status") %>',
+    { characterName: '莉娜', userName: '小明', messages: [], promptInjections },
+  )
+  assert.deepEqual(result, { ok: true, text: 'new' })
 })

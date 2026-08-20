@@ -4,7 +4,11 @@ import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { JsonValue } from '@deepseek-ai/dsh-session'
-import type { EjsTemplateResult, EjsTemplateTarget } from '../../ejs-template.ts'
+import type {
+  EjsTemplatePromptInjectionStore,
+  EjsTemplateResult,
+  EjsTemplateTarget,
+} from '../../ejs-template.ts'
 import type { LLMProvider } from '../provider.ts'
 import type { SessionStore, WorldbookStore } from '../session.ts'
 import type { TimedEffectState } from '../worldbook-timed-effects.ts'
@@ -161,6 +165,8 @@ export interface AgentContext {
   readonly macros?: { user: string | null; char: string | null }
   /** Optional isolated ST-Prompt-Template EJS renderer for card-owned text. */
   readonly renderTemplate?: (template: string, target?: EjsTemplateTarget) => EjsTemplateResult
+  /** Per-generation ST-Prompt-Template injectPrompt/getPromptsInjected store. */
+  readonly promptInjections?: EjsTemplatePromptInjectionStore
   /** Current MVU `stat_data`, exposed to prompts/templates when available. */
   readonly statData?: JsonValue
   /**

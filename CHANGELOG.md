@@ -4,6 +4,8 @@
 
 ### 修复
 
+- 接通提示词模板扩展的动态提示词注入：同一轮生成内，世界书 EJS 的 `injectPrompt()` 可以按 key/order/uid 写入隔离存储，后续预设通过 `getPromptsInjected()`/`hasPromptsInjected()` 读取，并支持字符串型 postprocess；注入只在当前轮共享，不落盘、不污染重 roll，也不增加 LLM 调用。
+- 角色卡 iframe 的 `generate()`/`generateRaw()` 兼容入口现在会发出酒馆助手同名的生成生命周期事件；支持 generation id、流式模式下的完整/增量回调，以及本地停止标记，仍沿用原有独立 provider 调用，不把辅助生成混入主 agent loop。
 - 接通 Tavern Helper 的 `generateRaw()`：卡片脚本可以把 `ordered_prompts` 交给独立的一次 provider 调用，严格校验角色/长度/参数，不写入聊天楼层，也不会再次进入意图、世界书、上下文、正文、后处理或 MVU 链路。
 - 角色卡前端现在在 iframe 启动前获得与酒馆一致的原始卡片快照：详情/切换角色接口提供 `RawCharacter`，`SillyTavern.getContext().character`/`characters[0]` 保留 `data`、`extensions`、`character_book` 等字段，并补齐隔离环境中的 `getCharData()`、`getchar()`/`getChara()`；不会把原始卡片注入模型提示词，也不会增加 LLM 调用。
 - 将 EJS 当前角色资源快照真正接入服务端 renderer：`getCharData()`/`getchar()` 现在可以读取角色卡原始 JSON（含扩展字段与 `character_book`），不会回退读取文件或增加模型调用；卡片 iframe 在没有酒馆宿主时提供受限的 `triggerSlash()` 兼容子集，宿主存在时优先转发官方实现。
