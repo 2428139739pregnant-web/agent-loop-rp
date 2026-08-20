@@ -75,6 +75,10 @@ export function createEjsWorldInfoBooks(books: readonly {
 /** Resource identity of the template currently being rendered. */
 export interface EjsTemplateTarget {
   readonly worldInfoBookId?: string
+  /** ST-Prompt-Template context for one [GENERATE:REGEX:*] hit. */
+  readonly matchedMessage?: string
+  readonly matchedMessageIndex?: number
+  readonly matchedMessageRole?: 'system' | 'user' | 'assistant' | 'tool'
 }
 
 /** JSON-only values exposed to one template evaluation. */
@@ -162,7 +166,11 @@ function segments(template: string): TemplateSegment[] | undefined {
   return result
 }
 
-function compileTemplate(template: string, context: EjsTemplateContext): string | undefined {
+function compileTemplate(
+  template: string,
+  context: EjsTemplateContext,
+  target: EjsTemplateTarget = {},
+): string | undefined {
   const parsed = segments(template)
   if (parsed === undefined) return undefined
   const transcript = context.transcript ?? []
@@ -177,6 +185,9 @@ function compileTemplate(template: string, context: EjsTemplateContext): string 
     variables: context.variables ?? {},
     scopes: context.variableScopes ?? {},
     ...(context.statData === undefined ? {} : { stat_data: context.statData }),
+    ...(target.matchedMessage === undefined ? {} : { matched_message: target.matchedMessage }),
+    ...(target.matchedMessageIndex === undefined ? {} : { matched_message_index: target.matchedMessageIndex }),
+    ...(target.matchedMessageRole === undefined ? {} : { matched_message_role: target.matchedMessageRole }),
   })
   const statements = parsed.map(segment => {
     if (segment.kind === 'text') return `__append(${JSON.stringify(segment.value)});`
@@ -201,6 +212,12 @@ function compileTemplate(template: string, context: EjsTemplateContext): string 
     const user = __input.user;
     const charName = char;
     const userName = user;
+    // ST-Prompt-Template exposes these variables while rendering each
+    // [GENERATE:REGEX:*] match. They intentionally remain undefined for the
+    // ordinary single-pass template path.
+    const matched_message = __input.matched_message;
+    const matched_message_index = __input.matched_message_index;
+    const matched_message_role = __input.matched_message_role;
     const runType = 'generate';
     const __transcript = __input.transcript;
     const messages = __input.transcriptIsMessagePrefix
@@ -571,7 +588,7 @@ export class EjsTemplateEngine implements LorebookRegexEngine {
   /** Render one template without exposing Host globals, modules, files, or network APIs. */
   render(template: string, context: EjsTemplateContext, target: EjsTemplateTarget = {}): EjsTemplateResult {
     if (template.length > MAX_TEMPLATE_CHARS) return { ok: false, kind: 'source-limit' }
-    const code = compileTemplate(template, context)
+    const code = compileTemplate(template, context, target)
     if (code === undefined) return { ok: false, kind: 'syntax-error' }
     const runtime = this.quickjs.newRuntime()
     runtime.setMemoryLimit(MEMORY_LIMIT_BYTES)

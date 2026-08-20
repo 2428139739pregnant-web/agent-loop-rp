@@ -32,7 +32,9 @@ function createFrame() {
           id: message.id,
           requestId: message.requestId,
           ok: true,
-          value: { ok: true },
+          value: message.method === 'format-as-displayed-message'
+            ? { html: '<p>formatted</p>', text: 'formatted' }
+            : { ok: true },
         },
       })
     },
@@ -224,6 +226,19 @@ test('Tavern Helper setChatMessage uses the public field-patch signature', async
   assert.deepEqual(plain(legacy?.payload.fields), { message: '旧签名正文', message_id: 5 })
 })
 
+test('iframe EjsTemplate evaluates core Prompt Template syntax in the sandbox', async () => {
+  const frame = createFrame()
+  const context = await frame.window.EjsTemplate.prepareContext({ name1: '用户', value: 3 })
+  assert.equal(await frame.window.EjsTemplate.evalTemplate(
+    '<% if (value > 2) { %><%= name1 %>: <%= "<ok>" %><% } %>',
+    context,
+  ), '用户: &lt;ok&gt;')
+  assert.equal(await frame.window.EjsTemplate.evalTemplate('<% print("A", "B") %>', context), 'AB')
+  const compiled = await frame.window.EjsTemplate.compileTemplate('<%= value + 1 %>')
+  assert.equal(await compiled({ value: 4 }), '5')
+  assert.match(await frame.window.EjsTemplate.getSyntaxErrorInfo('<% if ( %>'), /Unexpected token/)
+})
+
 test('Tavern Helper chat tree APIs preserve message metadata and canonical RPC arguments', async () => {
   const frame = createFrame()
   await frame.window.setChatMessages([
@@ -267,6 +282,47 @@ test('Tavern Helper chat tree APIs preserve message metadata and canonical RPC a
   assert.deepEqual(plain({ begin: request?.payload.begin, middle: request?.payload.middle, end: request?.payload.end }), { begin: 0, middle: 1, end: 2 })
   assert.equal(typeof frame.window.TavernHelper.createChatMessages, 'function')
   assert.equal(typeof frame.window.SillyTavern.getContext().deleteChatMessages, 'function')
+})
+
+test('displayed-message APIs use the safe host bridge', async () => {
+  const frame = createFrame()
+  frame.window.dispatchEvent({
+    type: 'message',
+    source: frame.parent,
+    data: {
+      type: 'agent-rp-card-context',
+      id: 'frame-test',
+      context: {
+        chat: [{ message_id: 0, role: 'assistant', message: '原始正文' }],
+      },
+    },
+  })
+
+  const displayed = frame.window.retrieveDisplayedMessage(0)
+  assert.equal(displayed.length, 1)
+  assert.equal(displayed.text(), '原始正文')
+  displayed.html('<strong>临时显示</strong>')
+  let request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'displayed-message-mutation')
+  assert.deepEqual(plain(request?.payload), {
+    messageId: 0,
+    operation: 'html',
+    value: '<strong>临时显示</strong>',
+  })
+
+  const formatted = await frame.window.formatAsDisplayedMessage('{{char}}', { message_id: 0 })
+  assert.equal(formatted, '<p>formatted</p>')
+  request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'format-as-displayed-message')
+  assert.deepEqual(plain(request?.payload), { text: '{{char}}', messageId: 0 })
+
+  await frame.window.refreshOneMessage(0, displayed)
+  request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'refresh-one-message')
+  assert.deepEqual(plain(request?.payload), { messageId: 0, targetMessageId: 0 })
+  assert.equal(typeof frame.window.TavernHelper.retrieveDisplayedMessage, 'function')
+  assert.equal(typeof frame.window.TavernHelper.formatAsDisplayedMessage, 'function')
+  assert.equal(typeof frame.window.TavernHelper.refreshOneMessage, 'function')
 })
 
 test('host lifecycle events cross the iframe bridge with SillyTavern names and arguments', () => {

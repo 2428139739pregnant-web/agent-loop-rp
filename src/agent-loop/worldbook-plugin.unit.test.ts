@@ -8,6 +8,7 @@ import {
 } from './worldbook-plugin.ts'
 import type { AgentContext } from './agents/types.ts'
 import type { ChatMessage } from './provider.ts'
+import { EjsTemplateEngine } from '../ejs-template.ts'
 
 function makeContext(): AgentContext {
   return {
@@ -92,6 +93,41 @@ test('[GENERATE:REGEX:*] activates independently of ordinary blue/green keys', (
   assert.deepEqual(output.promptInjections[0]?.placement, {
     kind: 'regex', pattern: 'Hello world', at: 'before',
   })
+})
+
+test('[GENERATE:REGEX:*] renders matched_message* independently for every hit', async () => {
+  const base: ChatMessage[] = [
+    { role: 'system', content: 'system' },
+    { role: 'user', content: 'hello user' },
+    { role: 'assistant', content: 'hello assistant' },
+  ]
+  const engine = await EjsTemplateEngine.create()
+  const renderer = engine.createRenderer({
+    characterName: '莉娜',
+    userName: '小明',
+    messages: base.map(message => message.content),
+    transcript: base.map(message => ({
+      role: message.role as 'system' | 'user' | 'assistant',
+      content: message.content,
+    })),
+  })
+  const context: AgentContext = { ...makeContext(), renderTemplate: renderer }
+  const output = buildWorldbookPluginOutput([candidate({
+    path: 'regex-context',
+    comment: '[GENERATE:REGEX:hello]',
+    content: '<%= matched_message_index %>:<%= matched_message_role %>:<%= matched_message %>',
+    active: false,
+    constant: false,
+  })], context)
+
+  assert.equal(output.promptInjections[0]?.template, '<%= matched_message_index %>:<%= matched_message_role %>:<%= matched_message %>')
+  assert.deepEqual(applyWorldbookPromptInjections(base, output.promptInjections), [
+    { role: 'system', content: 'system' },
+    { role: 'system', content: '1:user:hello user' },
+    { role: 'user', content: 'hello user' },
+    { role: 'system', content: '2:assistant:hello assistant' },
+    { role: 'assistant', content: 'hello assistant' },
+  ])
 })
 
 test('prompt injections preserve roles and apply absolute, target, and regex placement', () => {

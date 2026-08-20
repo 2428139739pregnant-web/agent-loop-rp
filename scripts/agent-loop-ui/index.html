@@ -1823,7 +1823,63 @@
     CHATCOMPLETION_SOURCE_CHANGED:'chatcompletion_source_changed',CHATCOMPLETION_MODEL_CHANGED:'chatcompletion_model_changed',
   };
   window.toastr={success:()=>{},info:()=>{},warning:(message)=>console.warn('[agent-rp card]',message),error:(message)=>console.error('[agent-rp card]',message)};
-  if(!window.EjsTemplate)window.EjsTemplate={render:(template)=>String(template??''),compile:(template)=>()=>String(template??'')};
+  if(!window.EjsTemplate){
+    // ST-Prompt-Template exposes EjsTemplate to Tavern Helper scripts. The
+    // model-facing renderer lives in the host's bounded QuickJS runtime, but
+    // card/helper code needs the same core syntax inside this isolated frame.
+    // Keep this implementation local to the frame: it has no parent DOM,
+    // network, storage or model-generation access beyond existing bridge APIs.
+    const __ejsWhitespace=char=>char===' '||char===String.fromCharCode(9)||char===String.fromCharCode(10)||char===String.fromCharCode(13);
+    const __ejsTrimStart=value=>{let index=0;while(index<value.length&&__ejsWhitespace(value[index]))index+=1;return value.slice(index);};
+    const __ejsTrimEnd=value=>{let index=value.length;while(index>0&&__ejsWhitespace(value[index-1]))index-=1;return value.slice(0,index);};
+    const __ejsSegments=template=>{
+      const result=[];let cursor=0;let trimLeading=false;
+      while(cursor<template.length){
+        const opening=template.indexOf('<%',cursor);
+        if(opening<0){let tail=template.slice(cursor);if(trimLeading)tail=__ejsTrimStart(tail);if(tail)result.push({kind:'text',value:tail});return result;}
+        let text=template.slice(cursor,opening);if(trimLeading)text=__ejsTrimStart(text);
+        let marker=template[opening+2];
+        if(marker==='%'){if(text)result.push({kind:'text',value:text});result.push({kind:'text',value:'<%'});cursor=opening+3;trimLeading=false;continue;}
+        if(marker==='_'){text=__ejsTrimEnd(text);marker=template[opening+3];}
+        if(text)result.push({kind:'text',value:text});
+        const contentStart=opening+((marker==='='||marker==='-'||marker==='#')?3:2);
+        const closing=template.indexOf('%>',contentStart);if(closing<0)throw new SyntaxError('Unclosed EJS tag');
+        const closeMarker=template[closing-1];const contentEnd=(closeMarker==='-'||closeMarker==='_')?closing-1:closing;
+        const value=template.slice(contentStart,contentEnd);
+        if(marker!=='#')result.push({kind:marker==='='?'escaped':marker==='-'?'raw':'code',value});
+        cursor=closing+2;trimLeading=closeMarker==='_';
+        if(closeMarker==='-'){if(template[cursor]===String.fromCharCode(13))cursor+=template[cursor+1]===String.fromCharCode(10)?2:1;else if(template[cursor]===String.fromCharCode(10))cursor+=1;}
+      }
+      return result;
+    };
+    const __ejsEscape=value=>{const text=String(value??'');let output='';for(const char of text){output+=char==='&'?'&amp;':char==='<'?'&lt;':char==='>'?'&gt;':char==='"'?'&#34;':char==="'"?'&#39;':char;}return output;};
+    const __ejsCompile=template=>{
+      const parts=__ejsSegments(String(template??''));
+      let body="let __output='';const __append=value=>{if(value!==undefined&&value!==null)__output+=String(value);};const print=(...values)=>__append(values.join(''));";
+      for(const part of parts){
+        if(part.kind==='text')body+='__append('+JSON.stringify(part.value)+');';
+        else if(part.kind==='escaped')body+='__append(__ejsEscape('+part.value+'));';
+        else if(part.kind==='raw')body+='__append('+part.value+');';
+        else body+=part.value+';';
+      }
+      body+='return __output;';
+      const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
+      return new AsyncFunction('__scope','with(__scope){'+body+'}');
+    };
+    const __ejsPath=(value,path)=>{let current=value;for(const key of String(path??'').split('.')){if(key==='')continue;if(current===null||current===undefined)return undefined;current=current[key];}return current;};
+    const __ejsSetPath=(value,path,next)=>{const keys=String(path??'').split('.').filter(Boolean);if(keys.length===0)return next;let current=value;for(const key of keys.slice(0,-1)){if(!current[key]||typeof current[key]!=='object')current[key]={};current=current[key];}current[keys.at(-1)]=next;return next;};
+    const __ejsChat=()=>{const context=window.SillyTavern?.getContext?.()||window.SillyTavern||{};return Array.isArray(context.chat)?context.chat:[];};
+    const __ejsMessageText=message=>String(message?.message??message?.mes??message?.content??'');
+    const __ejsRole=role=>role==='user'||role==='assistant'||role==='system'?role:undefined;
+    const __ejsGetMessage=(id,role)=>{const messages=__ejsChat();let index=Number(id);if(!Number.isSafeInteger(index))return '';if(index<0)index=messages.length+index;const message=messages[index];const expected=__ejsRole(role);return message&&(!expected||message.role===expected||expected==='user'&&message.is_user===true||expected==='system'&&message.is_system===true)?__ejsMessageText(message):'';};
+    const __ejsGetMessages=(first,second,third)=>{const messages=__ejsChat();if(typeof second==='number'){let start=Number(first);let end=Number(second);if(start<0)start=messages.length+start;if(end<0)end=messages.length+end;const expected=__ejsRole(third);return messages.slice(Math.max(0,start),Math.min(messages.length,end+1)).filter(message=>!expected||message.role===expected).map(__ejsMessageText);}const count=Number(first);const expected=__ejsRole(second);if(!Number.isSafeInteger(count)||count<=0)return [];return messages.filter(message=>!expected||message.role===expected).slice(-count).map(__ejsMessageText);};
+    const __ejsGetVariable=(path,fallback)=>{const options=fallback&&typeof fallback==='object'&&Object.prototype.hasOwnProperty.call(fallback,'defaults')?fallback.defaults:fallback;try{return window.getVariable(path,options);}catch{return options;}};
+    const __ejsWriteVariable=(path,value)=>{const variables=typeof window.getAllVariables==='function'?window.getAllVariables():{};__ejsSetPath(variables,path,value);try{void window.replaceVariables(variables);}catch{}return value;};
+    const __ejsWorldInfo=async(...args)=>{let book='';let title;let data={};if(args.length>=2){book=String(args[0]??'');title=args[1];data=args[2]||{};}else{title=args[0];data=args[1]||{};}void data;if(typeof window.getWorldbook!=='function')return '';let entries=[];try{entries=await window.getWorldbook(book);}catch{return '';}if(!Array.isArray(entries))return '';const hit=entries.find(entry=>{if(entry?.uid!==undefined&&String(entry.uid)===String(title))return true;if(entry?.sourceId!==undefined&&String(entry.sourceId)===String(title))return true;if(title instanceof RegExp){title.lastIndex=0;return title.test(String(entry?.comment??entry?.name??''));}return String(entry?.comment??entry?.name??'')===String(title);});return String(hit?.content??'');};
+    const __ejsContext=async(additional={},lastMessageId=65535)=>{const st=window.SillyTavern?.getContext?.()||window.SillyTavern||{};const all=__ejsChat();const limit=Number(lastMessageId);const chat=Number.isSafeInteger(limit)&&limit<65535?all.filter((message,index)=>Number(message?.message_id??index)<=limit):all;const variables=typeof window.getAllVariables==='function'?window.getAllVariables():{};const scope={char:String(st.name2||window.name2||''),user:String(st.name1||'User'),charName:String(st.name2||window.name2||''),userName:String(st.name1||'User'),runType:'generate',chat,messages:chat.map(__ejsMessageText),variables,stat_data:variables?.stat_data??variables,lastMessageId:chat.length-1,lastUserMessageId:chat.map((message,index)=>message?.role==='user'||message?.is_user===true?index:-1).filter(index=>index>=0).at(-1)??-1,lastCharMessageId:chat.map((message,index)=>message?.role==='assistant'||(!message?.is_user&&!message?.is_system)?index:-1).filter(index=>index>=0).at(-1)??-1,getvar:__ejsGetVariable,getVariable:__ejsGetVariable,getChatMessage:__ejsGetMessage,getChatMessages:__ejsGetMessages,getwi:__ejsWorldInfo,getWorldInfo:__ejsWorldInfo,getvarScope:()=>variables,setvar:__ejsWriteVariable,incvar:(path,value=1)=>__ejsWriteVariable(path,Number(__ejsGetVariable(path,0))+Number(value)),decvar:(path,value=1)=>__ejsWriteVariable(path,Number(__ejsGetVariable(path,0))-Number(value)),SillyTavern:st,TavernHelper:window.TavernHelper,Mvu:window.Mvu,_:window._,$:window.$,jQuery:window.jQuery,toastr:window.toastr,YAML:window.YAML};Object.assign(scope,additional&&typeof additional==='object'?additional:{});Object.defineProperty(scope,'__agentRpPrepared',{value:true,enumerable:false});return scope;};
+    const __ejsEval=async(content,data={},options={})=>{void options;const scope=data&&data.__agentRpPrepared?data:await __ejsContext(data);scope.__ejsEscape=__ejsEscape;return __ejsCompile(content)(scope);};
+    window.EjsTemplate={evalTemplate:__ejsEval,render:__ejsEval,prepareContext:__ejsContext,compile:template=>{const compiled=__ejsCompile(template);return async(data={})=>{const scope=data&&data.__agentRpPrepared?data:await __ejsContext(data);scope.__ejsEscape=__ejsEscape;return compiled(scope);};},compileTemplate:async template=>window.EjsTemplate.compile(template),getSyntaxErrorInfo:async content=>{try{__ejsCompile(content);return '';}catch(error){return String(error?.message||error);}},getvar:__ejsGetVariable,getwi:__ejsWorldInfo,getWorldInfo:__ejsWorldInfo,saveVariables:async()=>undefined};
+  }
 if(!window.showdown)window.showdown={Converter:class{constructor(options={}){this.options=options;}makeHtml(value){return String(value??'').replace(/&/gu,'&amp;').replace(/</gu,'&lt;').replace(/>/gu,'&gt;').replace(/\\*\\*(.+?)\\*\\*/gu,'<strong>$1</strong>').replace(/\\*(.+?)\\*/gu,'<em>$1</em>').replace(/\\n/gu,'<br>');}}};
   const __events={VARIABLE_INITIALIZED:'mag_variable_initialized',VARIABLE_UPDATE_STARTED:'mag_variable_update_started',VARIABLE_UPDATE_ENDED:'mag_variable_update_ended'};
   window.Mvu=Object.assign({},__parent?.Mvu||{}, {events:__events,getMvuData:option=>__scopeValue(option),getVariable:window.getVariable,replaceMvuData:(value,option)=>__replaceVariables(value,option),isDuringExtraAnalysis:()=>false});
@@ -1839,6 +1895,43 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
   window.SillyTavern.setExtensionPrompt=__setExtensionPrompt;
   window.SillyTavern.extensionPrompts=__stContext.extensionPrompts;
   if(!window.$){window.$=__query;window.jQuery=__query;}
+  // These APIs deliberately use a remote, jQuery-like handle.  Card iframes
+  // never receive a live parent-DOM node, but can still inspect and mutate the
+  // displayed floor through the host's existing render pipeline.
+  const __displayedText=message=>String(message?.message??message?.mes??message?.content??'');
+  const __displayedMessageId=raw=>{
+    const chat=__contextChat();
+    if(raw==='last'||raw===undefined||raw===null){const item=chat.at(-1);return Number.isSafeInteger(item?.message_id)?item.message_id:chat.length-1;}
+    if(raw==='last_user')return chat.map((item,index)=>item?.role==='user'||item?.is_user===true?(Number.isSafeInteger(item?.message_id)?item.message_id:index):-1).filter(index=>index>=0).at(-1)??-1;
+    if(raw==='last_char')return chat.map((item,index)=>item?.role==='assistant'||(!item?.is_user&&!item?.is_system)?(Number.isSafeInteger(item?.message_id)?item.message_id:index):-1).filter(index=>index>=0).at(-1)??-1;
+    const value=Number(raw);if(!Number.isSafeInteger(value))return -1;
+    if(value<0){const item=chat.at(value);return Number.isSafeInteger(item?.message_id)?item.message_id:value;}
+    return value;
+  };
+  const __displayedMessage=raw=>{
+    const messageId=__displayedMessageId(raw);
+    const message=__contextChat().find((item,index)=>(Number.isSafeInteger(item?.message_id)?item.message_id:index)===messageId);
+    const state={messageId,text:__displayedText(message),html:__displayedText(message)};
+    const api={length:message?1:0,__messageId:messageId};
+    if(message)api[0]=message;
+    const request=(operation,payload={})=>__rpc('displayed-message-mutation',{messageId,operation,...payload}).then(result=>{if(typeof result?.text==='string')state.text=result.text;if(typeof result?.html==='string')state.html=result.html;return api;});
+    api.toArray=()=>message?[message]:[];
+    api.get=index=>index===undefined?(message?[message]:[]):index===0?message:undefined;
+    api.each=fn=>{if(message)fn.call(message,0,message);return api;};
+    api.text=value=>{if(value===undefined)return state.text;const next=String(value??'');state.text=next;state.html=next;void request('text',{value:next});return api;};
+    api.html=value=>{if(value===undefined)return state.html;const next=String(value??'');state.html=next;void request('html',{value:next});return api;};
+    api.append=value=>{const next=typeof value==='string'?value:String(value?.html?.()??value??'');state.html+=next;void request('append',{value:next});return api;};
+    api.empty=()=>{state.text='';state.html='';void request('empty');return api;};
+    api.find=()=>__displayedMessage(-1);
+    api.eq=index=>Number(index)===0?api:{length:0,toArray:()=>[],get:()=>undefined,each:fn=>{void fn;return api}};
+    return api;
+  };
+  window.retrieveDisplayedMessage=messageId=>__displayedMessage(messageId);
+  window.formatAsDisplayedMessage=(text,options={})=>__rpc('format-as-displayed-message',{text:String(text??''),messageId:__displayedMessageId(options?.message_id)}).then(result=>String(result?.html??result?.text??''));
+  window.refreshOneMessage=(messageId,$mes)=>__rpc('refresh-one-message',{messageId:__displayedMessageId(messageId),targetMessageId:Number.isSafeInteger($mes?.__messageId)?$mes.__messageId:undefined}).then(()=>undefined);
+  window.TavernHelper.retrieveDisplayedMessage=window.retrieveDisplayedMessage;
+  window.TavernHelper.formatAsDisplayedMessage=window.formatAsDisplayedMessage;
+  window.TavernHelper.refreshOneMessage=window.refreshOneMessage;
   window.addEventListener('message',event=>{
     if(event.source!==window.parent||!event.data||event.data.id!==__frameId)return;
     if(event.data.type==='agent-rp-card-rpc-result'){
@@ -2049,7 +2142,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       }
     }
 
-    function CardHtmlSurface({ source, mvuState, character, characterId = '', historyLength = 0, sessionId = null, surfaceKind = 'content', userName = '用户', onVariablesChange = null, onChatRefresh = null }) {
+    function CardHtmlSurface({ source, mvuState, character, characterId = '', historyLength = 0, sessionId = null, surfaceKind = 'content', userName = '用户', onVariablesChange = null, onChatRefresh = null, onDisplayedMessage = null }) {
       const frameRef = useRef(null)
       const frameId = useRef(`card-frame-${Math.random().toString(36).slice(2)}`)
       const sessionIdRef = useRef(sessionId)
@@ -2057,10 +2150,12 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       const latestMvuState = useRef(mvuState)
       const onVariablesChangeRef = useRef(onVariablesChange)
       const onChatRefreshRef = useRef(onChatRefresh)
+      const onDisplayedMessageRef = useRef(onDisplayedMessage)
       sessionIdRef.current = sessionId
       latestMvuState.current = mvuState
       onVariablesChangeRef.current = onVariablesChange
       onChatRefreshRef.current = onChatRefresh
+      onDisplayedMessageRef.current = onDisplayedMessage
       const helperScripts = character?.frontend?.tavernHelperScripts || []
       const [height, setHeight] = useState(1)
       const frameDocument = useMemo(
@@ -2181,6 +2276,51 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                 const ids = messageIds.length > 0 ? messageIds : [-1]
                 for (const messageId of ids) await broadcastCardHostEvent(activeSessionId, 'message_updated', messageId)
               }
+              const readDisplayHistory = async () => {
+                const result = await apiGet(`/api/history?sessionId=${encodeURIComponent(activeSessionId)}&raw=1`)
+                return Array.isArray(result.history) ? result.history : []
+              }
+              const resolveDisplayMessageId = (raw, messages) => {
+                const ids = messages.map((message, index) => Number.isSafeInteger(message?.message_id) ? message.message_id : index)
+                if (raw === 'last' || raw === undefined || raw === null) return ids.at(-1) ?? -1
+                if (raw === 'last_user') return messages.map((message, index) => message?.role === 'user' ? ids[index] : -1).filter(id => id >= 0).at(-1) ?? -1
+                if (raw === 'last_char') return messages.map((message, index) => message?.role === 'assistant' ? ids[index] : -1).filter(id => id >= 0).at(-1) ?? -1
+                const value = Number(raw)
+                if (!Number.isSafeInteger(value)) return -1
+                return value < 0 ? (ids.at(value) ?? value) : value
+              }
+              if (data.method === 'format-as-displayed-message') {
+                const messages = await readDisplayHistory()
+                const messageId = resolveDisplayMessageId(data.payload?.messageId, messages)
+                if (!messages.some((message, index) => (Number.isSafeInteger(message?.message_id) ? message.message_id : index) === messageId)) throw new Error(`displayed message id is out of range: ${messageId}`)
+                return formatDisplayedMessageHtml(data.payload?.text, messageId, messages, character, userName)
+              }
+              if (data.method === 'displayed-message-mutation') {
+                const payload = data.payload || {}
+                const messageId = Number(payload.messageId)
+                if (!Number.isSafeInteger(messageId) || messageId < 0) throw new Error('displayed message id must be a non-negative integer')
+                const operation = String(payload.operation || '')
+                if (operation === 'refresh') {
+                  onDisplayedMessageRef.current?.({ messageId, operation: 'refresh' })
+                } else if (operation === 'empty') {
+                  onDisplayedMessageRef.current?.({ messageId, operation: 'html', html: '' })
+                } else if (operation === 'html') {
+                  onDisplayedMessageRef.current?.({ messageId, operation: 'html', html: String(payload.value ?? '') })
+                } else if (operation === 'text') {
+                  onDisplayedMessageRef.current?.({ messageId, operation: 'text', text: String(payload.value ?? '') })
+                } else if (operation === 'append') {
+                  onDisplayedMessageRef.current?.({ messageId, operation: 'append', html: String(payload.value ?? '') })
+                } else throw new Error(`unsupported displayed message mutation: ${operation}`)
+                return { ok: true }
+              }
+              if (data.method === 'refresh-one-message') {
+                const messages = await readDisplayHistory()
+                const sourceMessageId = resolveDisplayMessageId(data.payload?.messageId, messages)
+                if (!messages.some((message, index) => (Number.isSafeInteger(message?.message_id) ? message.message_id : index) === sourceMessageId)) throw new Error(`displayed message id is out of range: ${sourceMessageId}`)
+                const targetMessageId = Number.isSafeInteger(data.payload?.targetMessageId) ? data.payload.targetMessageId : sourceMessageId
+                onDisplayedMessageRef.current?.({ messageId: targetMessageId, operation: 'refresh' })
+                return { ok: true, messageId: sourceMessageId, targetMessageId }
+              }
               if (data.method === 'get-chat-messages') {
                 const result = await apiGet(`/api/history?sessionId=${encodeURIComponent(activeSessionId)}&raw=1`)
                 const source = Array.isArray(result.history) ? result.history : []
@@ -2257,7 +2397,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                 const fields = data.payload?.fields && typeof data.payload.fields === 'object' && !Array.isArray(data.payload.fields)
                   ? data.payload.fields
                   : { message: String(data.payload?.message ?? '') }
-                const result = await apiPut(endpoint, { format: 0, operation: 'set-chat-messages', messages: [fields] })
+                const result = await apiPut(endpoint, { format: 0, operation: 'set-chat-messages', messages: [fields], refresh: data.payload?.options?.refresh })
                 await syncFrameState()
                 const mode = refreshMode(data.payload?.options?.refresh)
                 await refreshMutation(mode, [messageId])
@@ -2265,7 +2405,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                 return result
               }
               if (data.method === 'set-chat-messages') {
-                const result = await apiPut(endpoint, { format: 0, operation: 'set-chat-messages', messages: data.payload?.messages || [] })
+                const result = await apiPut(endpoint, { format: 0, operation: 'set-chat-messages', messages: data.payload?.messages || [], refresh: data.payload?.options?.refresh })
                 await syncFrameState()
                 const ids = (Array.isArray(data.payload?.messages) ? data.payload.messages : []).map(message => message?.message_id).filter(Number.isSafeInteger)
                 const mode = refreshMode(data.payload?.options?.refresh)
@@ -2277,12 +2417,12 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                 const payload = data.payload || {}
                 const operation = data.method
                 const body = operation === 'create-chat-messages'
-                  ? { format: 0, operation, messages: payload.messages || [], insertAt: Number.isSafeInteger(payload.options?.insert_at) ? payload.options.insert_at : Number.isSafeInteger(payload.options?.insert_before) ? payload.options.insert_before : 'end' }
+                  ? { format: 0, operation, messages: payload.messages || [], insertAt: Number.isSafeInteger(payload.options?.insert_at) ? payload.options.insert_at : Number.isSafeInteger(payload.options?.insert_before) ? payload.options.insert_before : 'end', refresh: payload.options?.refresh }
                   : operation === 'delete-chat-messages'
-                    ? { format: 0, operation, messageIds: payload.messageIds || [] }
+                    ? { format: 0, operation, messageIds: payload.messageIds || [], refresh: payload.options?.refresh }
                     : operation === 'rotate-chat-messages'
-                      ? { format: 0, operation, begin: payload.begin, middle: payload.middle, end: payload.end }
-                      : { format: 0, operation, start: payload.start, end: payload.end, hidden: payload.hidden }
+                      ? { format: 0, operation, begin: payload.begin, middle: payload.middle, end: payload.end, refresh: payload.options?.refresh }
+                      : { format: 0, operation, start: payload.start, end: payload.end, hidden: payload.hidden, refresh: payload.options?.refresh }
                 const result = await apiPut(endpoint, body)
                 await syncFrameState()
                 const mode = refreshMode(payload.options?.refresh)
@@ -2429,13 +2569,18 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
      * 角色卡的 markdownOnly 脚本只影响显示，promptOnly 脚本不会污染显示；
      * 普通 Markdown 继续走 marked + 白名单净化，角色卡前端进入独立
      * iframe；iframe 只负责自身排版，滚动仍由外层 .chat 统一负责。 */
-    function MessageContent({ content, role, character, characterId = '', historyLength = 0, sessionId = null, depth = 0, userName = '用户', mvuState = null, onVariablesChange = null, onChatRefresh = null }) {
+    function MessageContent({ content, role, character, characterId = '', historyLength = 0, sessionId = null, depth = 0, userName = '用户', mvuState = null, onVariablesChange = null, onChatRefresh = null, onDisplayedMessage = null, displayOverride = null }) {
+      if (displayOverride !== null && typeof displayOverride === 'string') {
+        return h('div', { className: 'msg-text msg-content-stack msg-display-override' },
+          h('div', { className: 'msg-markdown', dangerouslySetInnerHTML: { __html: sanitizeHtml(displayOverride) } }),
+        )
+      }
       const processed = applyDisplayRegex(content, role === 'user' ? 1 : 2, character, depth, userName)
       const segments = compileDisplaySegments(processed)
       const rendered = segments.flatMap((segment, index) => {
         if (segment.kind === 'html') {
           return [h('div', { key: `html-surface-${index}`, className: 'msg-html-surface', 'data-surface-kind': 'content' },
-            h(CardHtmlSurface, { source: segment.source, mvuState, character, characterId, historyLength, sessionId, userName, surfaceKind: 'content', onVariablesChange, onChatRefresh }),
+            h(CardHtmlSurface, { source: segment.source, mvuState, character, characterId, historyLength, sessionId, userName, surfaceKind: 'content', onVariablesChange, onChatRefresh, onDisplayedMessage }),
           )]
         }
         const markdownHtml = marked.parse(segment.source, { gfm: true, breaks: true })
@@ -2451,7 +2596,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
      * corrected without losing them to the renderer.
      */
     function MessageFloor({
-      message, index, total, character, characterId, sessionId, userName, mvuState, onVariablesChange, onChatRefresh,
+      message, index, total, character, characterId, sessionId, userName, mvuState, onVariablesChange, onChatRefresh, onDisplayedMessage, displayOverride = null,
       disabled = false, onReroll = null, onSwipe = null, onSaveEdit, onDelete,
     }) {
       const [collapsed, setCollapsed] = useState(false)
@@ -2541,7 +2686,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
             ? h('div', { className: 'floor-collapsed-body' }, preview || '(空消息)')
             : h(MessageContent, {
                 content: message.content, role: message.role, character, characterId, historyLength: total,
-                sessionId, depth: Math.max(0, total - index - 1), userName, mvuState, onVariablesChange, onChatRefresh,
+                sessionId, depth: Math.max(0, total - index - 1), userName, mvuState, onVariablesChange, onChatRefresh, onDisplayedMessage, displayOverride,
               }),
       )
     }
@@ -2896,6 +3041,34 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
         if (s.markdownOnly) out = runCardRegexScriptUI(s, out, character, userName)
       }
       return out
+    }
+    function expandDisplayedMessageMacros(value, messageId, messages, character, userName = '用户') {
+      const list = Array.isArray(messages) ? messages : []
+      const ids = list.map((message, index) => Number.isSafeInteger(message?.message_id) ? message.message_id : index)
+      const index = ids.indexOf(messageId)
+      const lastUser = list.map((message, itemIndex) => message?.role === 'user' ? itemIndex : -1).filter(itemIndex => itemIndex >= 0).at(-1)
+      const lastChar = list.map((message, itemIndex) => message?.role === 'assistant' ? itemIndex : -1).filter(itemIndex => itemIndex >= 0).at(-1)
+      return cardMacro(value, character, userName)
+        .replace(/\{\{lastMessageId\}\}/giu, String(ids.at(-1) ?? -1))
+        .replace(/\{\{messageId\}\}/giu, String(messageId ?? index))
+        .replace(/\{\{lastUserMessageId\}\}/giu, String(lastUser === undefined ? -1 : ids[lastUser]))
+        .replace(/\{\{lastCharMessageId\}\}/giu, String(lastChar === undefined ? -1 : ids[lastChar]))
+    }
+    function escapeDisplayedText(value) {
+      return String(value ?? '').replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/"/gu, '&quot;').replace(/'/gu, '&#39;').replace(/\r?\n/gu, '<br>')
+    }
+    function formatDisplayedMessageHtml(text, messageId, messages, character, userName = '用户') {
+      const list = Array.isArray(messages) ? messages : []
+      const index = list.findIndex((message, itemIndex) => (Number.isSafeInteger(message?.message_id) ? message.message_id : itemIndex) === messageId)
+      const message = index >= 0 ? list[index] : null
+      const placement = message?.role === 'user' ? 1 : 2
+      const depth = index >= 0 ? Math.max(0, list.length - index - 1) : undefined
+      const processed = applyDisplayRegex(expandDisplayedMessageMacros(text, messageId, list, character, userName), placement, character, depth, userName)
+      const segments = compileDisplaySegments(processed)
+      const html = segments.map((segment) => segment.kind === 'html'
+        ? sanitizeHtml(segment.source)
+        : sanitizeHtml(marked.parse(segment.source, { gfm: true, breaks: true }))).join('')
+      return { html, text: processed, messageId }
     }
     function refreshDisplayRegexScripts() {
       return apiGet('/api/regex').then((r) => { displayRegexScripts = r.scripts || [] }).catch(() => {})
@@ -3756,6 +3929,8 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       const [progressStages, setProgressStages] = useState(INITIAL_STAGES)
       const [traces, setTraces] = useState({})
       const [lastTokenStats, setLastTokenStats] = useState(null)
+      const [displayOverrides, setDisplayOverrides] = useState({})
+      const [displayRefreshVersion, setDisplayRefreshVersion] = useState(0)
       const [greetingIdx, setGreetingIdx] = useState(0)
       const [activeGreetingIdx, setActiveGreetingIdx] = useState(0)
       const [bootDone, setBootDone] = useState(false)
@@ -3810,6 +3985,27 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           setError(String(err.message || err))
         }
       }, [currentSessionId])
+      const onDisplayedMessageMutation = useCallback((mutation) => {
+        const messageId = Number(mutation?.messageId)
+        if (!Number.isSafeInteger(messageId) || messageId < 0) return
+        if (mutation.operation === 'refresh') {
+          setDisplayOverrides((previous) => {
+            const next = { ...previous }
+            delete next[String(messageId)]
+            return next
+          })
+          setDisplayRefreshVersion((value) => value + 1)
+          return
+        }
+        setDisplayOverrides((previous) => {
+          const key = String(messageId)
+          if (mutation.operation === 'html') return { ...previous, [key]: String(mutation.html ?? '') }
+          if (mutation.operation === 'text') return { ...previous, [key]: `<p>${escapeDisplayedText(mutation.text ?? '')}</p>` }
+          if (mutation.operation === 'append') return { ...previous, [key]: sanitizeHtml(`${previous[key] || ''}${String(mutation.html ?? '')}`) }
+          return previous
+        })
+      }, [])
+      useEffect(() => { setDisplayOverrides({}) }, [currentSessionId])
       useEffect(() => {
         (async () => {
           try {
@@ -4408,6 +4604,9 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                       character: currentCharacter, characterId: currentCharacterId, sessionId: currentSessionId, userName: currentUserName, mvuState,
                       onVariablesChange: onCardVariablesChange,
                       onChatRefresh: refreshCurrentHistory,
+                      onDisplayedMessage: onDisplayedMessageMutation,
+                      displayOverride: displayOverrides[String(Number.isSafeInteger(m.message_id) ? m.message_id : i)] ?? null,
+                      displayRefreshVersion,
                       disabled: currentSessionId === null || loading,
                       onReroll: i === history.length - 1 && m.role === 'assistant' ? reroll : null,
                       onSwipe: switchSwipe,

@@ -1,5 +1,7 @@
 /** Schemastery schemas for agent-loop data contracts. */
 
+import type { EjsTemplateResult, EjsTemplateTarget } from '../ejs-template.ts'
+
 import z from '@deepseek-ai/schemastery'
 import type { ResponsePromptBudgetStats } from './response-settings.ts'
 
@@ -40,6 +42,13 @@ export type WorldbookPromptPlacement =
 export interface WorldbookPromptInjection {
   path: string
   content: string
+  /**
+   * Deferred Prompt Template source for regex placements.  ST renders this
+   * once per matched message with matched_message* variables in scope.
+   */
+  template?: string
+  /** Runtime-only renderer; omitted by JSON serialization and never sent to an LLM. */
+  templateRenderer?: (template: string, target?: EjsTemplateTarget) => EjsTemplateResult
   role: WorldbookPromptRole
   order: number
   placement: WorldbookPromptPlacement

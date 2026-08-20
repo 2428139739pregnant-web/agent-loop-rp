@@ -164,6 +164,63 @@ test('chat metadata follows SillyTavern updateChatMetadata merge and reset seman
   })), /reset must be a boolean/)
 })
 
+test('chat mutations preserve canonical refresh modes through parsing', () => {
+  const cases = [
+    ['update-chat-metadata', { values: {} }, 'none'],
+    ['set-chat-messages', { messages: [{ message_id: 0, message: 'updated' }] }, 'affected'],
+    ['create-chat-messages', { messages: [{ role: 'assistant', message: 'inserted' }] }, 'all'],
+    ['delete-chat-messages', { messageIds: [0] }, 'none'],
+    ['rotate-chat-messages', { begin: 0, middle: 1, end: 2 }, 'affected'],
+    ['set-chat-hidden', { start: 0, end: 1, hidden: true }, 'all'],
+  ] as const
+
+  for (const [operation, fields, refresh] of cases) {
+    const parsed = parseTavernHelperMutationRequest(JSON.stringify({
+      format: 0,
+      operation,
+      ...fields,
+      refresh,
+    }))
+    assert.ok('operation' in parsed)
+    assert.equal(parsed.operation, operation)
+    assert.equal(parsed.refresh, refresh)
+  }
+
+  const legacyBoolean = parseTavernHelperMutationRequest(JSON.stringify({
+    format: 0,
+    operation: 'delete-chat-messages',
+    messageIds: [0],
+    options: { refresh: true },
+  }))
+  assert.ok('operation' in legacyBoolean)
+  assert.equal('refresh' in legacyBoolean ? legacyBoolean.refresh : undefined, 'affected')
+
+  const directValueWins = parseTavernHelperMutationRequest(JSON.stringify({
+    format: 0,
+    operation: 'delete-chat-messages',
+    messageIds: [0],
+    refresh: 'none',
+    options: { refresh: 'all' },
+  }))
+  assert.ok('operation' in directValueWins)
+  assert.equal('refresh' in directValueWins ? directValueWins.refresh : undefined, 'none')
+
+  const withoutRefresh = parseTavernHelperMutationRequest(JSON.stringify({
+    format: 0,
+    operation: 'delete-chat-messages',
+    messageIds: [0],
+  }))
+  assert.ok('operation' in withoutRefresh)
+  assert.equal('refresh' in withoutRefresh ? withoutRefresh.refresh : undefined, 'affected')
+
+  assert.throws(() => parseTavernHelperMutationRequest(JSON.stringify({
+    format: 0,
+    operation: 'delete-chat-messages',
+    messageIds: [0],
+    refresh: 'sometimes',
+  })), /refresh must be none, affected, or all/)
+})
+
 test('extension prompt anchors preserve ST before/in/none positions', () => {
   const state = initializeTavernHelperState(frontend([scriptTree('script-a')]), 'character')
   const request = parseTavernHelperMutationRequest(JSON.stringify({

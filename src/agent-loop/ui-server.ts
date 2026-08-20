@@ -2570,6 +2570,7 @@ async function handlePutSessionTavernHelper(
     ...sessionVariablesPayload(state, nextRecord),
     tavernHelperState: nextHelperState,
     operation: 'operation' in mutation ? mutation.operation : undefined,
+    refresh: 'refresh' in mutation ? mutation.refresh : undefined,
     history: historyChanged ? nextHistory : undefined,
     ...(nextHelperState.worldbookBindings === undefined ? {} : { worldbookBindings: nextHelperState.worldbookBindings }),
   })

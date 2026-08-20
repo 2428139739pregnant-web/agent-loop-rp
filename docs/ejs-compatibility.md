@@ -12,6 +12,7 @@ Agent RP 只执行能够从当前 Session 日志确定性重建的模板语义�
 | `_` 与 `YAML.stringify` | 支持 JSON 数据子集 | `_` 提供 `get`、`cloneDeep`、`mapValues`、`isEmpty`、`omit`、`pick`、`transform`；YAML 输出保持确定性并可由 YAML 1.2 读取，不提供页面对象或插件实例 |
 | `setvar`、`incvar`、`decvar` | 未执行 | 需要持久事件、准备/生成/渲染阶段和失败回滚语义，不能伪装成一次性的局部修改 |
 | `getwi`、`getWorldInfo` | 只读支持 | 按当前 Session 的世界书来源和条目标识读取纯文本条目；支持当前书及显式书名，找不到返回空字符串，读取次数和累计字符受限 |
+| `[GENERATE:REGEX:*]` 的 `matched_message`、`matched_message_index`、`matched_message_role` | 支持 | 每个正则命中楼层分别渲染；同一条目命中多楼层不会复用另一楼层的模板结果，也不会增加 LLM 调用 |
 | `getchar`、`getpreset`、`getqr` | 未执行 | 需要同样的资源身份与递归预算；原始模板仍完整保留 |
 | `activewi`、`injectPrompt`、`activateRegex`、`@@` 装饰器 | 未执行 | 会改变提示词结构或激活顺序，需要独立的 Session 事件和可检查的执行计划 |
 | 页面对象、JQuery、toastr、SillyTavern 全局对象 | 不提供 | 模型提示词模板不得访问 UI、网络或宿主页面 |
@@ -20,3 +21,5 @@ Agent RP 只执行能够从当前 Session 日志确定性重建的模板语义�
 模板超过源码、输出、内存、栈、解释器工作量、资源读取或单轮执行次数限制时，只跳过对应模块或世界书条目，并返回不含模板正文的稳定失败类别。`getWorldInfo` 引用含 EJS 的条目时不会泄露未执行标签；递归渲染加入循环检测前会明确归类为不支持。
 
 兼容事实参考公开的 [ST Prompt Template 文档](https://github.com/zonde306/ST-Prompt-Template/blob/9bf9bcdfa8d0d38ab1f4f7342067bc16f347d85d/docs/reference.md)。实现依据公开接口行为独立完成，不包含其 AGPL 源代码。
+
+上表描述的是发送给模型的 Host QuickJS 模板环境。角色卡和酒馆助手脚本所在的 iframe 另有一个受限的 `window.EjsTemplate` 兼容面，提供 `evalTemplate`、`prepareContext`、`compileTemplate`、楼层/变量/世界书读取和变量桥接写入；两者不会共享页面对象，也不会因为模板兼容而增加额外模型调用。

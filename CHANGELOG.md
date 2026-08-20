@@ -4,8 +4,10 @@
 
 ### 修复
 
+- Tavern Helper 聊天 mutation 现在保留并规范化 `refresh: none/affected/all`，兼容旧的布尔值和 `options.refresh` 写法；服务端响应会回传最终 refresh 模式，避免宿主在解析或响应阶段丢失刷新语义。
 - 对齐酒馆助手公开的 `setChatMessage(fieldValues, messageId, options)` 签名：支持局部更新 `message`、`data`、`extra` 等楼层字段，保留旧版 `(messageId, message)` 调用兼容；`getChatMessages` 同时支持 `0-` 形式的开放末端范围。
 - 修正 ST-Prompt-Template 的 `[GENERATE:REGEX:*]`：正则型生成条目现在由自身消息扫描激活，不再被普通蓝/绿灯过滤提前丢弃，仍由本地插件 lane 处理且不增加 LLM 调用。
+- 角色卡/酒馆助手 iframe 不再提供原样返回的 `EjsTemplate` 占位：补齐隔离沙盒内的 `evalTemplate`、`prepareContext`、`compileTemplate`、EJS 条件/循环/输出、楼层读取、变量读取/更新和世界书条目读取；不会额外调用 LLM，也不会开放父页面或网络能力。
 - 补齐酒馆原生 `setExtensionPrompt` 位置语义：`NONE`、`IN_PROMPT`、`IN_CHAT`、`BEFORE_PROMPT`（`-1/0/1/2`）现在会分别进入扫描、主提示词后、聊天深度和主提示词前锚点；保留深度、角色、扫描开关与函数过滤器。
 - 修正 ST World Info 位置映射：`2/3` 现在进入 Author's Note 前后，`5/6` 进入示例消息前后；角色卡与独立世界书的蓝灯、绿灯命中条目统一使用同一套位置语义。
 - 补齐酒馆助手 `chatMetadata` 桥接：支持 `SillyTavern.getContext().chatMetadata` 与 `updateChatMetadata(values, reset)`，并将更新持久化到当前会话。

@@ -124,6 +124,9 @@ export interface TavernHiddenMessage {
   readonly text: string
 }
 
+/** SillyTavern/Tavern Helper chat refresh policy after a mutation. */
+export type TavernChatRefreshMode = 'none' | 'affected' | 'all'
+
 /** Browser request changing the model-visible roleplay transcript. */
 export type TavernChatMutationRequest =
   | {
@@ -131,21 +134,34 @@ export type TavernChatMutationRequest =
     readonly operation: 'update-chat-metadata'
     readonly values: JsonRecord
     readonly reset: boolean
+    readonly refresh?: TavernChatRefreshMode
   }
-  | { readonly format: 0; readonly operation: 'set-chat-messages'; readonly messages: readonly TavernChatMessageInput[] }
+  | {
+    readonly format: 0
+    readonly operation: 'set-chat-messages'
+    readonly messages: readonly TavernChatMessageInput[]
+    readonly refresh?: TavernChatRefreshMode
+  }
   | {
     readonly format: 0
     readonly operation: 'create-chat-messages'
     readonly messages: readonly TavernChatMessageInput[]
     readonly insertAt: number | 'end'
+    readonly refresh?: TavernChatRefreshMode
   }
-  | { readonly format: 0; readonly operation: 'delete-chat-messages'; readonly messageIds: readonly number[] }
+  | {
+    readonly format: 0
+    readonly operation: 'delete-chat-messages'
+    readonly messageIds: readonly number[]
+    readonly refresh?: TavernChatRefreshMode
+  }
   | {
     readonly format: 0
     readonly operation: 'rotate-chat-messages'
     readonly begin: number
     readonly middle: number
     readonly end: number
+    readonly refresh?: TavernChatRefreshMode
   }
   | {
     readonly format: 0
@@ -153,6 +169,7 @@ export type TavernChatMutationRequest =
     readonly start: number
     readonly end: number
     readonly hidden: boolean
+    readonly refresh?: TavernChatRefreshMode
   }
 
 /** Complete durable state written by one Tavern Helper variable mutation. */
@@ -1017,6 +1034,21 @@ export function consumeTavernInjectedPromptsAfterGeneration(
   }
 }
 
+/** Normalize the canonical and legacy Tavern Helper refresh options. */
+function parseTavernChatRefreshMode(raw: unknown, options: unknown): TavernChatRefreshMode | undefined {
+  const optionRefresh = options !== null && typeof options === 'object' && !Array.isArray(options)
+    ? (options as Record<string, unknown>).refresh
+    : undefined
+  const value = raw === undefined ? optionRefresh : raw
+  if (value === undefined) return undefined
+  // Older Tavern Helper callers used boolean refresh options. Keep accepting
+  // them while exposing one canonical response shape to the host.
+  if (value === false || value === 'none') return 'none'
+  if (value === true || value === 'affected') return 'affected'
+  if (value === 'all') return 'all'
+  throw new Error('Tavern Helper chat refresh must be none, affected, or all')
+}
+
 /** Parse one browser-authored variable replacement. */
 export function parseTavernHelperMutationRequest(raw: string): TavernHelperMutationRequest {
   if (new TextEncoder().encode(raw).byteLength > MAX_MUTATION_BYTES) throw new Error('Tavern Helper update is too large')
@@ -1030,10 +1062,19 @@ export function parseTavernHelperMutationRequest(raw: string): TavernHelperMutat
     throw new Error('Tavern Helper variable update must be an object')
   }
   const value = parsed as Record<string, unknown>
+  const isChatMutation = value.operation === 'update-chat-metadata'
+    || value.operation === 'set-chat-messages'
+    || value.operation === 'create-chat-messages'
+    || value.operation === 'delete-chat-messages'
+    || value.operation === 'rotate-chat-messages'
+    || value.operation === 'set-chat-hidden'
+  const refresh = isChatMutation
+    ? (parseTavernChatRefreshMode(value.refresh, value.options) ?? 'affected')
+    : undefined
   if (value.format === 0 && value.operation === 'set-chat-messages') {
     const messages = chatMessages(value.messages, false)
     if (messages.some(message => message.message_id === undefined)) throw new Error('set-chat-messages requires message_id')
-    return { format: 0, operation: value.operation, messages }
+    return { format: 0, operation: value.operation, messages, ...(refresh === undefined ? {} : { refresh }) }
   }
   if (value.format === 0 && value.operation === 'update-chat-metadata') {
     if (value.reset !== undefined && typeof value.reset !== 'boolean') {
@@ -1044,18 +1085,30 @@ export function parseTavernHelperMutationRequest(raw: string): TavernHelperMutat
       operation: value.operation,
       values: record(value.values ?? {}, 'Tavern Helper chat metadata'),
       reset: value.reset === true,
+      ...(refresh === undefined ? {} : { refresh }),
     }
   }
   if (value.format === 0 && value.operation === 'create-chat-messages') {
     const rawInsertAt = value.insertAt ?? value.insert_at ?? 'end'
     const insertAt = rawInsertAt === 'end' ? rawInsertAt : integer(rawInsertAt, 'create-chat-messages insertAt')
-    return { format: 0, operation: value.operation, messages: chatMessages(value.messages, true), insertAt }
+    return {
+      format: 0,
+      operation: value.operation,
+      messages: chatMessages(value.messages, true),
+      insertAt,
+      ...(refresh === undefined ? {} : { refresh }),
+    }
   }
   if (value.format === 0 && value.operation === 'delete-chat-messages') {
     if (!Array.isArray(value.messageIds) || value.messageIds.some(messageId => !Number.isSafeInteger(messageId))) {
       throw new Error('delete-chat-messages requires integer messageIds')
     }
-    return { format: 0, operation: value.operation, messageIds: value.messageIds as number[] }
+    return {
+      format: 0,
+      operation: value.operation,
+      messageIds: value.messageIds as number[],
+      ...(refresh === undefined ? {} : { refresh }),
+    }
   }
   if (value.format === 0 && value.operation === 'rotate-chat-messages') {
     return {
@@ -1064,6 +1117,7 @@ export function parseTavernHelperMutationRequest(raw: string): TavernHelperMutat
       begin: integer(value.begin, 'rotate-chat-messages begin'),
       middle: integer(value.middle, 'rotate-chat-messages middle'),
       end: integer(value.end, 'rotate-chat-messages end'),
+      ...(refresh === undefined ? {} : { refresh }),
     }
   }
   if (value.format === 0 && value.operation === 'set-chat-hidden') {
@@ -1072,7 +1126,14 @@ export function parseTavernHelperMutationRequest(raw: string): TavernHelperMutat
     if (start < 0 || end < start || typeof value.hidden !== 'boolean') {
       throw new Error('set-chat-hidden requires a valid non-negative range and hidden flag')
     }
-    return { format: 0, operation: value.operation, start, end, hidden: value.hidden }
+    return {
+      format: 0,
+      operation: value.operation,
+      start,
+      end,
+      hidden: value.hidden,
+      ...(refresh === undefined ? {} : { refresh }),
+    }
   }
   if (value.format === 0 && value.operation === 'replace-script-trees') {
     if (value.scope !== 'global' && value.scope !== 'preset' && value.scope !== 'character') {

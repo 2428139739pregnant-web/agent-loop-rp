@@ -38,6 +38,8 @@ interface ParsedDecorator {
 interface ContentPreparation {
   content: string
   decorators: ParsedDecorator[]
+  /** Source kept for per-match EJS evaluation of regex placements. */
+  template?: string
   skip?: string
 }
 
@@ -55,7 +57,11 @@ function leadingDecorators(source: string): { body: string; decorators: ParsedDe
   return { body: lines.slice(index).join('\n'), decorators }
 }
 
-function renderContent(candidate: WorldbookPluginCandidate, ctx: AgentContext): ContentPreparation {
+function renderContent(
+  candidate: WorldbookPluginCandidate,
+  ctx: AgentContext,
+  deferTemplate = false,
+): ContentPreparation {
   const parsed = leadingDecorators(candidate.content ?? ctx.worldbook.getContent(candidate.path) ?? '')
   if (parsed.decorators.some(d => d.name === 'dont_activate' || d.name === 'only_preload')) {
     return { content: '', decorators: parsed.decorators, skip: 'decorator prevents generation-time activation' }
@@ -74,6 +80,20 @@ function renderContent(candidate: WorldbookPluginCandidate, ctx: AgentContext): 
     source = `<% if (${condition.argument}) { %>${source}<% } %>`
   }
 
+  const macro = (text: string): string => substituteUserCharMacros(
+    text,
+    ctx.macros?.user ?? null,
+    ctx.macros?.char ?? null,
+  )
+
+  if (deferTemplate) {
+    // Prompt Template evaluates [GENERATE:REGEX:*] after it has found a
+    // message.  Keep the source until applyWorldbookPromptInjections can
+    // provide that message's matched_message* target.
+    const template = macro(source)
+    return { content: template, template, decorators: parsed.decorators }
+  }
+
   if (ctx.renderTemplate !== undefined) {
     const rendered = ctx.renderTemplate(source, { worldInfoBookId: candidate.path })
     if (rendered.ok === false) {
@@ -82,11 +102,6 @@ function renderContent(candidate: WorldbookPluginCandidate, ctx: AgentContext): 
     source = rendered.text
   }
 
-  const macro = (text: string): string => substituteUserCharMacros(
-    text,
-    ctx.macros?.user ?? null,
-    ctx.macros?.char ?? null,
-  )
   return { content: macro(source), decorators: parsed.decorators }
 }
 
@@ -293,7 +308,10 @@ export function buildWorldbookPluginOutput(
       skipped.push({ path: candidate.path, reason: 'trigger probability did not pass' })
       continue
     }
-    const prepared = renderContent(candidate, ctx)
+    const injectPlacement = parseInject(candidate.comment)
+    const explicitGeneratePlacement = generatePlacementForCandidate(directive(candidate.comment, 'GENERATE'))
+    const deferTemplate = injectPlacement?.kind === 'regex' || explicitGeneratePlacement?.kind === 'regex'
+    const prepared = renderContent(candidate, ctx, deferTemplate)
     if (prepared.skip !== undefined) {
       skipped.push({ path: candidate.path, reason: prepared.skip })
       continue
@@ -304,12 +322,14 @@ export function buildWorldbookPluginOutput(
       continue
     }
 
-    const injectPlacement = parseInject(candidate.comment)
     if (injectPlacement !== undefined) {
       const params = injectParameters(candidate.comment)
       promptInjections.push({
         path: candidate.path,
         content,
+        ...(prepared.template === undefined ? {} : { template: prepared.template }),
+        ...(prepared.template === undefined || ctx.renderTemplate === undefined
+          ? {} : { templateRenderer: ctx.renderTemplate }),
         role: role(params?.get('role')),
         order: candidate.order,
         placement: injectPlacement,
@@ -324,6 +344,9 @@ export function buildWorldbookPluginOutput(
       promptInjections.push({
         path: candidate.path,
         content,
+        ...(prepared.template === undefined ? {} : { template: prepared.template }),
+        ...(prepared.template === undefined || ctx.renderTemplate === undefined
+          ? {} : { templateRenderer: ctx.renderTemplate }),
         role: 'system',
         order: candidate.order,
         placement: generatePlacement,
@@ -393,17 +416,40 @@ function targetIndex(messages: readonly ChatMessage[], roleName: WorldbookPrompt
   return hits[offset]
 }
 
-function insertAt(messages: ChatMessage[], index: number, injection: WorldbookPromptInjection): void {
+function insertAt(
+  messages: ChatMessage[],
+  index: number,
+  injection: WorldbookPromptInjection,
+  content = injection.content,
+): void {
   messages.splice(Math.max(0, Math.min(index, messages.length)), 0, {
     role: injection.role,
-    content: injection.content,
+    content,
   })
+}
+
+function renderRegexMatch(
+  injection: WorldbookPromptInjection,
+  message: ChatMessage,
+  messageIndex: number,
+  renderTemplate: AgentContext['renderTemplate'],
+): string | undefined {
+  if (injection.template === undefined) return injection.content
+  const renderer = renderTemplate ?? injection.templateRenderer
+  if (renderer === undefined) return injection.content
+  const rendered = renderer(injection.template, {
+    matchedMessage: message.content,
+    matchedMessageIndex: messageIndex,
+    matchedMessageRole: message.role,
+  })
+  return rendered.ok ? rendered.text : undefined
 }
 
 /** Apply a previously built plan to the exact message array sent to the LLM. */
 export function applyWorldbookPromptInjections(
   baseMessages: readonly ChatMessage[],
   injections: readonly WorldbookPromptInjection[],
+  renderTemplate?: AgentContext['renderTemplate'],
 ): ChatMessage[] {
   const messages = baseMessages.map(message => ({ ...message }))
   for (const injection of [...injections].sort((a, b) => a.order - b.order || a.path.localeCompare(b.path))) {
@@ -432,7 +478,11 @@ export function applyWorldbookPromptInjections(
     try { regex = new RegExp(placement.pattern, 'iu') } catch { continue }
     const hits = messages.flatMap((message, index) => regex.test(message.content) ? [index] : [])
     for (const hit of hits.reverse()) {
-      insertAt(messages, placement.at === 'after' ? hit + 1 : hit, injection)
+      const message = messages[hit]
+      if (message === undefined) continue
+      const content = renderRegexMatch(injection, message, hit, renderTemplate)
+      if (content === undefined) continue
+      insertAt(messages, placement.at === 'after' ? hit + 1 : hit, injection, content)
     }
   }
   return messages
