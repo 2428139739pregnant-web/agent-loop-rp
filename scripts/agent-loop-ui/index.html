@@ -1133,6 +1133,7 @@
       const eventOn = activate(window.eventOn)
       const eventOnce = activate(window.eventOnce)
       const eventEmit = activate(window.eventEmit)
+      const eventEmitAndWait = activate(window.eventEmitAndWait || window.eventEmit)
       const getAllVariables = () => runtime.variables
       const getVariable = (path, fallback) => window._.get(runtime.variables, path, fallback)
       const replaceMvuData = (value) => {
@@ -1159,6 +1160,7 @@
         eventClearListener: window.eventClearListener,
         eventClearAll: window.eventClearAll,
         eventEmit,
+        eventEmitAndWait,
         waitGlobalInitialized: async () => undefined,
       }
       const eventSource = {
@@ -1168,7 +1170,7 @@
         makeLast: activate(window.eventMakeLast),
         removeListener: window.eventRemoveListener,
         emit: eventEmit,
-        emitAndWait: eventEmit,
+        emitAndWait: eventEmitAndWait,
       }
       return {
         runtime,
@@ -1206,6 +1208,7 @@
         'const eventOn=__agentRpCardContext.eventOn;',
         'const eventOnce=__agentRpCardContext.eventOnce;',
         'const eventEmit=__agentRpCardContext.eventEmit;',
+        'const eventEmitAndWait=__agentRpCardContext.eventEmitAndWait;',
         'const Mvu=__agentRpCardContext.Mvu;',
         'const builtin_prompt_default_order=window.builtin_prompt_default_order;',
         'const errorCatched=__agentRpCardContext.errorCatched;',
@@ -1234,32 +1237,40 @@
         }
         return value === undefined ? fallback : value
       } }
-      window.eventOn = (type, listener) => {
+      const registerCardEventListener = (type, listener, once = false, position = 'last') => {
+        if (typeof listener !== 'function') throw new TypeError('event listener must be a function')
         const key = String(type)
         const list = window.__agentRpCardListeners.get(key) || []
-        const entry = { listener, runtime: activeCardRuntime() }
-        list.push(entry)
-        window.__agentRpCardListeners.set(key, list)
-        const stop = () => window.__agentRpCardListeners.set(key, (window.__agentRpCardListeners.get(key) || []).filter((item) => item !== entry))
+        const existing = list.find((item) => item.listener === listener)
+        if (existing) {
+          if (position === 'first' || position === 'last') {
+            const reordered = list.filter((item) => item !== existing)
+            if (position === 'first') reordered.unshift(existing)
+            else reordered.push(existing)
+            window.__agentRpCardListeners.set(key, reordered)
+          }
+          return existing.stop
+        }
+        const entry = { listener, once, runtime: activeCardRuntime(), stop: null }
+        const stop = () => {
+          const current = window.__agentRpCardListeners.get(key) || []
+          const next = current.filter((item) => item !== entry)
+          if (next.length === 0) window.__agentRpCardListeners.delete(key)
+          else window.__agentRpCardListeners.set(key, next)
+        }
         stop.stop = stop
+        entry.stop = stop
+        if (position === 'first') list.unshift(entry)
+        else list.push(entry)
+        window.__agentRpCardListeners.set(key, list)
         return stop
       }
+      window.eventOn = (type, listener) => registerCardEventListener(type, listener)
       window.eventOnce = (type, listener) => {
-        let stop
-        stop = window.eventOn(type, (...args) => { stop.stop(); return listener(...args) })
-        return stop
+        return registerCardEventListener(type, listener, true)
       }
-      window.eventMakeFirst = (type, listener) => {
-        const key = String(type)
-        const list = window.__agentRpCardListeners.get(key) || []
-        const entry = { listener, runtime: activeCardRuntime() }
-        list.unshift(entry)
-        window.__agentRpCardListeners.set(key, list)
-        const stop = () => window.__agentRpCardListeners.set(key, (window.__agentRpCardListeners.get(key) || []).filter((item) => item !== entry))
-        stop.stop = stop
-        return stop
-      }
-      window.eventMakeLast = (type, listener) => window.eventOn(type, listener)
+      window.eventMakeFirst = (type, listener) => registerCardEventListener(type, listener, false, 'first')
+      window.eventMakeLast = (type, listener) => registerCardEventListener(type, listener, false, 'last')
       window.eventRemoveListener = (type, listener) => {
         const key = String(type)
         window.__agentRpCardListeners.set(key, (window.__agentRpCardListeners.get(key) || []).filter((item) => item.listener !== listener))
@@ -1276,11 +1287,13 @@
       window.eventEmit = async (type, ...args) => {
         for (const entry of [...(window.__agentRpCardListeners.get(String(type)) || [])]) {
           try {
+            if (entry.once) entry.stop()
             if (entry.runtime?.root) window.__agentRpActiveCardRoot = entry.runtime.root
             await entry.listener(...args)
           } catch (error) { console.error('[agent-rp Tavern Helper event]', error) }
         }
       }
+      window.eventEmitAndWait = window.eventEmit
       window.Mvu = {
         events: { VARIABLE_INITIALIZED: 'mag_variable_initialized', VARIABLE_UPDATE_STARTED: 'mag_variable_update_started', VARIABLE_UPDATE_ENDED: 'mvu-variable-update-ended' },
         getMvuData: () => activeCardRuntime()?.variables || { stat_data: {} },
@@ -1307,9 +1320,10 @@
         eventClearListener: window.eventClearListener,
         eventClearAll: window.eventClearAll,
         eventEmit: window.eventEmit,
+        eventEmitAndWait: window.eventEmitAndWait,
         waitGlobalInitialized: async () => undefined,
       }
-      window.SillyTavern = { eventSource: { on: window.eventOn, once: window.eventOnce, makeFirst: window.eventMakeFirst, makeLast: window.eventMakeLast, removeListener: window.eventRemoveListener, emit: window.eventEmit, emitAndWait: window.eventEmit }, eventTypes: window.tavern_events, getContext: function () { return this }, chat: [] }
+      window.SillyTavern = { eventSource: { on: window.eventOn, once: window.eventOnce, makeFirst: window.eventMakeFirst, makeLast: window.eventMakeLast, removeListener: window.eventRemoveListener, emit: window.eventEmit, emitAndWait: window.eventEmitAndWait }, eventTypes: window.tavern_events, getContext: function () { return this }, chat: [] }
       window.waitGlobalInitialized = async () => undefined
       window.errorCatched = (fn) => function (...args) { try { return fn.apply(this, args) } catch (error) { console.error('[agent-rp card script]', error) } }
       window.$ = (value) => {
@@ -1505,7 +1519,7 @@
     target[parts[parts.length-1]]=value; return object;
   };
   const __removeListener=(type,item)=>{const key=String(type);const list=__listeners.get(key)||[];const next=list.filter(candidate=>candidate!==item);if(next.length===0)__listeners.delete(key);else __listeners.set(key,next);};
-  const __on=(type,fn,once=false,position='last')=>{if(typeof fn!=='function')throw new TypeError('event listener must be a function');const key=String(type);const item={fn,once};const list=__listeners.get(key)||[];if(position==='first')list.unshift(item);else list.push(item);__listeners.set(key,list);const stop=()=>__removeListener(key,item);stop.stop=stop;return stop;};
+  const __on=(type,fn,once=false,position='last')=>{if(typeof fn!=='function')throw new TypeError('event listener must be a function');const key=String(type);const list=__listeners.get(key)||[];const existing=list.find(item=>item.fn===fn);if(existing){if(position==='first'||position==='last'){const reordered=list.filter(item=>item!==existing);if(position==='first')reordered.unshift(existing);else reordered.push(existing);__listeners.set(key,reordered);}return existing.stop;};const item={fn,once,stop:null};const stop=()=>__removeListener(key,item);stop.stop=stop;item.stop=stop;if(position==='first')list.unshift(item);else list.push(item);__listeners.set(key,list);return stop;};
   const __emit=async(type,...args)=>{const key=String(type);for(const item of [...(__listeners.get(key)||[])]){if(item.once)__removeListener(key,item);try{await item.fn(...args);}catch(error){console.error('[agent-rp card event]',error);}}};
   const __clearEvent=type=>__listeners.delete(String(type));
   const __clearListener=fn=>{for(const [key,list] of __listeners){const next=list.filter(item=>item.fn!==fn);if(next.length===0)__listeners.delete(key);else __listeners.set(key,next);}};
@@ -1763,6 +1777,7 @@
   window.eventMakeFirst=(type,fn)=>__on(type,fn,false,'first');
   window.eventMakeLast=(type,fn)=>__on(type,fn,false,'last');
   window.eventEmit=(type,...args)=>__emit(type,...args);
+  window.eventEmitAndWait=window.eventEmit;
   window.eventRemoveListener=(type,fn)=>{for(const item of [...(__listeners.get(String(type))||[])])if(item.fn===fn)__removeListener(type,item);};
   window.eventClearEvent=__clearEvent;
   window.eventClearListener=__clearListener;
@@ -2028,7 +2043,7 @@
 if(!window.showdown)window.showdown={Converter:class{constructor(options={}){this.options=options;}makeHtml(value){return String(value??'').replace(/&/gu,'&amp;').replace(/</gu,'&lt;').replace(/>/gu,'&gt;').replace(/\\*\\*(.+?)\\*\\*/gu,'<strong>$1</strong>').replace(/\\*(.+?)\\*/gu,'<em>$1</em>').replace(/\\n/gu,'<br>');}}};
   const __events={VARIABLE_INITIALIZED:'mag_variable_initialized',VARIABLE_UPDATE_STARTED:'mag_variable_update_started',VARIABLE_UPDATE_ENDED:'mag_variable_update_ended'};
   window.Mvu=Object.assign({},__parent?.Mvu||{}, {events:__events,getMvuData:option=>__scopeValue(option),getVariable:window.getVariable,replaceMvuData:(value,option)=>__replaceVariables(value,option),isDuringExtraAnalysis:()=>false});
-  window.TavernHelper=Object.assign({},__parent?.TavernHelper||{}, {getAllVariables:()=>__getVariables({type:'chat'}),getVariable:(path,fallback)=>__get(__getVariables({type:'chat'}),path,fallback),getVariables:__getVariables,replaceVariables:__replaceVariables,updateVariablesWith:__updateVariablesWith,insertOrAssignVariables:__insertOrAssignVariables,insertVariables:__insertVariables,deleteVariable:__deleteVariable,getScriptTrees:__getScriptTrees,replaceScriptTrees:__replaceScriptTrees,updateScriptTreesWith:__updateScriptTreesWith,injectPrompts:__injectPrompts,uninjectPrompts:__uninjectPrompts,getChatMessages:window.getChatMessages,setChatMessage:window.setChatMessage,setChatMessages:window.setChatMessages,createChatMessages:window.createChatMessages,deleteChatMessages:window.deleteChatMessages,rotateChatMessages:window.rotateChatMessages,setChatHidden:window.setChatHidden,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,rebindGlobalWorldbooks:window.rebindGlobalWorldbooks,getCharWorldbookNames:(_characterName='current')=>window.getCharWorldbookNames(),rebindCharWorldbooks:(_characterName='current',books={})=>window.rebindCharWorldbooks(books?.primary??null,Array.isArray(books?.additional)?books.additional:[]),getChatWorldbookName:(_chatName='current')=>window.getChatWorldbookName(),rebindChatWorldbook:(_chatName='current',name=null)=>window.rebindChatWorldbook(name),getWorldbook:window.getWorldbook,replaceWorldbook:window.replaceWorldbook,updateWorldbookWith:window.updateWorldbookWith,getTavernHelperVersion:window.getTavernHelperVersion,getLastMessageId:window.getLastMessageId,eventOn:window.eventOn,eventOnce:window.eventOnce,eventMakeFirst:window.eventMakeFirst,eventMakeLast:window.eventMakeLast,eventRemoveListener:window.eventRemoveListener,eventClearEvent:window.eventClearEvent,eventClearListener:window.eventClearListener,eventClearAll:window.eventClearAll,eventEmit:window.eventEmit,waitGlobalInitialized:window.waitGlobalInitialized});
+  window.TavernHelper=Object.assign({},__parent?.TavernHelper||{}, {getAllVariables:()=>__getVariables({type:'chat'}),getVariable:(path,fallback)=>__get(__getVariables({type:'chat'}),path,fallback),getVariables:__getVariables,replaceVariables:__replaceVariables,updateVariablesWith:__updateVariablesWith,insertOrAssignVariables:__insertOrAssignVariables,insertVariables:__insertVariables,deleteVariable:__deleteVariable,getScriptTrees:__getScriptTrees,replaceScriptTrees:__replaceScriptTrees,updateScriptTreesWith:__updateScriptTreesWith,injectPrompts:__injectPrompts,uninjectPrompts:__uninjectPrompts,getChatMessages:window.getChatMessages,setChatMessage:window.setChatMessage,setChatMessages:window.setChatMessages,createChatMessages:window.createChatMessages,deleteChatMessages:window.deleteChatMessages,rotateChatMessages:window.rotateChatMessages,setChatHidden:window.setChatHidden,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,rebindGlobalWorldbooks:window.rebindGlobalWorldbooks,getCharWorldbookNames:(_characterName='current')=>window.getCharWorldbookNames(),rebindCharWorldbooks:(_characterName='current',books={})=>window.rebindCharWorldbooks(books?.primary??null,Array.isArray(books?.additional)?books.additional:[]),getChatWorldbookName:(_chatName='current')=>window.getChatWorldbookName(),rebindChatWorldbook:(_chatName='current',name=null)=>window.rebindChatWorldbook(name),getWorldbook:window.getWorldbook,replaceWorldbook:window.replaceWorldbook,updateWorldbookWith:window.updateWorldbookWith,getTavernHelperVersion:window.getTavernHelperVersion,getLastMessageId:window.getLastMessageId,eventOn:window.eventOn,eventOnce:window.eventOnce,eventMakeFirst:window.eventMakeFirst,eventMakeLast:window.eventMakeLast,eventRemoveListener:window.eventRemoveListener,eventClearEvent:window.eventClearEvent,eventClearListener:window.eventClearListener,eventClearAll:window.eventClearAll,eventEmit:window.eventEmit,eventEmitAndWait:window.eventEmitAndWait,waitGlobalInitialized:window.waitGlobalInitialized});
   window.TavernHelper.getWorldInfoData=window.getWorldInfoData;window.TavernHelper.getEnabledWorldInfoEntries=window.getEnabledWorldInfoEntries;window.TavernHelper.getWorldInfoActivatedData=window.getWorldInfoActivatedData;window.TavernHelper.selectActivatedEntries=window.selectActivatedEntries;window.TavernHelper.activateWorldInfoByKeywords=window.activateWorldInfoByKeywords;window.TavernHelper.activewi=window.activewi;window.TavernHelper.activateWorldInfo=window.activateWorldInfo;
   const __stEventSource={on:window.eventOn,once:window.eventOnce,makeFirst:window.eventMakeFirst,makeLast:window.eventMakeLast,removeListener:window.eventRemoveListener,emit:window.eventEmit,emitAndWait:window.eventEmit};
   window.TavernHelper.builtin_prompt_default_order=window.builtin_prompt_default_order;window.TavernHelper.placeholder_prompt_default_order=window.placeholder_prompt_default_order;
@@ -2055,7 +2070,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
     getVariables:window.getVariables,
     getVariable:window.getVariable,
   });
-  window.TavernHelper=Object.assign({},__parent?.TavernHelper||{}, {Context:__tavernHelperContext,getAllVariables:()=>__getVariables({type:'chat'}),getVariable:(path,fallback)=>__get(__getVariables({type:'chat'}),path,fallback),getVariables:__getVariables,replaceVariables:__replaceVariables,updateVariablesWith:__updateVariablesWith,insertOrAssignVariables:__insertOrAssignVariables,insertVariables:__insertVariables,deleteVariable:__deleteVariable,getScriptTrees:__getScriptTrees,replaceScriptTrees:__replaceScriptTrees,updateScriptTreesWith:__updateScriptTreesWith,injectPrompts:__injectPrompts,uninjectPrompts:__uninjectPrompts,getChatMessages:window.getChatMessages,syncChatMessages:window.syncChatMessages,setChatMessage:window.setChatMessage,setChatMessages:window.setChatMessages,createChatMessages:window.createChatMessages,deleteChatMessages:window.deleteChatMessages,rotateChatMessages:window.rotateChatMessages,setChatHidden:window.setChatHidden,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,rebindGlobalWorldbooks:window.rebindGlobalWorldbooks,getCharWorldbookNames:(_characterName='current')=>window.getCharWorldbookNames(),rebindCharWorldbooks:(_characterName='current',books={})=>window.rebindCharWorldbooks(books?.primary??null,Array.isArray(books?.additional)?books.additional:[]),getChatWorldbookName:(_chatName='current')=>window.getChatWorldbookName(),rebindChatWorldbook:(_chatName='current',name=null)=>window.rebindChatWorldbook(name),getWorldbook:window.getWorldbook,replaceWorldbook:window.replaceWorldbook,updateWorldbookWith:window.updateWorldbookWith,getTavernHelperVersion:window.getTavernHelperVersion,getLastMessageId:window.getLastMessageId,eventOn:window.eventOn,eventOnce:window.eventOnce,eventMakeFirst:window.eventMakeFirst,eventMakeLast:window.eventMakeLast,eventRemoveListener:window.eventRemoveListener,eventClearEvent:window.eventClearEvent,eventClearListener:window.eventClearListener,eventClearAll:window.eventClearAll,eventEmit:window.eventEmit,waitGlobalInitialized:window.waitGlobalInitialized});
+  window.TavernHelper=Object.assign({},__parent?.TavernHelper||{}, {Context:__tavernHelperContext,getAllVariables:()=>__getVariables({type:'chat'}),getVariable:(path,fallback)=>__get(__getVariables({type:'chat'}),path,fallback),getVariables:__getVariables,replaceVariables:__replaceVariables,updateVariablesWith:__updateVariablesWith,insertOrAssignVariables:__insertOrAssignVariables,insertVariables:__insertVariables,deleteVariable:__deleteVariable,getScriptTrees:__getScriptTrees,replaceScriptTrees:__replaceScriptTrees,updateScriptTreesWith:__updateScriptTreesWith,injectPrompts:__injectPrompts,uninjectPrompts:__uninjectPrompts,getChatMessages:window.getChatMessages,syncChatMessages:window.syncChatMessages,setChatMessage:window.setChatMessage,setChatMessages:window.setChatMessages,createChatMessages:window.createChatMessages,deleteChatMessages:window.deleteChatMessages,rotateChatMessages:window.rotateChatMessages,setChatHidden:window.setChatHidden,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,rebindGlobalWorldbooks:window.rebindGlobalWorldbooks,getCharWorldbookNames:(_characterName='current')=>window.getCharWorldbookNames(),rebindCharWorldbooks:(_characterName='current',books={})=>window.rebindCharWorldbooks(books?.primary??null,Array.isArray(books?.additional)?books.additional:[]),getChatWorldbookName:(_chatName='current')=>window.getChatWorldbookName(),rebindChatWorldbook:(_chatName='current',name=null)=>window.rebindChatWorldbook(name),getWorldbook:window.getWorldbook,replaceWorldbook:window.replaceWorldbook,updateWorldbookWith:window.updateWorldbookWith,getTavernHelperVersion:window.getTavernHelperVersion,getLastMessageId:window.getLastMessageId,eventOn:window.eventOn,eventOnce:window.eventOnce,eventMakeFirst:window.eventMakeFirst,eventMakeLast:window.eventMakeLast,eventRemoveListener:window.eventRemoveListener,eventClearEvent:window.eventClearEvent,eventClearListener:window.eventClearListener,eventClearAll:window.eventClearAll,eventEmit:window.eventEmit,eventEmitAndWait:window.eventEmitAndWait,waitGlobalInitialized:window.waitGlobalInitialized});
   const __wrap=items=>{const list=Array.from(items||[]),api={length:list.length};list.forEach((el,i)=>api[i]=el);api.toArray=()=>list.slice();api.get=index=>index===undefined?list.slice():list[index];api.each=fn=>{list.forEach((el,i)=>fn.call(el,i,el));return api;};api.clone=()=>__wrap(list.map(el=>el.cloneNode?.(true)).filter(Boolean));api.appendTo=target=>{const destination=typeof target==='string'?__query(target):target?.length!==undefined?target:__wrap([target]);destination?.each?.((_i,el)=>list.forEach(item=>el.append(item)));return api;};api.find=sel=>__wrap(list.flatMap(el=>[...el.querySelectorAll(sel)]));api.parent=()=>__wrap(list.map(el=>el.parentElement).filter(Boolean));api.siblings=()=>__wrap(list.flatMap(el=>el.parentElement?[...el.parentElement.children].filter(x=>x!==el):[]));api.addClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.add(x)));api.removeClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.remove(x)));api.toggleClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.toggle(x)));api.hasClass=v=>!!list[0]?.classList.contains(String(v||''));api.html=v=>v===undefined?(list[0]?.innerHTML||''):api.each((_i,el)=>el.innerHTML=String(v));api.text=v=>v===undefined?(list[0]?.textContent||''):api.each((_i,el)=>el.textContent=String(v));api.val=v=>v===undefined?(list[0]?.value||''):api.each((_i,el)=>el.value=String(v));api.attr=(k,v)=>v===undefined?list[0]?.getAttribute(k):api.each((_i,el)=>el.setAttribute(k,String(v)));api.data=(k,v)=>v===undefined?list[0]?.dataset?.[k]:api.each((_i,el)=>el.dataset[k]=String(v));api.empty=()=>api.each((_i,el)=>el.replaceChildren());api.append=v=>api.each((_i,el)=>typeof v==='string'?el.insertAdjacentHTML('beforeend',v):v?.nodeType&&el.append(v));api.css=(k,v)=>v===undefined?(list[0]?getComputedStyle(list[0])[k]:undefined):api.each((_i,el)=>el.style[k]=String(v));api.show=()=>api.each((_i,el)=>el.style.display='');api.hide=()=>api.each((_i,el)=>el.style.display='none');api.on=(type,fn)=>api.each((_i,el)=>el.addEventListener(type,fn));api.off=(type,fn)=>api.each((_i,el)=>el.removeEventListener(type,fn));api.trigger=type=>api.each((_i,el)=>el.dispatchEvent(new Event(type,{bubbles:true})));api.sortable=()=>api;return api;};
   const __query=value=>{if(typeof value==='function'){if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',value,{once:true});else queueMicrotask(value);return __wrap([]);}if(value?.nodeType)return __wrap([value]);if(Array.isArray(value))return __wrap(value);try{return __wrap(document.querySelectorAll(String(value||'')));}catch{return __wrap([]);}};
   __stContext.setExtensionPrompt=__setExtensionPrompt;

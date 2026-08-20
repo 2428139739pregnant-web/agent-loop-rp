@@ -515,6 +515,39 @@ test('event lifecycle waits for async listeners and exposes ST ordering controls
   assert.equal(frame.window.iframe_events.GENERATION_STARTED, 'js_generation_started')
 })
 
+test('event registration follows Tavern Helper dedupe, reorder and await semantics', async () => {
+  const frame = createFrame()
+  const deduped = []
+  const handler = () => deduped.push('handler')
+  frame.window.eventOn('dedupe', handler)
+  frame.window.eventOn('dedupe', handler)
+  await frame.window.eventEmitAndWait('dedupe')
+  assert.deepEqual(deduped, ['handler'])
+
+  const order = []
+  const first = () => order.push('first')
+  const second = () => order.push('second')
+  frame.window.eventOn('reorder', first)
+  frame.window.eventOn('reorder', second)
+  frame.window.eventMakeFirst('reorder', second)
+  await frame.window.TavernHelper.eventEmitAndWait('reorder')
+  assert.deepEqual(order, ['second', 'first'])
+
+  order.length = 0
+  frame.window.eventMakeLast('reorder', second)
+  await frame.window.SillyTavern.eventSource.emitAndWait('reorder')
+  assert.deepEqual(order, ['first', 'second'])
+  assert.equal(frame.window.TavernHelper.eventEmitAndWait, frame.window.eventEmitAndWait)
+
+  const once = []
+  const onceHandler = () => once.push('once')
+  frame.window.eventOnce('once', onceHandler)
+  frame.window.eventOnce('once', onceHandler)
+  await frame.window.eventEmitAndWait('once')
+  await frame.window.eventEmitAndWait('once')
+  assert.deepEqual(once, ['once'])
+})
+
 test('SillyTavern context projection updates chat, character and extension prompts', () => {
   const frame = createFrame()
   frame.window.dispatchEvent({
