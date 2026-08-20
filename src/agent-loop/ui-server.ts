@@ -104,7 +104,7 @@ import {
   type TavernWorldbookEntry,
 } from '../tavern-helper.ts'
 import { buildWorldbookKeyIndex, renderWorldbookKeyOnlyMd } from './worldbook-key-index.ts'
-import { buildWorldInfoActivatedEntries } from './world-info-event.ts'
+import { buildWorldInfoActivatedEntries, buildWorldInfoScanDoneEvent } from './world-info-event.ts'
 import { tavernHelperWorldbookMetadata } from './worldbook-position.ts'
 import {
   normalizeTimedEffectState,
@@ -2386,6 +2386,22 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     // (and, if needed, add a same-turn Tavern Helper injection) before
     // responseAgent snapshots its prompt.
     if (uiClient) {
+      const scanDone = buildWorldInfoScanDoneEvent(
+        (wb as { matches: Array<{
+          path: string
+          order: number
+          weight: number
+          content: string
+          source?: string
+          position?: number
+          depth?: number
+          role?: 'system' | 'user' | 'assistant'
+        }> }).matches,
+        state.worldbook,
+        (wb as { budget?: { usedTokens?: number; droppedPaths?: string[] } }).budget,
+        (timedEffects ?? {}) as Record<string, unknown>,
+      )
+      await awaitBrowserGenerationHook(state, res, sessionId, 'worldinfo_scan_done', [scanDone])
       const activated = buildWorldInfoActivatedEntries(
         (wb as { matches: Array<{
           path: string

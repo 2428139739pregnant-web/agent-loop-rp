@@ -51,6 +51,24 @@ export interface WorldInfoActivatedEntry {
   readonly source?: string
 }
 
+/** Observer payload used by Tavern's WORLDINFO_SCAN_DONE event. */
+export interface WorldInfoScanDoneEvent {
+  readonly state: { current: number; next: number; loopCount: number }
+  readonly new: {
+    readonly all: readonly WorldInfoActivatedEntry[]
+    readonly successful: readonly WorldInfoActivatedEntry[]
+  }
+  readonly activated: {
+    /** JSON-safe form; the iframe restores this to a Map before dispatch. */
+    readonly entries: Readonly<Record<string, WorldInfoActivatedEntry>>
+    readonly text: string
+  }
+  readonly sortedEntries: readonly WorldInfoActivatedEntry[]
+  readonly recursionDelay: { readonly availableLevels: readonly number[]; readonly currentLevel: number | null }
+  readonly budget: { readonly current: number; readonly overflowed: boolean }
+  readonly timedEffects: Readonly<Record<string, unknown>>
+}
+
 function selectiveLogicValue(value: WorldbookEntry['selectiveLogic']): number {
   switch (value) {
     case 'not-all': return 1
@@ -159,4 +177,30 @@ export function buildWorldInfoActivatedEntries(
   return [...merged.values()]
     .sort((left, right) => left.order - right.order || right.weight - left.weight || left.path.localeCompare(right.path))
     .map(match => toWorldInfoActivatedEntry(match, entriesByPath.get(match.path)))
+}
+
+/** Build the JSON-safe observer payload for Tavern's scan-complete event. */
+export function buildWorldInfoScanDoneEvent(
+  matches: readonly WorldInfoEventMatch[],
+  worldbook: { list(): readonly WorldbookEntry[] },
+  budget?: { usedTokens?: number; droppedPaths?: readonly string[] },
+  timedEffects: Readonly<Record<string, unknown>> = {},
+): WorldInfoScanDoneEvent {
+  const entries = buildWorldInfoActivatedEntries(matches, worldbook)
+  const entryMap = Object.fromEntries(entries.map(entry => [`${entry.world}.${entry.uid}`, entry]))
+  return {
+    state: { current: 1, next: 0, loopCount: 1 },
+    new: { all: entries, successful: entries },
+    activated: {
+      entries: entryMap,
+      text: entries.map(entry => entry.content).filter(content => content.length > 0).join('\n'),
+    },
+    sortedEntries: entries,
+    recursionDelay: { availableLevels: [], currentLevel: null },
+    budget: {
+      current: typeof budget?.usedTokens === 'number' && Number.isFinite(budget.usedTokens) ? budget.usedTokens : 0,
+      overflowed: (budget?.droppedPaths?.length ?? 0) > 0,
+    },
+    timedEffects: { ...timedEffects },
+  }
 }

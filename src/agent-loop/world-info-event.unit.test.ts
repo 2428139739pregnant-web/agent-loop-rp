@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { MemoryWorldbookStore } from './session.ts'
-import { buildWorldInfoActivatedEntries } from './world-info-event.ts'
+import { buildWorldInfoActivatedEntries, buildWorldInfoScanDoneEvent } from './world-info-event.ts'
 
 test('WORLD_INFO_ACTIVATED projects green, constant, and forced entries with ST metadata', () => {
   const store = new MemoryWorldbookStore([
@@ -38,4 +38,22 @@ test('constant activation respects the World Info budget keep set', () => {
   ])
   const result = buildWorldInfoActivatedEntries([], store, new Map(), new Set(['blue-b']))
   assert.deepEqual(result.map(entry => entry.uid), ['blue-b'])
+})
+
+test('WORLDINFO_SCAN_DONE projects activated entries into a JSON-safe payload', () => {
+  const store = new MemoryWorldbookStore([
+    { path: 'book/a', sourceBookId: 'worldbook:book', keywords: ['a'], order: 1, weight: 1, content: 'A' },
+  ])
+  const result = buildWorldInfoScanDoneEvent(
+    [{ path: 'book/a', order: 1, weight: 1, content: 'A', source: 'st' }],
+    store,
+    { usedTokens: 12, droppedPaths: ['book/dropped'] },
+    { sticky: { 'book/a': { start: 1, end: 2 } } },
+  )
+
+  assert.equal(result.state.next, 0)
+  assert.equal(result.budget.current, 12)
+  assert.equal(result.budget.overflowed, true)
+  assert.equal(result.activated.entries['book.book/a']?.uid, 'book/a')
+  assert.deepEqual(result.timedEffects, { sticky: { 'book/a': { start: 1, end: 2 } } })
 })

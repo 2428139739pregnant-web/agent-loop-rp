@@ -44,6 +44,8 @@ The iframe also exposes the core `EjsTemplate` surface used by ST-Prompt-Templat
 
 The main send path also awaits `WORLD_INFO_ACTIVATED` after the resolved World Info set is known and before the response agent snapshots its prompt. The event uses stable merged-book paths as `uid` and includes the resolved keyed entries, budget-surviving constants, and generation-scoped `activewi` entries with their World Info metadata (`key`, `keysecondary`, selective logic, position, probability, recursion and inclusion-group fields). Any Tavern Helper injection or variable mutation completed by that hook is re-read during the same response generation, without an additional model call.
 
+It also awaits `WORLDINFO_SCAN_DONE` immediately before `WORLD_INFO_ACTIVATED`. The payload follows the public scan-result vocabulary (`state`, `new`, `activated`, `sortedEntries`, `recursionDelay`, `budget`, and `timedEffects`). Because the host transport is JSON, `activated.entries` crosses the boundary as a record and is restored to a native `Map` inside the card iframe before listeners run. This compatibility event is observational; prompt-affecting changes continue through the generation-scoped `activewi` and prompt-injection APIs.
+
 ### Standalone private generation options
 
 The standalone `generate()`/`generateRaw()` path supports the following structured options for its one independent OpenAI-compatible provider call:

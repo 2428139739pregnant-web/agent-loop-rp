@@ -2128,7 +2128,16 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
     if(event.data.type==='agent-rp-card-host-event'){
       const eventName=String(event.data.eventName||'');
       if(eventName){
-        const emitted=__emit(eventName,...(Array.isArray(event.data.args)?event.data.args:[]));
+        const rawArgs=Array.isArray(event.data.args)?event.data.args:[];
+        // SSE/JSON cannot carry a native Map. Restore the shape documented by
+        // JS-Slash-Runner for WORLDINFO_SCAN_DONE before card listeners run.
+        const args=eventName==='worldinfo_scan_done'&&rawArgs[0]&&typeof rawArgs[0]==='object'
+          ? [{...rawArgs[0],activated:rawArgs[0].activated&&typeof rawArgs[0].activated==='object'
+            ? {...rawArgs[0].activated,entries:rawArgs[0].activated.entries instanceof Map
+              ? rawArgs[0].activated.entries:new Map(Object.entries(rawArgs[0].activated.entries||{}))}
+            : rawArgs[0].activated}]
+          : rawArgs;
+        const emitted=__emit(eventName,...args);
         if(event.data.eventRequestId){
           Promise.resolve(emitted).then(()=>__waitForRpc()).then(()=>__post('agent-rp-card-host-event-done',{eventRequestId:String(event.data.eventRequestId),ok:true})).catch(error=>__post('agent-rp-card-host-event-done',{eventRequestId:String(event.data.eventRequestId),ok:false,error:String(error?.message||error)}));
         }

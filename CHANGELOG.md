@@ -4,6 +4,7 @@
 
 ### 修复
 
+- 对齐酒馆 World Info 扫描生命周期：每轮 resolved World Info 完成后发送 `WORLDINFO_SCAN_DONE`，并在卡片 iframe 内把 JSON-safe 的激活条目恢复为插件预期的 `Map`；不增加 LLM 调用。
 - 修复模型面板渲染回归：全局后处理/MVU 设置加载不再引用不存在的 `currentSessionId`，切换到“模型”菜单时不会再触发 `ReferenceError`。
 - 对齐 Prompt Template 与 Tavern Helper 的本轮 World Info 动态激活：`activewi()`/`activateWorldInfoByKeywords()` 会把命中的完整条目加入当前 response prompt；iframe 调用经宿主 RPC 进入同一个 generation-scoped activation 集合，`getEnabledWorldInfoEntries()` 支持官方来源开关。激活集合只在本轮存在，不写入持久世界书、不污染重 roll，也不增加 LLM 调用。
 
