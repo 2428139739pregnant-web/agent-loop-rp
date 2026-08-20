@@ -84,6 +84,7 @@ import {
 import {
   generateTavernRaw,
   parseTavernGenerateRawRequest,
+  type TavernGenerateRawRequest,
   type TavernGenerationSources,
 } from './tavern-generation.ts'
 import { PersonaStore, substituteUserCharMacros } from './persona-store.ts'
@@ -144,10 +145,26 @@ class OpenAICompatibleProvider implements LLMProvider {
     const url = `${this.baseUrl.replace(/\/+$/u, '')}/chat/completions`
     const body: Record<string, unknown> = {
       model: options?.model ?? 'gpt-4o-mini',
-      messages: messages.map(m => ({ role: m.role, content: m.content })),
+      messages: messages.map(m => ({
+        role: m.role,
+        content: m.content,
+        ...(m.name === undefined ? {} : { name: m.name }),
+      })),
       ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
       ...(options?.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),
-      ...(options?.response_format !== undefined ? { response_format: options.response_format } : {}),
+      ...(options?.json_schema !== undefined
+        ? { response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: options.json_schema.name,
+            ...(options.json_schema.description === undefined ? {} : { description: options.json_schema.description }),
+            schema: options.json_schema.value,
+            strict: options.json_schema.strict ?? true,
+          },
+        } }
+        : options?.response_format !== undefined ? { response_format: options.response_format } : {}),
+      ...(options?.tools === undefined ? {} : { tools: options.tools }),
+      ...(options?.tool_choice === undefined ? {} : { tool_choice: options.tool_choice }),
     }
     const resp = await fetch(url, {
       method: 'POST',
@@ -162,15 +179,28 @@ class OpenAICompatibleProvider implements LLMProvider {
       throw new Error(`openai-compatible chat ${resp.status}: ${text}`)
     }
     const data = await resp.json() as {
-      choices?: Array<{ message?: { content?: string } }>
+      choices?: Array<{ message?: {
+        content?: string
+        tool_calls?: Array<{ id?: string; type?: string; function?: { name?: string; arguments?: string } }>
+      } }>
       usage?: { prompt_tokens?: number; completion_tokens?: number }
     }
     const content = data.choices?.[0]?.message?.content ?? ''
+    const toolCalls = data.choices?.[0]?.message?.tool_calls?.flatMap(call =>
+      typeof call.id === 'string' && call.type === 'function'
+        && typeof call.function?.name === 'string' && typeof call.function?.arguments === 'string'
+        ? [{ id: call.id, type: 'function' as const, function: { name: call.function.name, arguments: call.function.arguments } }]
+        : [],
+    )
     const usage = data.usage
     if (usage?.prompt_tokens !== undefined && usage.completion_tokens !== undefined) {
-      return { content, usage: { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens } }
+      return {
+        content,
+        ...(toolCalls === undefined || toolCalls.length === 0 ? {} : { tool_calls: toolCalls }),
+        usage: { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens },
+      }
     }
-    return { content }
+    return { content, ...(toolCalls === undefined || toolCalls.length === 0 ? {} : { tool_calls: toolCalls }) }
   }
 }
 
@@ -783,6 +813,22 @@ function resolveProvider(cfg: ApiConfig): LLMProvider {
   return cfg.provider === 'mock'
     ? new MockProvider()
     : new OpenAICompatibleProvider(cfg.apiKey, cfg.baseUrl)
+}
+
+/** Resolve the optional provider override for a private Tavern Helper call.
+ * `proxy_preset` is accepted by the parser for wire compatibility, but this
+ * standalone host has no SillyTavern proxy-preset store; an explicit apiurl
+ * remains the only custom endpoint that can be selected here. */
+function resolveTavernGenerationProvider(state: AppState, request: TavernGenerateRawRequest): LLMProvider {
+  const custom = request.custom_api
+  if (custom?.proxy_preset !== undefined && custom.apiurl === undefined) {
+    throw new Error('Tavern Helper custom_api.proxy_preset is unavailable in standalone mode; provide custom_api.apiurl')
+  }
+  if (custom?.apiurl !== undefined || custom?.key !== undefined) {
+    const current = getGlobalConfig(state)
+    return new OpenAICompatibleProvider(custom.key ?? current.apiKey, custom.apiurl ?? current.baseUrl)
+  }
+  return resolveProvider(getGlobalConfig(state))
 }
 
 /** Read the (single-tenant) global config, falling back to mock defaults. */
@@ -2636,27 +2682,125 @@ function tavernGenerationSources(
     persona?.name ?? null,
     record.character.name,
   )
+  const raw = record.character.raw as unknown as Record<string, unknown>
+  const rawString = (value: unknown): string => typeof value === 'string' ? value : ''
+  const depthPrompt = rawString(raw.depth_prompt ?? raw.depthPrompt)
+  const worldbookGlobalScanData: WorldbookGlobalScanData = {
+    personaDescription: persona?.description ?? '',
+    characterDescription: macro(record.character.raw.description),
+    characterPersonality: macro(record.character.raw.personality),
+    characterDepthPrompt: macro(depthPrompt),
+    scenario: macro(record.character.raw.scenario),
+    creatorNotes: macro(record.character.raw.creatorNotes ?? ''),
+  }
+  const sourceWorldbook = state.worldbook
+  const helperState = record.tavernHelperState
+  const generationConfig = getGlobalConfig(state)
+  const templateRenderer = buildCharacterTemplateRenderer(
+    state,
+    record.character,
+    state.sessions,
+    id,
+    persona?.name ?? '用户',
+  )
+  const generationCtx = buildAgentContext({
+    provider: resolveProvider(generationConfig),
+    model: generationConfig.model,
+    prompts: new FilePromptLoader(),
+    session: state.sessions,
+    worldbook: sourceWorldbook,
+    sessionId: id,
+    macros: { user: persona?.name ?? null, char: record.character.name },
+    worldbookSettings: state.worldbookSettings,
+    responseSettings: state.responseSettings,
+    worldbookGlobalScanData,
+    ...(helperState === undefined ? {} : { tavernHelperState: helperState }),
+    ...(templateRenderer === undefined ? {} : { renderTemplate: templateRenderer }),
+  })
+  // A private Tavern Helper generation follows ST's deterministic World Info
+  // lane. It sees active card/external/helper books, but never calls our
+  // semantic worldbook agent or advances the main turn state.
+  const generationIntent = {
+    userNarration: macro(userInput ?? ''),
+    metaCommands: [],
+    involvedCharacters: [],
+    keywords: [],
+  }
+  const matchInput = buildWorldbookMatchInput(generationIntent, generationCtx)
+  const selectedDynamic = deterministicWorldbookMatch(matchInput, { rollProbability: true })
+  const pluginOutput = matchInput.pluginCandidates === undefined
+    ? undefined
+    : buildWorldbookPluginOutput(matchInput.pluginCandidates, generationCtx)
+  const selectedConstants = listConstantWorldbookEntries(sourceWorldbook, macro, { applyProbability: true })
   const before: string[] = []
   const after: string[] = []
-  for (const entry of state.worldbook.list()) {
-    if (entry.enabled === false || entry.constant !== true) continue
-    const position = typeof entry.position === 'number' ? Math.trunc(entry.position) : 0
-    if (position !== 0 && position !== 1) continue
-    const content = macro(entry.content).trim()
-    if (content.length === 0) continue
-    const line = `### ${entry.path}\\n${content}`
-    if (position === 0) before.push(line)
+  const exampleBlocks: string[] = []
+  const depthEntries: ChatMessage[] = []
+  const authorNotes: string[] = []
+  const seenPaths = new Set<string>()
+  const newline = String.fromCharCode(10)
+  const appendWorldbookEntry = (
+    path: string,
+    content: string,
+    position: number | undefined,
+    depth?: number,
+    role?: ChatMessage['role'],
+  ): void => {
+    if (seenPaths.has(path)) return
+    const text = macro(content).trim()
+    if (text.length === 0) return
+    seenPaths.add(path)
+    const line = '### ' + path + newline + text
+    const normalizedPosition = typeof position === 'number' ? Math.trunc(position) : 1
+    if (normalizedPosition === 0) before.push(line)
+    else if (normalizedPosition === 5 || normalizedPosition === 6) exampleBlocks.push(line)
+    else if (normalizedPosition === 4) depthEntries.push({
+      role: role ?? 'system',
+      content: text,
+      ...(depth === undefined ? {} : { data: { depth } }),
+    })
+    else if (normalizedPosition === 2 || normalizedPosition === 3) authorNotes.push(line)
     else after.push(line)
   }
+  for (const entry of selectedConstants) {
+    appendWorldbookEntry(entry.path, entry.content, entry.position, entry.depth, entry.role)
+  }
+  for (const candidate of selectedDynamic) {
+    appendWorldbookEntry(
+      candidate.path,
+      sourceWorldbook.getContent(candidate.path) ?? '',
+      candidate.position,
+      candidate.depth,
+      candidate.role,
+    )
+  }
   const visibleHistory = state.sessions.getHistory(id).filter(message => message.is_hidden !== true)
+  const dialogueExamples = [macro(record.character.raw.messageExample), ...exampleBlocks]
+    .filter(value => value.trim().length > 0)
+    .join(newline + newline)
+  const injectedPrompts = selectTavernInjectedPrompts(helperState).prompts
+    .filter(prompt => prompt.position !== 'none' && prompt.content.trim().length > 0)
+    .map(prompt => ({
+      content: macro(prompt.content),
+      position: prompt.position,
+      depth: Math.max(0, Math.trunc(prompt.depth)),
+      role: prompt.role,
+      order: prompt.order,
+      shouldScan: prompt.shouldScan,
+    }))
   return {
-    world_info_before: before.join('\\n\\n'),
+    world_info_before: before.join('\n\n'),
     persona_description: persona?.description ?? '',
     char_description: macro(record.character.raw.description),
     char_personality: macro(record.character.raw.personality),
     scenario: macro(record.character.raw.scenario),
-    world_info_after: after.join('\\n\\n'),
-    dialogue_examples: macro(record.character.raw.messageExample),
+    world_info_after: after.join('\n\n'),
+    dialogue_examples: dialogueExamples,
+    ...(depthEntries.length === 0 ? {} : { chat_history_depth_entries: depthEntries }),
+    ...(authorNotes.length === 0 ? {} : { author_note: authorNotes.join(newline + newline) }),
+    ...(pluginOutput === undefined || pluginOutput.promptInjections.length === 0
+      ? {} : { worldbook_prompt_injections: pluginOutput.promptInjections }),
+    ...(injectedPrompts.length === 0 ? {} : { injected_prompts: injectedPrompts }),
     chat_history: visibleHistory.map(message => ({ ...message })),
     user_input: userInput === undefined ? '' : macro(userInput),
   }
@@ -2677,13 +2821,14 @@ async function handleTavernGenerateRaw(state: AppState, id: string, req: Incomin
   }
   try {
     const result = await generateTavernRaw(
-      resolveProvider(getGlobalConfig(state)),
+      resolveTavernGenerationProvider(state, request),
       request,
       tavernGenerationSources(state, id, request.user_input),
     )
     sendJson(res, 200, {
       content: result.content,
       text: result.content,
+      ...(result.tool_calls === undefined ? {} : { tool_calls: result.tool_calls }),
       ...(result.usage === undefined ? {} : { usage: result.usage }),
       shouldSilence: request.should_silence === true,
     })

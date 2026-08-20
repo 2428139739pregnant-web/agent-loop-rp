@@ -1,6 +1,16 @@
 /** Safe, session-independent generation primitives for Tavern Helper. */
 
-import type { ChatMessage, ChatOptions, LLMProvider, LLMResult } from './provider.ts'
+import type {
+  ChatMessage,
+  ChatOptions,
+  JsonSchemaDefinition,
+  LLMProvider,
+  LLMResult,
+  ToolChoice,
+  ToolDefinition,
+} from './provider.ts'
+import { applyWorldbookPromptInjections } from './worldbook-plugin.ts'
+import type { WorldbookPromptInjection } from './schema.ts'
 
 const MAX_PROMPTS = 256
 const MAX_PROMPT_CHARS = 512 * 1024
@@ -68,15 +78,37 @@ export interface TavernGenerationSources {
   readonly world_info_after?: string
   readonly dialogue_examples?: string | readonly ChatMessage[]
   readonly chat_history?: readonly ChatMessage[]
+  readonly chat_history_depth_entries?: readonly ChatMessage[]
+  readonly author_note?: string
+  /** Prompt-Template injections selected from the active Tavern Helper state. */
+  readonly worldbook_prompt_injections?: readonly WorldbookPromptInjection[]
+  /** Script-authored Tavern Helper injections selected for this generation. */
+  readonly injected_prompts?: readonly TavernGenerationInject[]
   readonly user_input?: string
 }
 
+/** JSON-safe custom API subset from Tavern Helper's GenerateConfig. */
+export interface TavernCustomApiConfig {
+  readonly proxy_preset?: string
+  readonly apiurl?: string
+  readonly key?: string
+  readonly model?: string
+  readonly source?: string
+  readonly max_tokens?: 'same_as_preset' | 'unset' | number
+  readonly temperature?: 'same_as_preset' | 'unset' | number
+}
+
 export interface TavernGenerateRawRequest {
-  readonly ordered_prompts: readonly TavernGenerationPrompt[]
+  readonly ordered_prompts?: readonly TavernGenerationPrompt[]
+  readonly generation_id?: string
   readonly user_input?: string
   readonly overrides?: TavernGenerationOverrides
   readonly injects?: readonly TavernGenerationInject[]
   readonly max_chat_history?: 'all' | number
+  readonly custom_api?: TavernCustomApiConfig
+  readonly tools?: readonly ToolDefinition[]
+  readonly tool_choice?: ToolChoice
+  readonly json_schema?: JsonSchemaDefinition
   readonly model?: string
   readonly temperature?: number
   readonly max_tokens?: number
@@ -99,6 +131,19 @@ function boundedString(value: unknown, label: string, max = MAX_PROMPT_CHARS): s
   if (typeof value !== 'string') throw new Error(`${label} must be a string`)
   if (value.length > max) throw new Error(`${label} is too large`)
   return value
+}
+
+function boundedOptionalString(value: unknown, label: string, max = MAX_MODEL_CHARS): string | undefined {
+  if (value === undefined) return undefined
+  return boundedString(value, label, max)
+}
+
+function parseJsonRecord(value: unknown, label: string, maxChars = MAX_PROMPT_CHARS): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error(`${label} must be an object`)
+  let serialized: string
+  try { serialized = JSON.stringify(value) } catch { throw new Error(`${label} is not JSON-safe`) }
+  if (serialized.length > maxChars) throw new Error(`${label} is too large`)
+  return JSON.parse(serialized) as Record<string, unknown>
 }
 
 function parseRolePrompt(value: unknown, label: string): ChatMessage {
@@ -186,16 +231,90 @@ function parseInjects(value: unknown): readonly TavernGenerationInject[] | undef
   })
 }
 
+function parseCustomApi(value: unknown): TavernCustomApiConfig | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) throw new Error('generate custom_api must be an object')
+  const numberOrSentinel = (raw: unknown, label: string): 'same_as_preset' | 'unset' | number | undefined => {
+    if (raw === undefined) return undefined
+    if (raw === 'same_as_preset' || raw === 'unset') return raw
+    const number = finiteNumber(raw, label)
+    if (number === undefined || number < 0 || number > 131072) throw new Error(`${label} is invalid`)
+    return number
+  }
+  const apiurl = boundedOptionalString(value.apiurl, 'generate custom_api.apiurl', 2_048)
+  if (apiurl !== undefined) {
+    let parsed: URL
+    try { parsed = new URL(apiurl) } catch { throw new Error('generate custom_api.apiurl is invalid') }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('generate custom_api.apiurl must use http or https')
+  }
+  const key = boundedOptionalString(value.key, 'generate custom_api.key', 4_096)
+  const model = boundedOptionalString(value.model, 'generate custom_api.model')
+  const proxyPreset = boundedOptionalString(value.proxy_preset, 'generate custom_api.proxy_preset')
+  const source = boundedOptionalString(value.source, 'generate custom_api.source', 64)
+  const maxTokens = numberOrSentinel(value.max_tokens, 'generate custom_api.max_tokens')
+  const temperature = numberOrSentinel(value.temperature, 'generate custom_api.temperature')
+  return {
+    ...(proxyPreset === undefined ? {} : { proxy_preset: proxyPreset }),
+    ...(apiurl === undefined ? {} : { apiurl }),
+    ...(key === undefined ? {} : { key }),
+    ...(model === undefined ? {} : { model }),
+    ...(source === undefined ? {} : { source }),
+    ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
+    ...(temperature === undefined ? {} : { temperature }),
+  }
+}
+
+function parseTools(value: unknown): readonly ToolDefinition[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length > 64) throw new Error('generate tools is invalid')
+  return value.map((raw, index) => {
+    if (!isRecord(raw) || raw.type !== 'function' || !isRecord(raw.function)) {
+      throw new Error(`generate tools[${index}] is invalid`)
+    }
+    const name = boundedString(raw.function.name, `generate tools[${index}].function.name`, 256)
+    const description = boundedOptionalString(raw.function.description, `generate tools[${index}].function.description`, MAX_PROMPT_CHARS)
+    const parameters = raw.function.parameters === undefined
+      ? undefined : parseJsonRecord(raw.function.parameters, `generate tools[${index}].function.parameters`, 128 * 1024)
+    return {
+      type: 'function' as const,
+      function: {
+        name,
+        ...(description === undefined ? {} : { description }),
+        ...(parameters === undefined ? {} : { parameters }),
+      },
+    }
+  })
+}
+
+function parseToolChoice(value: unknown): ToolChoice | undefined {
+  if (value === undefined) return undefined
+  if (value === 'auto' || value === 'required' || value === 'none' || value === 'any') return value
+  if (!isRecord(value) || value.type !== 'function' || !isRecord(value.function)) {
+    throw new Error('generate tool_choice is invalid')
+  }
+  return {
+    type: 'function',
+    function: { name: boundedString(value.function.name, 'generate tool_choice.function.name', 256) },
+  }
+}
+
+function parseJsonSchema(value: unknown): JsonSchemaDefinition | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value)) throw new Error('generate json_schema must be an object')
+  const name = boundedString(value.name, 'generate json_schema.name', 256)
+  const description = boundedOptionalString(value.description, 'generate json_schema.description', MAX_PROMPT_CHARS)
+  const schema = parseJsonRecord(value.value, 'generate json_schema.value', 256 * 1024)
+  if (value.strict !== undefined && typeof value.strict !== 'boolean') throw new Error('generate json_schema.strict must be boolean')
+  return { name, ...(description === undefined ? {} : { description }), value: schema, ...(value.strict === undefined ? {} : { strict: value.strict }) }
+}
+
 /** Validate the JSON-safe part of the official generateRaw contract. */
 export function parseTavernGenerateRawRequest(value: unknown): TavernGenerateRawRequest {
-  if (!isRecord(value) || !Array.isArray(value.ordered_prompts)) {
-    throw new Error('generateRaw requires ordered_prompts')
-  }
-  if (value.ordered_prompts.length === 0 || value.ordered_prompts.length > MAX_PROMPTS) {
-    throw new Error(`generateRaw ordered_prompts must contain 1-${MAX_PROMPTS} messages`)
-  }
+  if (!isRecord(value)) throw new Error('generateRaw request must be an object')
+  const rawPrompts = value.ordered_prompts === undefined ? ['user_input'] : value.ordered_prompts
+  if (!Array.isArray(rawPrompts) || rawPrompts.length > MAX_PROMPTS) throw new Error(`generateRaw ordered_prompts must contain 0-${MAX_PROMPTS} messages`)
   let chars = 0
-  const ordered_prompts = value.ordered_prompts.map((raw, index) => {
+  const ordered_prompts = rawPrompts.map((raw, index) => {
     if (typeof raw === 'string') {
       if (!TAVERN_PLACEHOLDER_DEFAULT_ORDER.includes(raw as TavernPromptPlaceholder)) {
         throw new Error(`generateRaw ordered_prompts[${index}] placeholder is invalid`)
@@ -214,6 +333,7 @@ export function parseTavernGenerateRawRequest(value: unknown): TavernGenerateRaw
   if (value.user_input !== undefined && typeof value.user_input !== 'string') {
     throw new Error('generate user_input must be a string')
   }
+  const generationId = value.generation_id === undefined ? undefined : boundedString(value.generation_id, 'generate generation_id', 256)
   const maxChatHistory = value.max_chat_history
   if (maxChatHistory !== undefined && maxChatHistory !== 'all'
     && (typeof maxChatHistory !== 'number' || !Number.isSafeInteger(maxChatHistory)
@@ -222,6 +342,11 @@ export function parseTavernGenerateRawRequest(value: unknown): TavernGenerateRaw
   }
   const overrides = parseOverrides(value.overrides)
   const injects = parseInjects(value.injects)
+  const customApi = parseCustomApi(value.custom_api)
+  const tools = parseTools(value.tools)
+  const toolChoice = parseToolChoice(value.tool_choice)
+  const jsonSchema = parseJsonSchema(value.json_schema)
+  if (tools !== undefined && jsonSchema !== undefined) throw new Error('generate tools and json_schema are mutually exclusive')
   const model = value.model === undefined ? undefined : typeof value.model === 'string' && value.model.length <= MAX_MODEL_CHARS
     ? value.model : (() => { throw new Error('generateRaw model is invalid') })()
   const temperature = finiteNumber(value.temperature, 'generateRaw temperature')
@@ -237,10 +362,15 @@ export function parseTavernGenerateRawRequest(value: unknown): TavernGenerateRaw
       : (() => { throw new Error('generateRaw response_format is invalid') })()
   return {
     ordered_prompts,
+    ...(generationId === undefined ? {} : { generation_id: generationId }),
     ...(value.user_input === undefined ? {} : { user_input: value.user_input }),
     ...(overrides === undefined ? {} : { overrides }),
     ...(injects === undefined ? {} : { injects }),
     ...(maxChatHistory === undefined ? {} : { max_chat_history: maxChatHistory }),
+    ...(customApi === undefined ? {} : { custom_api: customApi }),
+    ...(tools === undefined ? {} : { tools }),
+    ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
+    ...(jsonSchema === undefined ? {} : { json_schema: jsonSchema }),
     ...(model === undefined ? {} : { model }),
     ...(temperature === undefined ? {} : { temperature }),
     ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
@@ -262,14 +392,20 @@ export function expandTavernGenerateRequest(
     return sources[key] ?? ''
   }
   const historyOverride = overrides.chat_history?.prompts
-  const history = historyOverride === undefined ? [...(sources.chat_history ?? [])] : [...historyOverride]
+  const depthEntries = overrides.chat_history?.with_depth_entries === false
+    ? [] : [...(sources.chat_history_depth_entries ?? [])]
+  const history = historyOverride === undefined
+    ? [...(sources.chat_history ?? []), ...depthEntries]
+    : [...historyOverride]
+  const authorNote = overrides.chat_history?.author_note ?? sources.author_note
+  if (authorNote !== undefined && authorNote.trim().length > 0) history.push({ role: 'system', content: authorNote })
   const historyLimit = request.max_chat_history
   const limitedHistory = historyLimit === undefined || historyLimit === 'all'
     ? history
     : history.slice(-historyLimit)
   const userInput = request.user_input ?? sources.user_input ?? ''
   const expanded: ChatMessage[] = []
-  for (const prompt of request.ordered_prompts) {
+  for (const prompt of request.ordered_prompts ?? ['user_input']) {
     if (typeof prompt !== 'string') {
       expanded.push({ ...prompt })
       continue
@@ -297,7 +433,10 @@ export function expandTavernGenerateRequest(
       }
     }
   }
-  return applyGenerationInjects(expanded, request.injects ?? [])
+  return applyGenerationInjects(
+    expanded,
+    [...(sources.injected_prompts ?? []), ...(request.injects ?? [])],
+  )
 }
 
 function applyGenerationInjects(
@@ -335,11 +474,22 @@ export async function generateTavernRaw(
   request: TavernGenerateRawRequest,
   sources: TavernGenerationSources = {},
 ): Promise<LLMResult> {
+  const model = request.model ?? request.custom_api?.model
+  const temperature = request.temperature ?? (typeof request.custom_api?.temperature === 'number' ? request.custom_api.temperature : undefined)
+  const maxTokens = request.max_tokens ?? (typeof request.custom_api?.max_tokens === 'number' ? request.custom_api.max_tokens : undefined)
   const options: ChatOptions = {
-    ...(request.model === undefined ? {} : { model: request.model }),
-    ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
-    ...(request.max_tokens === undefined ? {} : { max_tokens: request.max_tokens }),
+    ...(model === undefined ? {} : { model }),
+    ...(temperature === undefined ? {} : { temperature }),
+    ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
     ...(request.response_format === undefined ? {} : { response_format: request.response_format }),
+    ...(request.tools === undefined ? {} : { tools: request.tools }),
+    ...(request.tool_choice === undefined ? {} : { tool_choice: request.tool_choice }),
+    ...(request.json_schema === undefined ? {} : { json_schema: request.json_schema }),
   }
-  return provider.chat(expandTavernGenerateRequest(request, sources), options)
+  const expanded = expandTavernGenerateRequest(request, sources)
+  const messages = applyWorldbookPromptInjections(
+    expanded,
+    sources.worldbook_prompt_injections ?? [],
+  )
+  return provider.chat(messages, options)
 }

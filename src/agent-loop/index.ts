@@ -1,6 +1,15 @@
 /** Public surface of the agent-loop module. Re-exports types and implementations. */
 
-export type { LLMProvider, ChatMessage, ChatOptions, LLMResult, SwipeInfo } from './provider.ts'
+export type {
+  LLMProvider,
+  ChatMessage,
+  ChatOptions,
+  LLMResult,
+  SwipeInfo,
+  ToolDefinition as ChatToolDefinition,
+  ToolChoice,
+  JsonSchemaDefinition,
+} from './provider.ts'
 
 export { DeepSeekProvider } from './providers/deepseek.ts'
 export { MockProvider } from './providers/mock.ts'
@@ -117,6 +126,19 @@ export {
   type ConstantWorldbookBlocks,
 } from './agents/response.ts'
 export { tavernHelperWorldbookMetadata, tavernHelperWorldbookPosition } from './worldbook-position.ts'
+export {
+  generateTavernRaw,
+  expandTavernGenerateRequest,
+  parseTavernGenerateRawRequest,
+  TAVERN_PLACEHOLDER_DEFAULT_ORDER,
+  type TavernPromptPlaceholder,
+  type TavernGenerationPrompt,
+  type TavernGenerationOverrides,
+  type TavernGenerationInject,
+  type TavernGenerationSources,
+  type TavernCustomApiConfig,
+  type TavernGenerateRawRequest,
+} from './tavern-generation.ts'
 export {
   CONTROLLED_TRIGGER_SLASH_COMMANDS,
   MAX_TRIGGER_SLASH_SOURCE_LENGTH,

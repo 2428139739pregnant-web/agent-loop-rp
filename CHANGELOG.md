@@ -8,6 +8,10 @@
 - 角色卡 iframe 的 `generate()`/`generateRaw()` 兼容入口现在会发出酒馆助手同名的生成生命周期事件；支持 generation id、流式模式下的完整/增量回调，以及本地停止标记，仍沿用原有独立 provider 调用，不把辅助生成混入主 agent loop。
 - 对齐 Tavern Helper 的生成参数模型：`generate()` 使用官方默认占位符顺序，`generateRaw()` 同时接受占位符和角色消息；宿主会在一次独立 provider 调用前展开当前角色卡、用户设定、示例消息、有限聊天历史、`user_input`、`overrides` 和 JSON 安全的 prompt injects，不写入主聊天，也不触发主 Agent Loop。
 - 接通 Tavern Helper 的 `generateRaw()`：卡片脚本可以把 `ordered_prompts` 交给独立的一次 provider 调用，严格校验角色/长度/参数，不写入聊天楼层，也不会再次进入意图、世界书、上下文、正文、后处理或 MVU 链路。
+- 明确 `generateRaw()` 的提示词默认行为：`ordered_prompts` 可以省略，省略时只使用 `user_input`；传入空数组仍表示不发送任何提示词，只有 `generate()` 包装入口会补入酒馆助手的默认占位符顺序。
+- 独立 Tavern Helper 生成现在会在 provider 调用前接入当前会话规范化世界书的确定性 ST matcher：常量条目、卡内/外部/助手来源的当前可触发条目按既有概率、递归、位置和去重规则组装到私有生成输入，不调用世界书语义 agent，也不增加额外 LLM 调用；这不等同于支持从 iframe 内动态执行任意 World Info 激活。
+- 补齐独立生成的结构化请求子集：`custom_api` 支持显式 `apiurl`/`key`，以及 `model`、数值型 `temperature`/`max_tokens` 覆盖；`tools` 支持 JSON 安全的 function 定义、`tool_choice`，并把 provider 返回的 `tool_calls` 原样返回；`json_schema` 转换为 OpenAI-compatible `response_format=json_schema`。`tools` 与 `json_schema` 互斥，当前只完成一次调用和结果透传，不执行工具或自动追加工具调用回合。
+- 记录 standalone 边界：`custom_api.proxy_preset` 只做协议校验，不连接酒馆的代理预设仓库；没有显式 `apiurl` 时会拒绝该请求，`custom_api.source` 不负责切换 provider；官方 `image` 输入不进入请求，也不从卡片 iframe 获取或转发图片。
 - 角色卡前端现在在 iframe 启动前获得与酒馆一致的原始卡片快照：详情/切换角色接口提供 `RawCharacter`，`SillyTavern.getContext().character`/`characters[0]` 保留 `data`、`extensions`、`character_book` 等字段，并补齐隔离环境中的 `getCharData()`、`getchar()`/`getChara()`；不会把原始卡片注入模型提示词，也不会增加 LLM 调用。
 - 将 EJS 当前角色资源快照真正接入服务端 renderer：`getCharData()`/`getchar()` 现在可以读取角色卡原始 JSON（含扩展字段与 `character_book`），不会回退读取文件或增加模型调用；卡片 iframe 在没有酒馆宿主时提供受限的 `triggerSlash()` 兼容子集，宿主存在时优先转发官方实现。
 - Tavern Helper 聊天 mutation 现在保留并规范化 `refresh: none/affected/all`，兼容旧的布尔值和 `options.refresh` 写法；服务端响应会回传最终 refresh 模式，避免宿主在解析或响应阶段丢失刷新语义。

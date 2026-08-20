@@ -545,6 +545,22 @@ test('card frontend receives RawCharacter and Prompt Template character helpers 
   assert.match(await frame.window.getchar('莉娜', '<%= name %>|<%= description %>'), /莉娜\|掌握火焰的旅者/u)
 })
 
+test('iframe exposes the official Tavern Helper builtin prompt default order', () => {
+  const frame = createFrame()
+  const expected = [
+    'world_info_before', 'persona_description', 'char_description',
+    'char_personality', 'scenario', 'world_info_after', 'dialogue_examples',
+    'chat_history', 'user_input',
+  ]
+
+  assert.deepEqual(plain(frame.window.builtin_prompt_default_order), expected)
+  assert.deepEqual(plain(frame.window.placeholder_prompt_default_order), expected)
+  assert.deepEqual(plain(frame.window.TavernHelper.builtin_prompt_default_order), expected)
+  assert.deepEqual(plain(frame.window.TavernHelper.placeholder_prompt_default_order), expected)
+  assert.deepEqual(plain(frame.window.SillyTavern.builtin_prompt_default_order), expected)
+  assert.deepEqual(plain(frame.window.SillyTavern.placeholder_prompt_default_order), expected)
+})
+
 test('Tavern Helper generateRaw uses the isolated host RPC without changing chat', async () => {
   const frame = createFrame()
   await frame.window.generateRaw({ ordered_prompts: [{ role: 'user', content: '辅助问题' }] })

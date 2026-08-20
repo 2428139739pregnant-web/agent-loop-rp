@@ -29,12 +29,39 @@ export interface ChatMessage {
   swipes_info?: Record<string, unknown>[]
 }
 
+/** OpenAI-compatible tool definition used by Tavern Helper auxiliary calls. */
+export interface ToolDefinition {
+  readonly type: 'function'
+  readonly function: {
+    readonly name: string
+    readonly description?: string
+    readonly parameters?: Record<string, unknown>
+  }
+}
+
+export type ToolChoice = 'auto' | 'required' | 'none' | 'any' | {
+  readonly type: 'function'
+  readonly function: { readonly name: string }
+}
+
+export interface JsonSchemaDefinition {
+  readonly name: string
+  readonly description?: string
+  readonly value: Record<string, unknown>
+  readonly strict?: boolean
+}
+
 export interface ChatOptions {
   model?: string
   temperature?: number
   /** OpenAI-compatible completion cap; the response prompt still carries the soft length target. */
   max_tokens?: number
   response_format?: { type: 'json_object' } | { type: 'text' }
+  /** Optional OpenAI-compatible function calling for isolated helper generation. */
+  tools?: readonly ToolDefinition[]
+  tool_choice?: ToolChoice
+  /** Host-neutral schema; providers translate it to their wire format. */
+  json_schema?: JsonSchemaDefinition
 }
 
 export interface LLMUsage {
@@ -45,6 +72,11 @@ export interface LLMUsage {
 export interface LLMResult {
   content: string
   usage?: LLMUsage
+  tool_calls?: readonly {
+    readonly id: string
+    readonly type: 'function'
+    readonly function: { readonly name: string; readonly arguments: string }
+  }[]
 }
 
 export interface LLMProvider {
