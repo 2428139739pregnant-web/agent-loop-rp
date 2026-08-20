@@ -254,6 +254,8 @@ interface CtxOpts {
   readonly turnCount?: number
   readonly worldbook?: AgentContext['worldbook']
   readonly tavernHelperState?: AgentContext['tavernHelperState']
+  readonly refreshTavernHelperState?: AgentContext['refreshTavernHelperState']
+  readonly onGenerationEvent?: AgentContext['onGenerationEvent']
   readonly renderTemplate?: AgentContext['renderTemplate']
   readonly worldbookActivationPaths?: Map<string, boolean>
 }
@@ -282,6 +284,8 @@ function makeCtx(opts: CtxOpts): AgentContext {
     worldbook: opts.worldbook ?? { match: () => [], getContent: () => undefined, list: () => [] },
     sessionId: 'test',
     ...(opts.tavernHelperState === undefined ? {} : { tavernHelperState: opts.tavernHelperState }),
+    ...(opts.refreshTavernHelperState === undefined ? {} : { refreshTavernHelperState: opts.refreshTavernHelperState }),
+    ...(opts.onGenerationEvent === undefined ? {} : { onGenerationEvent: opts.onGenerationEvent }),
     ...(opts.renderTemplate === undefined ? {} : { renderTemplate: opts.renderTemplate }),
     ...(opts.worldbookActivationPaths === undefined ? {} : { worldbookActivationPaths: opts.worldbookActivationPaths }),
   }
@@ -448,6 +452,55 @@ test('responseAgent maps ST extension prompt anchors into the message tree', asy
   assert.equal(captured[0]?.content, 'BEFORE_PROMPT')
   assert.ok(captured.some(message => message.content === 'MAIN_PROMPT'))
   assert.ok(captured.some(message => message.content === 'IN_PROMPT'))
+})
+
+test('responseAgent awaits post-combine/data hooks and reassembles refreshed injections', async () => {
+  let captured: ChatMessage[] = []
+  const provider: LLMProvider = {
+    name: 'spy',
+    async chat(messages) {
+      captured = messages
+      return { content: 'r' }
+    },
+  }
+  const initialState = {
+    format: 0 as const,
+    characterSourceId: 'character',
+    revision: 1,
+    scopes: { global: {}, preset: {}, character: {}, chat: {}, message: {}, extension: {} },
+    scripts: {},
+  }
+  let liveState: NonNullable<AgentContext['tavernHelperState']> = initialState
+  const events: string[] = []
+  const ctx = makeCtx({
+    provider,
+    promptBody: `${ST_MESSAGE_TREE_MARKER}\nMAIN_PROMPT`,
+    tavernHelperState: initialState,
+    refreshTavernHelperState: () => liveState,
+    onGenerationEvent: async (name) => {
+      events.push(name)
+      if (name === 'generate_after_combine_prompts') {
+        liveState = {
+          ...initialState,
+          revision: 2,
+          injectedPrompts: [{
+            id: 'hook-injection', scriptId: 'script', position: 'before_prompt', depth: 0,
+            role: 'system', content: 'ADDED_BY_AFTER_COMBINE', shouldScan: false, once: false, order: 1,
+          }],
+        }
+      }
+    },
+  })
+  await responseAgent.run({
+    intent: makeIntent(),
+    worldbook: { matches: [] },
+    contextSegmentation: { segments: [] },
+    userInput: 'hi',
+    character: makeCharacter(),
+  }, ctx)
+  assert.deepEqual(events, ['generate_after_combine_prompts', 'generate_after_data'])
+  assert.equal(captured[0]?.content, 'ADDED_BY_AFTER_COMBINE')
+  assert.ok(captured.some(message => message.content === 'MAIN_PROMPT'))
 })
 
 test('responseAgent sends selected context as a real chatHistory message layer', async () => {

@@ -4419,12 +4419,16 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
         const stopGeneration = () => {
           if (lifecycleFinished) return
           lifecycleFinished = true
-          broadcastCardHostEvent(sessionId, 'generation_stopped', generationType)
+          broadcastCardHostEvent(sessionId, 'generation_stopped')
         }
         // Match SillyTavern's host lifecycle. The actual prompt pipeline still
         // runs on the server, but card extensions must see the same ordering
         // before their generation hooks are evaluated.
-        if (!bodyObj?.reroll) await broadcastCardHostEvent(sessionId, 'message_sent', Number.isSafeInteger(lifecycle.userMessageId) ? lifecycle.userMessageId : -1)
+        if (!bodyObj?.reroll) {
+          const userMessageId = Number.isSafeInteger(lifecycle.userMessageId) ? lifecycle.userMessageId : -1
+          await broadcastCardHostEvent(sessionId, 'message_sent', userMessageId)
+          await broadcastCardHostEvent(sessionId, 'user_message_rendered', userMessageId)
+        }
         await broadcastCardHostEvent(sessionId, 'generation_started', generationType, {}, false)
         await broadcastCardHostEvent(sessionId, 'GENERATION_AFTER_COMMANDS', generationType, {}, false)
         // Tavern Helper/JS-Slash-Runner uses this awaited hook for prompt
@@ -4437,10 +4441,10 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
         // this earlier would miss a newly-created filter for this request.
         // This is a local iframe handshake, not an extra LLM request.
         try { await prepareCardHostInjections(sessionId) } catch (error) { console.warn('[agent-rp Tavern Helper filter]', error) }
-        if (bodyObj?.reroll) await broadcastCardHostEvent(sessionId, 'message_deleted', messageId)
+        if (bodyObj?.reroll) await broadcastCardHostEvent(sessionId, 'message_swiped', messageId)
         let resp
         try {
-          resp = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyObj) })
+          resp = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-RP-UI': '1' }, body: JSON.stringify(bodyObj) })
         } catch (err) {
           setError(`网络错误: ${err instanceof Error ? err.message : String(err)}`)
           stopGeneration()
@@ -4479,9 +4483,16 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                   setProgressStages((prev) => ({ ...prev, [payload.name]: payload.status }))
                   if (!lifecycleFinished) {
                     lifecycleFinished = true
+                    // React mounts a new card iframe as a consequence of
+                    // setHistory. Yield one paint so MESSAGE_RECEIVED and
+                    // CHARACTER_MESSAGE_RENDERED reach that new iframe too.
+                    await new Promise((resolve) => {
+                      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve())
+                      else setTimeout(resolve, 0)
+                    })
                     await broadcastCardHostEvent(sessionId, 'message_received', messageId, generationType)
                     await broadcastCardHostEvent(sessionId, 'character_message_rendered', messageId, generationType)
-                    await broadcastCardHostEvent(sessionId, 'generation_ended', generationType)
+                    await broadcastCardHostEvent(sessionId, 'generation_ended', messageId)
                   }
                 } else if (payload.name === 'error') {
                   setError(payload.message || '未知错误')
@@ -4497,6 +4508,28 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                   // 这样 StageTraceCard 能正确显示转圈(…)而不是看起来像没动(○)。
                   const mappedStatus = payload.status === 'start' ? 'running' : payload.status
                   setProgressStages((prev) => ({ ...prev, [payload.name]: mappedStatus }))
+                }
+              } else if (ev.event === 'generation-hook') {
+                let payload; try { payload = JSON.parse(ev.data) } catch { continue }
+                const hookSessionId = typeof payload.sessionId === 'string' ? payload.sessionId : sessionId
+                const hookId = typeof payload.hookId === 'string' ? payload.hookId : ''
+                const eventName = typeof payload.eventName === 'string' ? payload.eventName : ''
+                const args = Array.isArray(payload.args) ? payload.args : []
+                if (hookId.length === 0 || eventName.length === 0) continue
+                let hookOk = true
+                try {
+                  await broadcastCardHostEvent(hookSessionId, eventName, ...args)
+                } catch {
+                  hookOk = false
+                }
+                try {
+                  await apiPost(
+                    `/api/sessions/${encodeURIComponent(hookSessionId)}/generation-hook/${encodeURIComponent(hookId)}`,
+                    { ok: hookOk },
+                  )
+                } catch {
+                  // The server has a fail-open timeout for a tab that closes
+                  // while a generation hook is in flight.
                 }
               } else if (ev.event === 'agent-trace') {
                 let payload; try { payload = JSON.parse(ev.data) } catch { continue }

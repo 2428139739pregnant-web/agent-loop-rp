@@ -33,6 +33,8 @@
 - iframe 内的 `SillyTavern.getContext()` 不再只是 `{ chat: [] }` 占位：宿主会同步当前会话消息、角色/用户投影、chat id、extension prompts、MVU/变量读写和 World Info 查询入口；消息按 ST 常用的 `name`/`mes`/`is_user`/`is_system` 形状提供给卡片脚本。
 - Tavern Helper iframe 事件桥对齐酒馆助手的可等待生命周期：`eventEmit` 现在等待异步监听器和注入/变量 RPC，补齐 `eventMakeFirst`、`eventMakeLast`、移除/清理监听 API 与完整 `tavern_events` 常量；生成前事件会等待所有卡片帧确认后再进入 `/api/run`，避免提示词注入竞态。
 - 统一宿主桥与卡片 iframe 的酒馆助手监听语义：同一函数重复注册不再重复执行，`eventMakeFirst`/`eventMakeLast` 移动既有监听器而不是创建副本，并补齐全局及 `TavernHelper` 的 `eventEmitAndWait`；不会增加 LLM 调用。
+- 对齐主生成的酒馆生命周期：普通发送补发 `USER_MESSAGE_RENDERED`，重 roll 使用 `MESSAGE_SWIPED`，`GENERATION_ENDED` 传递消息楼层号；新 assistant 卡片 iframe 等待 React 完成挂载后再收到消息渲染事件。
+- 真正接入 `GENERATE_AFTER_COMBINE_PROMPTS` 与 `GENERATE_AFTER_DATA`：通过 SSE 与卡片 iframe 做一次可等待握手，Tavern Helper 脚本完成注入或变量 RPC 后刷新会话状态并重组同一次 response prompt，不增加 LLM 调用；非 UI SSE 客户端不会触发握手等待。
 - 世界书全局扫描设置补齐 ST 的 `min_activations`/深度上限、`recursive`、`max_recursion_steps`、`include_names` 和 `use_group_scoring`；全部由确定性 matcher 执行，不增加 LLM 调用，并在 UI/API 中可持久化配置。
 - 旧角色存档首次启动时会自动迁移到新的卡片世界书结构，并将迁移后的 `preprocessed.json` 持久化，避免每次启动重复迁移。
 - Tavern Helper 世界书的 `before_author_note/after_author_note` 现在映射到 ST 的 5/6 位置；独立世界书蓝灯按 0–7 位置进入示例区、atDepth、Author's Note 和 outlet，旧自定义模板保留三文档回退。

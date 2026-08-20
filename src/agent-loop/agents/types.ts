@@ -132,6 +132,9 @@ export interface PostprocessRuntimeSettings {
  *  `step` is a short label (e.g. "pass-a"); `detail` is any extra data to surface. */
 export type AgentProgressCallback = (step: string, detail?: Record<string, unknown>) => void
 
+/** Host-side generation hook used by the Tavern Helper event bridge. */
+export type GenerationEventCallback = (eventName: string, args: readonly unknown[]) => Promise<void>
+
 /** Runtime context handed to every agent. */
 export interface AgentContext {
   readonly provider: LLMProvider
@@ -155,6 +158,10 @@ export interface AgentContext {
   readonly worldbookGlobalScanData?: WorldbookGlobalScanData
   /** Session-owned Tavern Helper state, including prompt injections and scan text. */
   readonly tavernHelperState?: TavernHelperState
+  /** Re-read the session-owned helper state after a browser generation hook. */
+  readonly refreshTavernHelperState?: () => TavernHelperState | undefined
+  /** Await a browser-side Tavern Helper generation event before the provider call. */
+  readonly onGenerationEvent?: GenerationEventCallback
   /** Optional ⑤ postprocess settings supplied by the host. */
   readonly postprocessSettings?: PostprocessRuntimeSettings
   /**

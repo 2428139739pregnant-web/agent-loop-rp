@@ -382,6 +382,49 @@ function writeSseEvent(res: ServerResponse, event: string, data: unknown): void 
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
 }
 
+/**
+ * Give the browser a chance to run the same awaited generation event that
+ * Tavern Helper exposes inside the card iframe. The browser acknowledges only
+ * after every matching iframe has finished its listeners and RPC mutations;
+ * timing out is deliberately fail-open so a closed tab cannot hold the model
+ * request forever.
+ */
+const GENERATION_HOOK_TIMEOUT_MS = 5_000
+
+async function awaitBrowserGenerationHook(
+  state: AppState,
+  res: ServerResponse,
+  sessionId: string,
+  eventName: string,
+  args: readonly unknown[],
+): Promise<void> {
+  if (res.writableEnded) return
+  const hookId = randomUUID()
+  await new Promise<void>((resolve) => {
+    let finished = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const complete = (_ok: boolean): void => {
+      if (finished) return
+      finished = true
+      if (timer !== undefined) clearTimeout(timer)
+      state.pendingGenerationHooks.delete(hookId)
+      resolve()
+    }
+    state.pendingGenerationHooks.set(hookId, { sessionId, complete })
+    timer = setTimeout(() => complete(false), GENERATION_HOOK_TIMEOUT_MS)
+    try {
+      writeSseEvent(res, 'generation-hook', {
+        hookId,
+        sessionId,
+        eventName,
+        args: [...args],
+      })
+    } catch {
+      complete(false)
+    }
+  })
+}
+
 /** Mirrors `loop.ts` buildContext — local copy so we don't need to export it.
  *  macros( {{user}}/{{char}} 宏源)与 worldbookSettings(绿灯扫描深度)为
  *  2.1/3 的 ST 语义适配新增,可选参数。 */
@@ -404,6 +447,10 @@ function buildAgentContext(deps: {
   worldbookGlobalScanData?: WorldbookGlobalScanData
   /** Session-owned Tavern Helper prompts and scan-text injections. */
   tavernHelperState?: TavernHelperState
+  /** Re-read helper state after an awaited browser generation hook. */
+  refreshTavernHelperState?: () => TavernHelperState | undefined
+  /** Await a browser-side generation event before the provider call. */
+  onGenerationEvent?: import('./agents/types.ts').GenerationEventCallback
   /** ⑤ postprocess preset 当前值。 */
   postprocessSettings?: PostprocessRuntimeSettings
   /** 进度回调:多步骤 agent 在每个子步骤时调用。 */
@@ -432,6 +479,8 @@ function buildAgentContext(deps: {
     ...(deps.worldbookTimedEffects === undefined ? {} : { worldbookTimedEffects: deps.worldbookTimedEffects }),
     ...(deps.worldbookGlobalScanData === undefined ? {} : { worldbookGlobalScanData: deps.worldbookGlobalScanData }),
     ...(deps.tavernHelperState === undefined ? {} : { tavernHelperState: deps.tavernHelperState }),
+    ...(deps.refreshTavernHelperState === undefined ? {} : { refreshTavernHelperState: deps.refreshTavernHelperState }),
+    ...(deps.onGenerationEvent === undefined ? {} : { onGenerationEvent: deps.onGenerationEvent }),
     ...(deps.postprocessSettings !== undefined ? { postprocessSettings: deps.postprocessSettings } : {}),
     ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
     ...(deps.renderTemplate !== undefined ? { renderTemplate: deps.renderTemplate } : {}),
@@ -1380,6 +1429,11 @@ interface CharacterWorldbookConfig {
   disabledBookIds: Set<string>
 }
 
+interface PendingGenerationHook {
+  readonly sessionId: string
+  readonly complete: (ok: boolean) => void
+}
+
 interface AppState {
   /** Runtime API config keyed by tenant id. The demo only ever uses 'global'. */
   readonly configs: Map<string, ApiConfig>
@@ -1391,6 +1445,8 @@ interface AppState {
   readonly sessionRecords: Map<string, SessionRecord>
   /** Ephemeral Prompt Template/Tavern Helper World Info activations for the in-flight generation. */
   readonly pendingWorldbookActivations: Map<string, Map<string, boolean>>
+  /** Awaited browser acknowledgements for prompt-manager generation hooks. */
+  readonly pendingGenerationHooks: Map<string, PendingGenerationHook>
   /** 酒馆风格的"角色库":所有 import 过的角色卡都在这里。key = CharacterId。 */
   readonly characters: Map<CharacterId, CharacterRecord>
   /** 当前选中的角色 id(由前端在 UI 上点选控制)。 */
@@ -1454,6 +1510,7 @@ function buildState(opts: StartServerOptions, env: NodeJS.ProcessEnv): AppState 
     sessions: new MemorySessionStore(),
     sessionRecords: new Map<string, SessionRecord>(),
     pendingWorldbookActivations: new Map<string, Map<string, boolean>>(),
+    pendingGenerationHooks: new Map<string, PendingGenerationHook>(),
     characters: new Map<CharacterId, CharacterRecord>(),
     currentCharacterId: null,
     currentSessionId: null,
@@ -1886,6 +1943,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
   if (payload === null) return sendError(res, 400, 'invalid JSON body')
 
   const reroll = payload.reroll === true
+  const uiClient = req.headers['x-agent-rp-ui'] === '1'
   let userInput = readStringField(payload, 'userInput') ?? ''
   if (userInput.length === 0 && !reroll) {
     return sendError(res, 400, 'userInput is required')
@@ -2056,6 +2114,12 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
       creatorNotes: character.raw.creatorNotes ?? '',
     },
     tavernHelperState: helperState,
+    ...(uiClient ? {
+      refreshTavernHelperState: () => state.sessionRecords.get(sessionId)?.tavernHelperState,
+      onGenerationEvent: async (eventName: string, args: readonly unknown[]) => {
+        await awaitBrowserGenerationHook(state, res, sessionId, eventName, args)
+      },
+    } : {}),
     ...(timedEffects === undefined ? {} : { worldbookTimedEffects: timedEffects }),
     postprocessSettings: state.postprocessSettings,
     ...(templateRenderer === undefined ? {} : { renderTemplate: templateRenderer }),
@@ -2803,6 +2867,32 @@ function handleGetSessionTavernHelper(state: AppState, id: string, res: ServerRe
     ...sessionVariablesPayload(state, record),
     tavernHelperState: helperState,
   })
+}
+
+/** POST /api/sessions/:id/generation-hook/:hookId — acknowledge one awaited
+ * browser-side generation event. The hook id is single-use and expires after
+ * the server-side fail-open timeout. */
+async function handleGenerationHookAck(
+  state: AppState,
+  id: string,
+  hookId: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const pending = state.pendingGenerationHooks.get(hookId)
+  if (pending === undefined || pending.sessionId !== id) {
+    return sendError(res, 404, 'generation hook not found or expired')
+  }
+  let ok = true
+  try {
+    const body = await readBody(req, 16 * 1024)
+    const payload = parseJsonBody(body)
+    if (payload !== null && payload.ok === false) ok = false
+  } catch {
+    ok = false
+  }
+  pending.complete(ok)
+  sendJson(res, 200, { ok: true, hookId })
 }
 
 /** POST /api/sessions/:id/tavern-helper/activate-world-info — record a
@@ -6005,6 +6095,16 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
         }
       }
       {
+        const hookMatch = /^\/api\/sessions\/([^/]+)\/generation-hook\/([^/]+)$/u.exec(url.pathname)
+        if (method === 'POST' && hookMatch !== null) {
+          return await handleGenerationHookAck(
+            state,
+            decodeURIComponent(hookMatch[1] ?? ''),
+            decodeURIComponent(hookMatch[2] ?? ''),
+            req,
+            res,
+          )
+        }
         const m = /^\/api\/sessions\/([^/]+)\/tavern-helper\/generate-raw$/u.exec(url.pathname)
         if (method === 'POST' && m !== null) {
           return await handleTavernGenerateRaw(state, decodeURIComponent(m[1] ?? ''), req, res)

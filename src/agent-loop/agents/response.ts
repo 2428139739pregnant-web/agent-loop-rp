@@ -828,8 +828,15 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
       + macro(input.character.postHistoryInstructions ?? '')
       + worldbookAfterAuthorNote
       + constantBlocks.afterAuthorNote
-    const extensionBeforePrompt = macro(tavernInjectedPromptContent(ctx.tavernHelperState, 'before_prompt'))
-    const extensionInPrompt = macro(tavernInjectedPromptContent(ctx.tavernHelperState, 'in_prompt'))
+    let liveTavernHelperState = ctx.tavernHelperState
+    let extensionBeforePrompt = macro(tavernInjectedPromptContent(liveTavernHelperState, 'before_prompt'))
+    let extensionInPrompt = macro(tavernInjectedPromptContent(liveTavernHelperState, 'in_prompt'))
+    const refreshLiveTavernHelperState = (): void => {
+      const refreshed = ctx.refreshTavernHelperState?.()
+      if (refreshed !== undefined) liveTavernHelperState = refreshed
+      extensionBeforePrompt = macro(tavernInjectedPromptContent(liveTavernHelperState, 'before_prompt'))
+      extensionInPrompt = macro(tavernInjectedPromptContent(liveTavernHelperState, 'in_prompt'))
+    }
     const exampleDialogue = worldbookBeforeExamples
       + constantBlocks.beforeExamples
       + (mesExample.length > 0 ? mesExample : NO_EXAMPLE_DIALOGUE)
@@ -876,7 +883,7 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     const systemPrompt = template.includes('{{response_settings}}')
       ? renderedSystemPrompt
       : `${renderedSystemPrompt}\n\n## 当前回复设置（用户可配置）\n\n${responseSettingsInstruction}`
-    const flatSystemPrompt = [extensionBeforePrompt, systemPrompt, extensionInPrompt]
+    const buildFlatSystemPrompt = (): string => [extensionBeforePrompt, systemPrompt, extensionInPrompt]
       .map(value => value.trim())
       .filter(Boolean)
       .join('\n\n')
@@ -943,17 +950,42 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
           ...(postHistoryInstructions.trim() ? [{ role: 'system' as const, content: postHistoryInstructions.trim() }] : []),
         ]
         : [
-          { role: 'system', content: flatSystemPrompt },
+          { role: 'system', content: buildFlatSystemPrompt() },
           ...historyAndCurrent,
         ]
       const promptTemplateMessages = applyPromptTemplateInjections(structuredMessages, pluginOutput)
-      return applyTavernInjectedInChatPrompts(promptTemplateMessages, ctx.tavernHelperState)
+      return applyTavernInjectedInChatPrompts(promptTemplateMessages, liveTavernHelperState)
     }
-    const budgeted = fitResponsePromptToBudget([
-      ...contextMessages,
-      { role: 'user', content: promptUserInput },
-    ], responseSettings, assemblePromptMessages)
-    const promptMessages = budgeted.messages
+    const buildBudgetedPrompt = (): ReturnType<typeof fitResponsePromptToBudget> =>
+      fitResponsePromptToBudget([
+        ...contextMessages,
+        { role: 'user', content: promptUserInput },
+      ], responseSettings, assemblePromptMessages)
+    let budgeted = buildBudgetedPrompt()
+    let promptMessages = budgeted.messages
+
+    // These are the two prompt-manager hooks that ST emits after its prompt
+    // tree has been combined and after the provider request data has been
+    // prepared. The iframe event may update Tavern Helper injections; refresh
+    // the session snapshot and assemble again so the hook affects this same
+    // request without creating another model call.
+    if (ctx.onGenerationEvent !== undefined) {
+      const combinedPrompt = promptMessages.map(message => `${message.role}: ${message.content}`).join('\n\n')
+      await ctx.onGenerationEvent('generate_after_combine_prompts', [
+        { prompt: combinedPrompt, dryRun: false },
+      ])
+      refreshLiveTavernHelperState()
+      budgeted = buildBudgetedPrompt()
+      promptMessages = budgeted.messages
+
+      await ctx.onGenerationEvent('generate_after_data', [
+        { prompt: promptMessages },
+        false,
+      ])
+      refreshLiveTavernHelperState()
+      budgeted = buildBudgetedPrompt()
+      promptMessages = budgeted.messages
+    }
 
     // 3. Call the LLM. Plain text — no response_format.
     const maxTokens = responseMaxTokens(responseSettings)
