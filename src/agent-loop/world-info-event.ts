@@ -96,6 +96,41 @@ function worldName(entry: Pick<WorldbookEntry, 'path' | 'sourceBookId'>): string
   return separator > 0 ? entry.path.slice(0, separator) : entry.path
 }
 
+function worldInfoBookAliases(entry: WorldbookEntry): ReadonlySet<string> {
+  const aliases = new Set<string>()
+  const source = entry.sourceBookId?.trim()
+  if (source !== undefined && source.length > 0) {
+    aliases.add(source)
+    const separator = source.indexOf(':')
+    if (separator >= 0 && separator + 1 < source.length) aliases.add(source.slice(separator + 1))
+  }
+  const parts = entry.path.split('/').filter(Boolean)
+  if (parts.length > 0) aliases.add(parts[0] ?? '')
+  if (parts.length > 1) aliases.add(parts[1] ?? '')
+  aliases.delete('')
+  return aliases
+}
+
+/** Resolve the official Tavern `{ world, uid }` identity to this store's
+ * canonical path. Imported cards expose a source uid while older fixtures
+ * and helper entries may encode it in the canonical path itself. */
+export function resolveWorldInfoEntryPath(
+  worldbook: { list(): readonly WorldbookEntry[] },
+  world: string | undefined,
+  uid: string | number | undefined,
+): string | null {
+  const uidText = uid === undefined || uid === null ? '' : String(uid).trim()
+  if (uidText.length === 0) return null
+  const worldText = typeof world === 'string' ? world.trim() : ''
+  return worldbook.list().find(entry => {
+    if (worldText.length > 0 && !worldInfoBookAliases(entry).has(worldText)) return false
+    if (entry.sourceUid !== undefined && entry.sourceUid === uidText) return true
+    return entry.path === uidText
+      || entry.path.endsWith(`/${uidText}`)
+      || entry.path.endsWith(`/${uidText}.md`)
+  })?.path ?? null
+}
+
 /** Convert one resolved match using authoritative Store metadata. */
 export function toWorldInfoActivatedEntry(
   match: WorldInfoEventMatch,

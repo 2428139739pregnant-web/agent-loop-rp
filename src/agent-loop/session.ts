@@ -48,6 +48,8 @@ export interface WorldbookEntry {
   path: string
   /** Stable source-book identity used for per-book ST token budgets. */
   sourceBookId?: string
+  /** Original Tavern uid/source id, when the imported source exposes one. */
+  sourceUid?: string
   /** Imported character/worldbook `token_budget`; undefined means no source cap. */
   sourceBookTokenBudget?: number
   /** ST comment/memo; extension directives are commonly stored here. */

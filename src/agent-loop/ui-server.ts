@@ -108,6 +108,7 @@ import {
   buildWorldInfoActivatedEntries,
   buildWorldInfoEntriesLoadedEvent,
   buildWorldInfoScanDoneEvent,
+  resolveWorldInfoEntryPath,
 } from './world-info-event.ts'
 import { tavernHelperWorldbookMetadata } from './worldbook-position.ts'
 import {
@@ -2960,8 +2961,13 @@ async function handleActivateWorldInfoForGeneration(
 ): Promise<void> {
   if (!state.sessionRecords.has(id)) return sendError(res, 404, `session not found: ${id}`)
   const payload = parseJsonBody(await readBody(req, 64 * 1024))
-  const path = typeof payload?.path === 'string' ? payload.path.trim() : ''
-  if (path.length === 0 || path.length > 1024) return sendError(res, 400, 'world info path is invalid')
+  const requestedPath = typeof payload?.path === 'string' ? payload.path.trim() : ''
+  const world = typeof payload?.world === 'string' ? payload.world.trim() : undefined
+  const uid = typeof payload?.uid === 'string' || typeof payload?.uid === 'number' ? payload.uid : undefined
+  const path = requestedPath.length > 0
+    ? requestedPath
+    : resolveWorldInfoEntryPath(state.worldbook, world, uid) ?? ''
+  if (path.length === 0 || path.length > 1024) return sendError(res, 400, 'world info identity is invalid')
   const entry = state.worldbook.list().find(candidate => candidate.path === path)
   if (entry === undefined) return sendJson(res, 200, { activated: false, path })
   const force = payload?.force === true
@@ -5538,6 +5544,7 @@ function lorebookEntryToWorldbookEntry(
   const displayName = e.name ?? `(未命名 ${e.sourceId})`
   return {
     path: `${charName}/${displayName}`,
+    sourceUid: e.sourceId,
     ...(recursion.sourceBookId === undefined ? {} : { sourceBookId: recursion.sourceBookId }),
     ...(recursion.sourceBookTokenBudget === undefined ? {} : { sourceBookTokenBudget: recursion.sourceBookTokenBudget }),
     ...(e.comment === undefined && e.name === undefined ? {} : { comment: e.comment ?? e.name }),
@@ -5611,6 +5618,8 @@ function tavernHelperWorldbookEntryToWorldbookEntry(bookName: string, entry: Tav
   const matchCreatorNotes = extraMatchFlag('match_creator_notes')
   return {
     path,
+    sourceBookId: `tavern-helper:${bookName}`,
+    sourceUid: String(entry.uid),
     comment: entry.name,
     keywords: [...entry.strategy.keys],
     order: entry.position.order,

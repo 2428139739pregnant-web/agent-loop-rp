@@ -7,6 +7,7 @@
 - 补齐 `WORLDINFO_ENTRIES_LOADED`：卡片 iframe 首次加载和 Tavern Helper 状态同步后都能收到当前合并世界书的 `globalLore`、`characterLore`、`chatLore`、`personaLore` 四类投影；不增加 LLM 调用。
 - 补齐 `WORLDINFO_FORCE_ACTIVATE`：卡片或酒馆助手通过事件传入原生 `{ world, uid }` 条目时，会解析为当前合并世界书的 canonical path，并加入当前生成轮的强制激活集合；不增加 LLM 调用。
 - 修正 `WORLDINFO_FORCE_ACTIVATE` 的底层入口：`_th_impl.eventEmit` 与公共 `eventEmit` 使用同一条宿主桥，避免插件从内部实现入口调用时绕过激活。
+- 扩展 `WORLDINFO_FORCE_ACTIVATE` 的身份解析：角色卡和独立世界书保留原始 `sourceUid`，宿主支持跨合并 WorldbookStore 解析 `{ world, uid }`，不再只依赖 Tavern Helper 可列出的世界书。
 - 对齐酒馆 World Info 扫描生命周期：每轮 resolved World Info 完成后发送 `WORLDINFO_SCAN_DONE`，并在卡片 iframe 内把 JSON-safe 的激活条目恢复为插件预期的 `Map`；不增加 LLM 调用。
 - 修复模型面板渲染回归：全局后处理/MVU 设置加载不再引用不存在的 `currentSessionId`，切换到“模型”菜单时不会再触发 `ReferenceError`。
 - 对齐 Prompt Template 与 Tavern Helper 的本轮 World Info 动态激活：`activewi()`/`activateWorldInfoByKeywords()` 会把命中的完整条目加入当前 response prompt；iframe 调用经宿主 RPC 进入同一个 generation-scoped activation 集合，`getEnabledWorldInfoEntries()` 支持官方来源开关。激活集合只在本轮存在，不写入持久世界书、不污染重 roll，也不增加 LLM 调用。

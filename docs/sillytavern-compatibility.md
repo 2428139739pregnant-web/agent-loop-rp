@@ -48,7 +48,7 @@ It also awaits `WORLDINFO_SCAN_DONE` immediately before `WORLD_INFO_ACTIVATED`. 
 
 `WORLDINFO_ENTRIES_LOADED` is emitted after the card iframe has loaded and whenever its Session snapshot is refreshed. The host projects the active merged store into the official `globalLore`/`characterLore`/`chatLore`/`personaLore` buckets using the source-book prefix; this keeps card-side World Info caches synchronized after helper book replacement or rebinding.
 
-`WORLDINFO_FORCE_ACTIVATE` is also bridged in the iframe runtime. When a card or helper emits raw Tavern entries (including the official `{ world, uid }` shape), the bridge resolves them against the merged worldbook and records the canonical paths for the current generation. This mirrors Tavern's host-side listener without persisting the activation into later turns.
+`WORLDINFO_FORCE_ACTIVATE` is also bridged in the iframe runtime. When a card or helper emits raw Tavern entries (including the official `{ world, uid }` shape), the bridge sends the identity to the host, which resolves it against the merged WorldbookStore and records the canonical path for the current generation. Imported card and external-book entries retain their original source uid for this lookup. This mirrors Tavern's host-side listener without persisting the activation into later turns.
 
 ### Standalone private generation options
 

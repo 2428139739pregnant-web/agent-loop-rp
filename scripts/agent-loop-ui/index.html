@@ -1915,25 +1915,24 @@
     if(typeof uid==='string'&&uid.trim().includes('/'))return uid.trim();
     return '';
   };
-  const __resolveWorldInfoEventPath=async entry=>{
-    const direct=__worldInfoEventPath(entry);
-    if(direct!=='')return direct;
-    if(!entry||typeof entry!=='object'||(entry.uid===undefined&&entry.id===undefined))return '';
-    const uid=String(entry.uid??entry.id);
-    const book=typeof entry.world==='string'&&entry.world.trim()!==''
+  const __worldInfoEventRequest=entry=>{
+    const path=__worldInfoEventPath(entry);
+    if(path!=='')return {path};
+    if(!entry||typeof entry!=='object')return null;
+    const uid=entry.uid??entry.id;
+    if(uid===undefined||uid===null||String(uid).trim()==='')return null;
+    const world=typeof entry.world==='string'&&entry.world.trim()!==''
       ?entry.world.trim()
       :typeof entry.worldbook==='string'&&entry.worldbook.trim()!==''
         ?entry.worldbook.trim()
         :typeof entry.book==='string'&&entry.book.trim()!==''?entry.book.trim():'';
-    const candidates=book!==''
-      ?await window.getWorldInfoData(book)
-      :await window.getEnabledWorldInfoEntries();
-    return candidates.find(candidate=>String(candidate?.uid)===uid)?.path||'';
+    return { ...(world===''?{}:{world}), uid };
   };
   __relayWorldInfoForceActivate=async rawArgs=>{
     const entries=Array.isArray(rawArgs?.[0])?rawArgs[0]:rawArgs;
-    const paths=await Promise.all((Array.isArray(entries)?entries:[]).map(__resolveWorldInfoEventPath));
-    await Promise.all([...new Set(paths.filter(Boolean))].map(path=>__rpc('activate-world-info',{path,force:true})));
+    const requests=(Array.isArray(entries)?entries:[]).map(__worldInfoEventRequest).filter(Boolean);
+    const unique=new Map(requests.map(request=>[JSON.stringify(request),request]));
+    await Promise.all([...unique.values()].map(request=>__rpc('activate-world-info',{...request,force:true})));
   };
   window.selectActivatedEntries=(entries,keywords,condition={})=>{const text=(Array.isArray(keywords)?keywords:[keywords]).map(value=>String(value??'')).join(String.fromCharCode(10)).toLocaleLowerCase();const matches=entry=>{if(!entry||typeof entry!=='object')return false;if(condition.constant!==undefined&&Boolean(entry.constant)!==Boolean(condition.constant))return false;if(condition.disabled!==undefined&&Boolean(entry.disable)!==Boolean(condition.disabled))return false;if(condition.vectorized!==undefined&&Boolean(entry.vectorized)!==Boolean(condition.vectorized))return false;if(entry.disable===true&&condition.disabled!==true)return false;if(entry.constant===true)return true;const primary=Array.isArray(entry.key)?entry.key:[];if(!primary.some(key=>text.includes(String(key??'').toLocaleLowerCase())))return false;const secondary=Array.isArray(entry.keysecondary)?entry.keysecondary:[];if(!entry.selective||secondary.length===0)return true;const hit=secondary.map(key=>text.includes(String(key??'').toLocaleLowerCase()));const logic=Number(entry.selectiveLogic??0);return logic===1?!hit.every(Boolean):logic===2?!hit.some(Boolean):logic===3?hit.every(Boolean):hit.some(Boolean);};return (Array.isArray(entries)?entries:[]).filter(matches);};
   window.getWorldInfoActivatedData=async(name,keywords,condition={})=>window.selectActivatedEntries(await window.getWorldInfoData(name),keywords,condition);

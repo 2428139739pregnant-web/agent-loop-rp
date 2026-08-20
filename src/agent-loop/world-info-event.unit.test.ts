@@ -5,6 +5,7 @@ import {
   buildWorldInfoActivatedEntries,
   buildWorldInfoEntriesLoadedEvent,
   buildWorldInfoScanDoneEvent,
+  resolveWorldInfoEntryPath,
 } from './world-info-event.ts'
 
 test('WORLD_INFO_ACTIVATED projects green, constant, and forced entries with ST metadata', () => {
@@ -75,4 +76,17 @@ test('WORLDINFO_ENTRIES_LOADED groups merged books by their source prefix', () =
   assert.deepEqual(result.globalLore.map(entry => entry.uid), ['worldbook/b'])
   assert.deepEqual(result.chatLore.map(entry => entry.uid), ['chat/c'])
   assert.deepEqual(result.personaLore.map(entry => entry.uid), ['persona/d'])
+})
+
+test('WORLDINFO_FORCE_ACTIVATE resolves raw Tavern world and uid across merged sources', () => {
+  const store = new MemoryWorldbookStore([
+    { path: '角色/条目', sourceBookId: 'character:角色', sourceUid: 'card-7', keywords: [], order: 1, weight: 1, content: 'CARD' },
+    { path: '世界书/外部/条目', sourceBookId: 'worldbook:外部', sourceUid: 'external-3', keywords: [], order: 2, weight: 1, content: 'EXTERNAL' },
+    { path: '酒馆助手/插件书/9', sourceBookId: 'tavern-helper:插件书', sourceUid: '9', keywords: [], order: 3, weight: 1, content: 'HELPER' },
+  ])
+
+  assert.equal(resolveWorldInfoEntryPath(store, '角色', 'card-7'), '角色/条目')
+  assert.equal(resolveWorldInfoEntryPath(store, '外部', 'external-3'), '世界书/外部/条目')
+  assert.equal(resolveWorldInfoEntryPath(store, '插件书', 9), '酒馆助手/插件书/9')
+  assert.equal(resolveWorldInfoEntryPath(store, '不存在', 9), null)
 })

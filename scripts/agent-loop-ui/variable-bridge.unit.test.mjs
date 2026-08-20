@@ -208,13 +208,13 @@ test('WORLDINFO_FORCE_ACTIVATE bridges raw Tavern entries into the current gener
   assert.deepEqual(plain(observed), [[entry]])
   const request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
   assert.equal(request?.method, 'activate-world-info')
-  assert.deepEqual(plain(request?.payload), { path: '酒馆助手/helper-book/7', force: true })
+  assert.deepEqual(plain(request?.payload), { world: 'helper-book', uid: 7, force: true })
 
   const internalFrame = createFrame(null, { 'get-worldbook-names': ['helper-book'], 'get-worldbook': [entry] })
   await internalFrame.window._th_impl.eventEmit(internalFrame.window.tavern_events.WORLDINFO_FORCE_ACTIVATE, [entry])
   const internalRequest = messagesOf(internalFrame, 'agent-rp-card-rpc').at(-1)
   assert.equal(internalRequest?.method, 'activate-world-info')
-  assert.deepEqual(plain(internalRequest?.payload), { path: '酒馆助手/helper-book/7', force: true })
+  assert.deepEqual(plain(internalRequest?.payload), { world: 'helper-book', uid: 7, force: true })
 })
 
 test('SillyTavern chat metadata uses the canonical persistent mutation bridge', () => {
