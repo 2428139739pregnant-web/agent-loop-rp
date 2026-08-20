@@ -3680,7 +3680,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
     }
 
     // ─── Worldbooks panel (酒馆风格:按书分组) ────────────────────────────
-    function WorldbooksPanel(/** @type {{currentCharacterId: string|null, onWorldbookChange: () => void, onError: (e:string)=>void}} */ props) {
+    function WorldbooksPanel(/** @type {{currentCharacterId: string|null, onWorldbookChange: () => void, onWorldbookSettingsChange?: (settings: WorldbookSettingsView) => void, onError: (e:string)=>void}} */ props) {
       const fileRef = useRef(null)
       const [importedBooks, setImportedBooks] = useState(/** @type {WBBook[]} */([]))
       const [characterBook, setCharacterBook] = useState(/** @type {{name:string|null, entries: WBEntry[]}|null} */(null))
@@ -3751,6 +3751,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           setRecursive(r.recursive === true)
           setIncludeNames(r.includeNames !== false)
           setUseGroupScoring(r.useGroupScoring === true)
+          if (typeof props.onWorldbookSettingsChange === 'function') props.onWorldbookSettingsChange(r)
         } catch (err) { props.onError(String(err.message || err)) } finally { setSavingSettings(false) }
       }, [scanDepth, matchMode, budgetPercent, budgetCap, minActivations, minActivationsDepthMax, maxRecursionSteps, recursive, includeNames, useGroupScoring, props])
 
@@ -4359,6 +4360,14 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
         try { setHealth(await apiGet('/api/health')) } catch { /* */ }
       }, [])
 
+      const notifyWorldbookChange = useCallback(() => {
+        void refreshHealth()
+        if (currentSessionId !== null) void broadcastCardHostEvent(currentSessionId, 'worldinfo_updated')
+      }, [currentSessionId, refreshHealth])
+      const notifyWorldbookSettingsChange = useCallback(() => {
+        if (currentSessionId !== null) void broadcastCardHostEvent(currentSessionId, 'worldinfo_settings_updated')
+      }, [currentSessionId])
+
       const refreshCurrentUserName = useCallback(async () => {
         try {
           const personaState = await apiGet('/api/personas')
@@ -4861,7 +4870,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           : activeTool === 'persona'
               ? h(PersonaPanel, { onError: setError, onPersonaChange: refreshCurrentUserName })
               : activeTool === 'worldbooks'
-                ? h(WorldbooksPanel, { currentCharacterId, onWorldbookChange: refreshHealth, onError: setError })
+                ? h(WorldbooksPanel, { currentCharacterId, onWorldbookChange: notifyWorldbookChange, onWorldbookSettingsChange: notifyWorldbookSettingsChange, onError: setError })
                 : activeTool === 'regex'
                   ? h(RegexPanel, { onError: setError })
                   : activeTool === 'import'
