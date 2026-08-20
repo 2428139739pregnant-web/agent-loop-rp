@@ -1521,6 +1521,13 @@
   const __removeListener=(type,item)=>{const key=String(type);const list=__listeners.get(key)||[];const next=list.filter(candidate=>candidate!==item);if(next.length===0)__listeners.delete(key);else __listeners.set(key,next);};
   const __on=(type,fn,once=false,position='last')=>{if(typeof fn!=='function')throw new TypeError('event listener must be a function');const key=String(type);const list=__listeners.get(key)||[];const existing=list.find(item=>item.fn===fn);if(existing){if(position==='first'||position==='last'){const reordered=list.filter(item=>item!==existing);if(position==='first')reordered.unshift(existing);else reordered.push(existing);__listeners.set(key,reordered);}return existing.stop;};const item={fn,once,stop:null};const stop=()=>__removeListener(key,item);stop.stop=stop;item.stop=stop;if(position==='first')list.unshift(item);else list.push(item);__listeners.set(key,list);return stop;};
   const __emit=async(type,...args)=>{const key=String(type);for(const item of [...(__listeners.get(key)||[])]){if(item.once)__removeListener(key,item);try{await item.fn(...args);}catch(error){console.error('[agent-rp card event]',error);}}};
+  let __relayWorldInfoForceActivate=async()=>{};
+  const __eventEmit=async(type,...args)=>{
+    if(String(type)==='worldinfo_force_activate'){
+      try{await __relayWorldInfoForceActivate(args);}catch(error){console.error('[agent-rp world info force activate]',error);}
+    }
+    return __emit(type,...args);
+  };
   const __clearEvent=type=>__listeners.delete(String(type));
   const __clearListener=fn=>{for(const [key,list] of __listeners){const next=list.filter(item=>item.fn!==fn);if(next.length===0)__listeners.delete(key);else __listeners.set(key,next);}};
   const __post=(type,payload={})=>{try{window.parent.postMessage({type,id:__frameId,...payload},'*');}catch{} };
@@ -1757,7 +1764,7 @@
     eventClearEvent:__clearEvent,
     eventClearListener:__clearListener,
     eventClearAll:()=>__listeners.clear(),
-    eventEmit:__emit,
+    eventEmit:__eventEmit,
   });
   window.__agentRpCardFrameId=__frameId;
   window.__agentRpCardVariables=()=>__variables;
@@ -1776,7 +1783,7 @@
   window.eventOnce=(type,fn)=>__on(type,fn,true);
   window.eventMakeFirst=(type,fn)=>__on(type,fn,false,'first');
   window.eventMakeLast=(type,fn)=>__on(type,fn,false,'last');
-  window.eventEmit=(type,...args)=>__emit(type,...args);
+  window.eventEmit=__eventEmit;
   window.eventEmitAndWait=window.eventEmit;
   window.eventRemoveListener=(type,fn)=>{for(const item of [...(__listeners.get(String(type))||[])])if(item.fn===fn)__removeListener(type,item);};
   window.eventClearEvent=__clearEvent;
@@ -1895,6 +1902,39 @@
   window.getWorldInfoData=async name=>{const bookName=String(name||'');const entries=await window.getWorldbook(bookName);return (Array.isArray(entries)?entries:[]).map(entry=>__worldInfoData(entry,bookName));};
   window.getEnabledWorldInfoEntries=async(...args)=>{const [chara=true,global=true,persona=true,charaExtra=true,onlyExisting=true]=args;const names=await window.getWorldbookNames();const books=await Promise.all((Array.isArray(names)?names:[]).map(name=>window.getWorldInfoData(name)));return books.flat().filter(entry=>{const sourceType=String(entry?.sourceType||'');if(sourceType==='character')return chara!==false;if(sourceType==='global')return global!==false;if(sourceType==='persona')return persona!==false;if(sourceType==='character_extra')return charaExtra!==false;return onlyExisting!==false;});};
   const __activateWorldInfoForGeneration=async(entry,force=false)=>{const path=typeof entry?.path==='string'?entry.path:'';if(path==='')return entry;await __rpc('activate-world-info',{path,force:Boolean(force)});return entry;};
+  const __worldInfoEventPath=entry=>{
+    if(typeof entry==='string'){
+      const value=entry.trim();
+      return value.includes('/')?value:'';
+    }
+    if(!entry||typeof entry!=='object')return '';
+    for(const key of ['path','sourcePath']){
+      if(typeof entry[key]==='string'&&entry[key].trim()!=='')return entry[key].trim();
+    }
+    const uid=entry.uid??entry.id;
+    if(typeof uid==='string'&&uid.trim().includes('/'))return uid.trim();
+    return '';
+  };
+  const __resolveWorldInfoEventPath=async entry=>{
+    const direct=__worldInfoEventPath(entry);
+    if(direct!=='')return direct;
+    if(!entry||typeof entry!=='object'||(entry.uid===undefined&&entry.id===undefined))return '';
+    const uid=String(entry.uid??entry.id);
+    const book=typeof entry.world==='string'&&entry.world.trim()!==''
+      ?entry.world.trim()
+      :typeof entry.worldbook==='string'&&entry.worldbook.trim()!==''
+        ?entry.worldbook.trim()
+        :typeof entry.book==='string'&&entry.book.trim()!==''?entry.book.trim():'';
+    const candidates=book!==''
+      ?await window.getWorldInfoData(book)
+      :await window.getEnabledWorldInfoEntries();
+    return candidates.find(candidate=>String(candidate?.uid)===uid)?.path||'';
+  };
+  __relayWorldInfoForceActivate=async rawArgs=>{
+    const entries=Array.isArray(rawArgs?.[0])?rawArgs[0]:rawArgs;
+    const paths=await Promise.all((Array.isArray(entries)?entries:[]).map(__resolveWorldInfoEventPath));
+    await Promise.all([...new Set(paths.filter(Boolean))].map(path=>__rpc('activate-world-info',{path,force:true})));
+  };
   window.selectActivatedEntries=(entries,keywords,condition={})=>{const text=(Array.isArray(keywords)?keywords:[keywords]).map(value=>String(value??'')).join(String.fromCharCode(10)).toLocaleLowerCase();const matches=entry=>{if(!entry||typeof entry!=='object')return false;if(condition.constant!==undefined&&Boolean(entry.constant)!==Boolean(condition.constant))return false;if(condition.disabled!==undefined&&Boolean(entry.disable)!==Boolean(condition.disabled))return false;if(condition.vectorized!==undefined&&Boolean(entry.vectorized)!==Boolean(condition.vectorized))return false;if(entry.disable===true&&condition.disabled!==true)return false;if(entry.constant===true)return true;const primary=Array.isArray(entry.key)?entry.key:[];if(!primary.some(key=>text.includes(String(key??'').toLocaleLowerCase())))return false;const secondary=Array.isArray(entry.keysecondary)?entry.keysecondary:[];if(!entry.selective||secondary.length===0)return true;const hit=secondary.map(key=>text.includes(String(key??'').toLocaleLowerCase()));const logic=Number(entry.selectiveLogic??0);return logic===1?!hit.every(Boolean):logic===2?!hit.some(Boolean):logic===3?hit.every(Boolean):hit.some(Boolean);};return (Array.isArray(entries)?entries:[]).filter(matches);};
   window.getWorldInfoActivatedData=async(name,keywords,condition={})=>window.selectActivatedEntries(await window.getWorldInfoData(name),keywords,condition);
   window.activateWorldInfoByKeywords=async(keywords,condition={})=>{const entries=window.selectActivatedEntries(await window.getEnabledWorldInfoEntries(),keywords,condition);await Promise.all(entries.map(entry=>__activateWorldInfoForGeneration(entry,entry.disable===true)));return entries;};

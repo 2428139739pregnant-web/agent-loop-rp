@@ -189,6 +189,34 @@ test('Tavern Helper activewi records a generation-scoped host activation', async
   assert.equal(messagesOf(frame, 'agent-rp-card-rpc').at(-1)?.method, 'activate-world-info')
 })
 
+test('WORLDINFO_FORCE_ACTIVATE bridges raw Tavern entries into the current generation', async () => {
+  const entry = {
+    uid: 7,
+    world: 'helper-book',
+    name: 'Magic entry',
+    enabled: true,
+    strategy: { type: 'selective', keys: ['magic'], keys_secondary: { logic: 'and_any', keys: [] }, scan_depth: 'same_as_global' },
+    position: { type: 'after_character_definition', role: 'system', depth: 0, order: 1 },
+    content: 'MAGIC',
+  }
+  const frame = createFrame(null, { 'get-worldbook-names': ['helper-book'], 'get-worldbook': [entry] })
+  const observed = []
+  frame.window.eventOn(frame.window.tavern_events.WORLDINFO_FORCE_ACTIVATE, value => observed.push(value))
+
+  await frame.window.eventEmit(frame.window.tavern_events.WORLDINFO_FORCE_ACTIVATE, [entry])
+
+  assert.deepEqual(plain(observed), [[entry]])
+  const request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'activate-world-info')
+  assert.deepEqual(plain(request?.payload), { path: '酒馆助手/helper-book/7', force: true })
+
+  const internalFrame = createFrame(null, { 'get-worldbook-names': ['helper-book'], 'get-worldbook': [entry] })
+  await internalFrame.window._th_impl.eventEmit(internalFrame.window.tavern_events.WORLDINFO_FORCE_ACTIVATE, [entry])
+  const internalRequest = messagesOf(internalFrame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(internalRequest?.method, 'activate-world-info')
+  assert.deepEqual(plain(internalRequest?.payload), { path: '酒馆助手/helper-book/7', force: true })
+})
+
 test('SillyTavern chat metadata uses the canonical persistent mutation bridge', () => {
   const frame = createFrame()
   const context = frame.window.SillyTavern.getContext()
