@@ -1409,23 +1409,28 @@
       } catch { return '{}' }
     }
 
-    function buildCardFrameRuntime(frameId, mvuState, helperVariables, helperScriptTrees = {}, sessionId = null) {
+    function buildCardFrameRuntime(frameId, mvuState, helperVariables, helperScriptTrees = {}, sessionId = null, characterContext = null) {
       const frame = safeCardScriptJson(frameId)
       const chatId = safeCardScriptJson(sessionId ?? '')
       const variables = safeCardScriptJson(mvuState?.stat_data ? mvuState : { stat_data: mvuState || {} })
       const helper = safeCardScriptJson(helperVariables || {})
       const trees = safeCardScriptJson(helperScriptTrees || {})
+      const character = safeCardScriptJson(characterContext || {})
       return `(function(){
   const __frameId=${frame};
   const __chatId=${chatId};
   let __variables=${variables};
   let __helperVariables=${helper};
+  let __characterContext=${character};
   let __chatMessageCache=[];
   const __listeners=new Map();
   const __parent=window.parent&&window.parent!==window?window.parent:null;
   try{window.name=__frameId;if(window.frameElement&&window.frameElement.id!==__frameId)window.frameElement.id=__frameId;}catch{}
   try{const __shared=__parent?.__agentRpSharedLibraries||{};if(__shared.z){window.z=__shared.z;globalThis.z=__shared.z;}if(__shared.YAML){window.YAML=__shared.YAML;globalThis.YAML=__shared.YAML;}if(__shared.Vue){window.Vue=__shared.Vue;globalThis.Vue=__shared.Vue;}if(__shared._){window._=__shared._;globalThis._=__shared._;}}catch{}
   const __clone=value=>{try{return JSON.parse(JSON.stringify(value));}catch{return value;}};
+  const __isRecord=value=>Boolean(value&&typeof value==='object'&&!Array.isArray(value));
+  const __rawCharacter=()=>__isRecord(__characterContext?.rawCharacter)?__characterContext.rawCharacter:null;
+  const __rawCharacterData=()=>{const raw=__rawCharacter();if(__isRecord(raw?.data))return raw.data;return __isRecord(__characterContext?.characterData)?__characterContext.characterData:__isRecord(__characterContext?.character)?(__characterContext.character.data||__characterContext.character):{};};
   const __chatMessageId=(message,index)=>Number.isSafeInteger(message?.message_id)?message.message_id:index;
   const __normalizeCachedChatMessage=(message,index)=>{
     const source=message&&typeof message==='object'?message:{};
@@ -1989,7 +1994,15 @@
     const __ejsWorldInfo=async(...args)=>{let book='';let title;let data={};if(args.length>=2){book=String(args[0]??'');title=args[1];data=args[2]||{};}else{title=args[0];data=args[1]||{};}void data;if(typeof window.getWorldbook!=='function')return '';let entries=[];try{entries=await window.getWorldbook(book);}catch{return '';}if(!Array.isArray(entries))return '';const hit=entries.find(entry=>{if(entry?.uid!==undefined&&String(entry.uid)===String(title))return true;if(entry?.sourceId!==undefined&&String(entry.sourceId)===String(title))return true;if(title instanceof RegExp){title.lastIndex=0;return title.test(String(entry?.comment??entry?.name??''));}return String(entry?.comment??entry?.name??'')===String(title);});return String(hit?.content??'');};
     const __ejsContext=async(additional={},lastMessageId=65535)=>{const st=window.SillyTavern?.getContext?.()||window.SillyTavern||{};const all=__ejsChat();const limit=Number(lastMessageId);const chat=Number.isSafeInteger(limit)&&limit<65535?all.filter((message,index)=>Number(message?.message_id??index)<=limit):all;const variables=typeof window.getAllVariables==='function'?window.getAllVariables():{};const scope={char:String(st.name2||window.name2||''),user:String(st.name1||'User'),charName:String(st.name2||window.name2||''),userName:String(st.name1||'User'),runType:'generate',chat,messages:chat.map(__ejsMessageText),variables,stat_data:variables?.stat_data??variables,lastMessageId:chat.length-1,lastUserMessageId:chat.map((message,index)=>message?.role==='user'||message?.is_user===true?index:-1).filter(index=>index>=0).at(-1)??-1,lastCharMessageId:chat.map((message,index)=>message?.role==='assistant'||(!message?.is_user&&!message?.is_system)?index:-1).filter(index=>index>=0).at(-1)??-1,getvar:__ejsGetVariable,getVariable:__ejsGetVariable,getChatMessage:__ejsGetMessage,getChatMessages:__ejsGetMessages,getwi:__ejsWorldInfo,getWorldInfo:__ejsWorldInfo,getvarScope:()=>variables,setvar:__ejsWriteVariable,incvar:(path,value=1)=>__ejsWriteVariable(path,Number(__ejsGetVariable(path,0))+Number(value)),decvar:(path,value=1)=>__ejsWriteVariable(path,Number(__ejsGetVariable(path,0))-Number(value)),SillyTavern:st,TavernHelper:window.TavernHelper,Mvu:window.Mvu,_:window._,$:window.$,jQuery:window.jQuery,toastr:window.toastr,YAML:window.YAML};Object.assign(scope,additional&&typeof additional==='object'?additional:{});Object.defineProperty(scope,'__agentRpPrepared',{value:true,enumerable:false});return scope;};
     const __ejsEval=async(content,data={},options={})=>{void options;const scope=data&&data.__agentRpPrepared?data:await __ejsContext(data);scope.__ejsEscape=__ejsEscape;return __ejsCompile(content)(scope);};
-    window.EjsTemplate={evalTemplate:__ejsEval,render:__ejsEval,prepareContext:__ejsContext,compile:template=>{const compiled=__ejsCompile(template);return async(data={})=>{const scope=data&&data.__agentRpPrepared?data:await __ejsContext(data);scope.__ejsEscape=__ejsEscape;return compiled(scope);};},compileTemplate:async template=>window.EjsTemplate.compile(template),getSyntaxErrorInfo:async content=>{try{__ejsCompile(content);return '';}catch(error){return String(error?.message||error);}},getvar:__ejsGetVariable,getwi:__ejsWorldInfo,getWorldInfo:__ejsWorldInfo,saveVariables:async()=>undefined};
+     window.EjsTemplate={evalTemplate:__ejsEval,render:__ejsEval,prepareContext:__ejsContext,compile:template=>{const compiled=__ejsCompile(template);return async(data={})=>{const scope=data&&data.__agentRpPrepared?data:await __ejsContext(data);scope.__ejsEscape=__ejsEscape;return compiled(scope);};},compileTemplate:async template=>window.EjsTemplate.compile(template),getSyntaxErrorInfo:async content=>{try{__ejsCompile(content);return '';}catch(error){return String(error?.message||error);}},getvar:__ejsGetVariable,getwi:__ejsWorldInfo,getWorldInfo:__ejsWorldInfo,saveVariables:async()=>undefined};
+     const __characterResourceData=value=>{if(!value||typeof value!=='object'||Array.isArray(value))return null;const data=value.data;return data&&typeof data==='object'&&!Array.isArray(data)?data:value;};
+     const __characterResourceByName=name=>{const selector=String(name??'').trim();const current=__characterResourceData(__rawCharacterData());if(!selector||selector===String(__stContext.name2||'')||selector===String(current?.name||''))return current;const found=(Array.isArray(__stContext.characters)?__stContext.characters:[]).find(item=>String(item?.name||'')===selector||String(item?.id||'')===selector);return __characterResourceData(found);};
+     const __getCharData=async(name=__stContext.name2)=>__clone(__characterResourceByName(name));
+     window.getCharData=__getCharData;
+     window.RawCharacter=__clone(__rawCharacter());
+      window.getchar=async(name=__stContext.name2,template,data={})=>{const characterData=await __getCharData(name);if(!characterData)return '';const source=typeof template==='string'?template:'<% if (name) { %><<%- name %>><% if (system_prompt) { %>System: <%- system_prompt %><% } %>name: <%- name %><% if (personality) { %>personality: <%- personality %><% } %><% if (description) { %>description: <%- description %><% } %><% if (message_example) { %>example:<%- message_example %><% } %><% if (depth_prompt) { %>System: <%- depth_prompt %><% } %></<%- name %>>';const context=await window.EjsTemplate.prepareContext(Object.assign({},characterData&&typeof characterData==='object'?characterData:{},data&&typeof data==='object'?data:{},{char:String(characterData?.name||name||__stContext.name2||'')}));const result=await window.EjsTemplate.evalTemplate(source,context);return result?.ok===false?'':String(result?.text??result??'');};
+      window.getChara=window.getchar;
+      window.generateRaw=async(config={})=>{const result=await __rpc('generate-raw',__clone(config||{}));return String(result?.content??result?.text??'');};
   }
 if(!window.showdown)window.showdown={Converter:class{constructor(options={}){this.options=options;}makeHtml(value){return String(value??'').replace(/&/gu,'&amp;').replace(/</gu,'&lt;').replace(/>/gu,'&gt;').replace(/\\*\\*(.+?)\\*\\*/gu,'<strong>$1</strong>').replace(/\\*(.+?)\\*/gu,'<em>$1</em>').replace(/\\n/gu,'<br>');}}};
   const __events={VARIABLE_INITIALIZED:'mag_variable_initialized',VARIABLE_UPDATE_STARTED:'mag_variable_update_started',VARIABLE_UPDATE_ENDED:'mag_variable_update_ended'};
@@ -1997,8 +2010,12 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
   window.TavernHelper=Object.assign({},__parent?.TavernHelper||{}, {getAllVariables:()=>__getVariables({type:'chat'}),getVariable:(path,fallback)=>__get(__getVariables({type:'chat'}),path,fallback),getVariables:__getVariables,replaceVariables:__replaceVariables,updateVariablesWith:__updateVariablesWith,insertOrAssignVariables:__insertOrAssignVariables,insertVariables:__insertVariables,deleteVariable:__deleteVariable,getScriptTrees:__getScriptTrees,replaceScriptTrees:__replaceScriptTrees,updateScriptTreesWith:__updateScriptTreesWith,injectPrompts:__injectPrompts,uninjectPrompts:__uninjectPrompts,getChatMessages:window.getChatMessages,setChatMessage:window.setChatMessage,setChatMessages:window.setChatMessages,createChatMessages:window.createChatMessages,deleteChatMessages:window.deleteChatMessages,rotateChatMessages:window.rotateChatMessages,setChatHidden:window.setChatHidden,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,rebindGlobalWorldbooks:window.rebindGlobalWorldbooks,getCharWorldbookNames:(_characterName='current')=>window.getCharWorldbookNames(),rebindCharWorldbooks:(_characterName='current',books={})=>window.rebindCharWorldbooks(books?.primary??null,Array.isArray(books?.additional)?books.additional:[]),getChatWorldbookName:(_chatName='current')=>window.getChatWorldbookName(),rebindChatWorldbook:(_chatName='current',name=null)=>window.rebindChatWorldbook(name),getWorldbook:window.getWorldbook,replaceWorldbook:window.replaceWorldbook,updateWorldbookWith:window.updateWorldbookWith,getTavernHelperVersion:window.getTavernHelperVersion,getLastMessageId:window.getLastMessageId,eventOn:window.eventOn,eventOnce:window.eventOnce,eventMakeFirst:window.eventMakeFirst,eventMakeLast:window.eventMakeLast,eventRemoveListener:window.eventRemoveListener,eventClearEvent:window.eventClearEvent,eventClearListener:window.eventClearListener,eventClearAll:window.eventClearAll,eventEmit:window.eventEmit,waitGlobalInitialized:window.waitGlobalInitialized});
   const __stEventSource={on:window.eventOn,once:window.eventOnce,makeFirst:window.eventMakeFirst,makeLast:window.eventMakeLast,removeListener:window.eventRemoveListener,emit:window.eventEmit,emitAndWait:window.eventEmit};
   const __updateChatMetadata=(values,reset=false)=>{const next=values&&typeof values==='object'&&!Array.isArray(values)?__clone(values):{};__stContext.chatMetadata=reset?next:Object.assign(__stContext.chatMetadata||{},next);try{window.SillyTavern.chatMetadata=__stContext.chatMetadata}catch{}void __rpc('tavern-helper-mutation',{format:0,operation:'update-chat-metadata',values:next,reset:Boolean(reset)});return __clone(__stContext.chatMetadata);};
-  const __stContext={chat:[],characters:[],name1:'',name2:'',characterId:0,groupId:null,chatId:__chatId,eventSource:__stEventSource,eventTypes:window.tavern_events,extensionPrompts:{},chatMetadata:{},maxContext:0,getCurrentChatId:()=>__chatId,getCurrentMessageId:window.getCurrentMessageId,getLastMessageId:window.getLastMessageId,getChatMessages:window.getChatMessages,setChatMessage:window.setChatMessage,setChatMessages:window.setChatMessages,createChatMessages:window.createChatMessages,deleteChatMessages:window.deleteChatMessages,rotateChatMessages:window.rotateChatMessages,getVariables:window.getVariables,getVariable:window.getVariable,replaceVariables:window.replaceVariables,updateChatMetadata:__updateChatMetadata,getWorldbook:window.getWorldbook,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,injectPrompts:window.injectPrompts,uninjectPrompts:window.uninjectPrompts,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),saveChat:async()=>undefined,saveSettingsDebounced:async()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined};
-  window.SillyTavern=Object.assign({},__parent?.SillyTavern||{}, {eventSource:__stEventSource,eventTypes:window.tavern_events,getContext:()=>__stContext,chat:__stContext.chat,characters:__stContext.characters,characterId:0,name2:'',chatMetadata:__stContext.chatMetadata,extensionSettings:{},chatCompletionSettings:{},getCurrentChatId:()=>__chatId,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),updateChatMetadata:__updateChatMetadata,saveChat:async()=>undefined,saveSettingsDebounced:async()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined});
+   const __initialCharacter=__clone(__characterContext?.character||{});
+   const __initialCharacters=__initialCharacter&&typeof __initialCharacter==='object'&&Object.keys(__initialCharacter).length?[__initialCharacter]:[];
+   const __stContext={chat:[],characters:__initialCharacters,character:__initialCharacter,rawCharacter:__clone(__rawCharacter()),characterData:__clone(__rawCharacterData()),name1:String(__characterContext?.name1||''),name2:String(__characterContext?.name2||__initialCharacter?.name||''),characterId:__characterContext?.characterId||0,groupId:null,chatId:__chatId,eventSource:__stEventSource,eventTypes:window.tavern_events,extensionPrompts:{},chatMetadata:{},maxContext:0,getCurrentChatId:()=>__chatId,getCurrentMessageId:window.getCurrentMessageId,getLastMessageId:window.getLastMessageId,getChatMessages:window.getChatMessages,setChatMessage:window.setChatMessage,setChatMessages:window.setChatMessages,createChatMessages:window.createChatMessages,deleteChatMessages:window.deleteChatMessages,rotateChatMessages:window.rotateChatMessages,getVariables:window.getVariables,getVariable:window.getVariable,replaceVariables:window.replaceVariables,updateChatMetadata:__updateChatMetadata,getWorldbook:window.getWorldbook,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,injectPrompts:window.injectPrompts,uninjectPrompts:window.uninjectPrompts,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),saveChat:async()=>undefined,saveSettingsDebounced:async()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined};
+   window.SillyTavern=Object.assign({},__parent?.SillyTavern||{}, {eventSource:__stEventSource,eventTypes:window.tavern_events,getContext:()=>__stContext,chat:__stContext.chat,characters:__stContext.characters,characterId:0,name2:'',chatMetadata:__stContext.chatMetadata,extensionSettings:{},chatCompletionSettings:{},getCurrentChatId:()=>__chatId,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),updateChatMetadata:__updateChatMetadata,saveChat:async()=>undefined,saveSettingsDebounced:async()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined});
+   window.SillyTavern.character=__stContext.character;window.SillyTavern.RawCharacter=__stContext.rawCharacter;window.RawCharacter=__stContext.rawCharacter;
+   window.SillyTavern.generateRaw=window.generateRaw;
   // The upstream helper does not document a stable Context object shape.
   // Keep this as a read-only projection, rather than inventing a second state
   // store: every getter reads the same local snapshot used by the public APIs.
@@ -2022,7 +2039,8 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
   window.SillyTavern.setExtensionPrompt=__setExtensionPrompt;
   window.SillyTavern.extensionPrompts=__stContext.extensionPrompts;
   if(!window.$){window.$=__query;window.jQuery=__query;}
-  // These APIs deliberately use a remote, jQuery-like handle.  Card iframes
+   window.TavernHelper.getCharData=window.getCharData;window.TavernHelper.getchar=window.getchar;window.TavernHelper.getChara=window.getChara;window.TavernHelper.generateRaw=window.generateRaw;
+   // These APIs deliberately use a remote, jQuery-like handle.  Card iframes
   // never receive a live parent-DOM node, but can still inspect and mutate the
   // displayed floor through the host's existing render pipeline.
   const __displayedText=message=>String(message?.message??message?.mes??message?.content??'');
@@ -2084,12 +2102,14 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
     if(event.data.type==='agent-rp-card-helper-state'){__applyScopeSnapshot(event.data.scopes,event.data.mvuState,event.data.scripts);}
     if(event.data.type==='agent-rp-card-context'){
       const context=event.data.context&&typeof event.data.context==='object'?event.data.context:{};
-      for(const key of ['name1','name2','characterId','chatId','chatMetadata','extensionPrompts','character'])if(context[key]!==undefined)__stContext[key]=__clone(context[key]);
+       for(const key of ['name1','name2','characterId','agentCharacterId','chatId','chatMetadata','extensionPrompts','character','characterData','rawCharacter'])if(context[key]!==undefined)__stContext[key]=__clone(context[key]);
+       if(context.rawCharacter!==undefined){__characterContext.rawCharacter=__clone(context.rawCharacter);window.RawCharacter=__clone(context.rawCharacter);window.SillyTavern.RawCharacter=__clone(context.rawCharacter);}
+       if(context.characterData!==undefined)__characterContext.characterData=__clone(context.characterData);
       if(context.chatMetadata!==undefined)window.SillyTavern.chatMetadata=__stContext.chatMetadata;
       if(context.extensionPrompts!==undefined)window.SillyTavern.extensionPrompts=__stContext.extensionPrompts;
       if(Array.isArray(context.chat)){__stContext.chat=__clone(context.chat);window.SillyTavern.chat=__stContext.chat;__setChatMessageCache(context.chat);}
       if(Array.isArray(context.characters)){__stContext.characters=__clone(context.characters);window.SillyTavern.characters=__stContext.characters;}
-      window.SillyTavern.name1=__stContext.name1||'';window.SillyTavern.name2=__stContext.name2||'';window.SillyTavern.characterId=__stContext.characterId||0;
+       window.SillyTavern.character=__stContext.character||{};window.SillyTavern.characters=__stContext.characters||[];window.SillyTavern.name1=__stContext.name1||'';window.SillyTavern.name2=__stContext.name2||'';window.SillyTavern.characterId=__stContext.characterId||0;
       return;
     }
     if(event.data.type==='agent-rp-card-theme'&&event.data.theme)document.documentElement.dataset.theme=event.data.theme;
@@ -2098,7 +2118,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
 })();`
     }
 
-    function buildCardFrameDocument(source, frameId, mvuState = null, helperVariables = {}, helperScripts = [], helperScriptTrees = {}, sessionId = null) {
+    function buildCardFrameDocument(source, frameId, mvuState = null, helperVariables = {}, helperScripts = [], helperScriptTrees = {}, sessionId = null, characterContext = null) {
       let value = replaceCardViewportMinHeight(normalizeCardFrontendSource(source))
         .replace(/<(iframe|object|embed|base)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, '')
         .replace(/<(iframe|object|embed|base)\b[^>]*\/?>/giu, '')
@@ -2123,7 +2143,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           if (item && /^\s*javascript:/iu.test(item)) node.removeAttribute(attr)
         }
       }
-      const runtime = buildCardFrameRuntime(frameId, mvuState, helperVariables, helperScriptTrees, sessionId)
+      const runtime = buildCardFrameRuntime(frameId, mvuState, helperVariables, helperScriptTrees, sessionId, characterContext)
       // Do not inject third-party runtime scripts into the card document.
       // The host already provides local dependency fallbacks and remote
       // parser-blocking scripts can replace the bridge globals/protocol.
@@ -2284,10 +2304,35 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       onChatRefreshRef.current = onChatRefresh
       onDisplayedMessageRef.current = onDisplayedMessage
       const helperScripts = character?.frontend?.tavernHelperScripts || []
+      const rawCharacter = character?.raw && typeof character.raw === 'object' && !Array.isArray(character.raw)
+        ? character.raw : null
+      const rawCharacterData = rawCharacter?.data && typeof rawCharacter.data === 'object' && !Array.isArray(rawCharacter.data)
+        ? rawCharacter.data : null
+      // SillyTavern exposes the normalized card data as `character` and the
+      // lossless V2/V3 envelope as `RawCharacter`. Keep both views in the
+      // iframe bootstrap so card scripts do not race the first postMessage.
+      const characterProjection = {
+        ...(rawCharacterData || {}),
+        name: character?.name || rawCharacterData?.name || '',
+        description: character?.persona || rawCharacterData?.description || '',
+        personality: character?.style || rawCharacterData?.personality || '',
+        scenario: character?.worldview || rawCharacterData?.scenario || '',
+        data: rawCharacterData || {},
+      }
+      const initialCharacterContext = {
+        rawCharacter,
+        characterData: rawCharacterData || characterProjection,
+        character: characterProjection,
+        characters: [characterProjection],
+        characterId: 0,
+        agentCharacterId: characterId || character?.id || '',
+        name1: userName,
+        name2: characterProjection.name,
+      }
       const [height, setHeight] = useState(1)
       const frameDocument = useMemo(
-        () => buildCardFrameDocument(source, frameId.current, initialMvuState.current, character?.frontend?.tavernHelperVariables || {}, helperScripts, character?.frontend?.tavernHelperScriptTrees || {}, sessionId),
-        [source, character?.frontend?.tavernHelperVariables, helperScripts, character?.frontend?.tavernHelperScriptTrees, sessionId],
+        () => buildCardFrameDocument(source, frameId.current, initialMvuState.current, character?.frontend?.tavernHelperVariables || {}, helperScripts, character?.frontend?.tavernHelperScriptTrees || {}, sessionId, initialCharacterContext),
+        [source, character?.frontend?.tavernHelperVariables, helperScripts, character?.frontend?.tavernHelperScriptTrees, character?.raw, characterId, userName, sessionId],
       )
       const syncFrameState = () => {
         const frame = frameRef.current
@@ -2320,12 +2365,6 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
               ...(Array.isArray(message.swipe_info) ? { swipe_info: message.swipe_info } : {}),
             }))
             const helperState = helperSnapshot.tavernHelperState || {}
-            const characterProjection = {
-              name: character?.name || '',
-              description: character?.persona || '',
-              personality: character?.style || '',
-              scenario: character?.worldview || '',
-            }
             frame.contentWindow?.postMessage({
               type: 'agent-rp-card-context',
               id: frameId.current,
@@ -2333,7 +2372,10 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                 chat: messages,
                 characters: [characterProjection],
                 character: characterProjection,
-                characterId: characterId || character?.id || '',
+                characterId: 0,
+                agentCharacterId: characterId || character?.id || '',
+                rawCharacter,
+                characterData: rawCharacterData || characterProjection,
                 name1: userName,
                 name2: character?.name || '',
                 chatId: activeSessionId,
@@ -2501,6 +2543,12 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                 if (hideState === 'hidden') selected = selected.filter(message => message.is_hidden)
                 if (hideState === 'unhidden') selected = selected.filter(message => !message.is_hidden)
                 return options.include_swipes === true ? selected : selected.map(({swipe_id,swipes,swipes_data,swipes_info,...message})=>message)
+              }
+              if (data.method === 'generate-raw') {
+                // This is a private auxiliary completion.  The host route
+                // validates ordered_prompts and calls the provider once; it
+                // never enters the normal Agent RP loop or appends history.
+                return apiPost(`/api/sessions/${encodeURIComponent(activeSessionId)}/tavern-helper/generate-raw`, data.payload || {})
               }
               const state = data.method === 'get-worldbook' || data.method === 'get-char-worldbook-names' || data.method === 'get-worldbook-names'
                 || data.method === 'get-global-worldbook-names' || data.method === 'get-chat-worldbook-name'

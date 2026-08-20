@@ -17,7 +17,7 @@ function loadFrameRuntime() {
   return vm.runInNewContext(`(${source})`, { safeCardScriptJson })
 }
 
-function createFrame() {
+function createFrame(characterContext = null) {
   const listeners = new Map()
   const messages = []
   const parent = {
@@ -53,7 +53,7 @@ function createFrame() {
   }
   const context = vm.createContext({ window, console, setTimeout, clearTimeout })
   const buildCardFrameRuntime = loadFrameRuntime()
-  vm.runInContext(buildCardFrameRuntime('frame-test', { stat_data: { chat: true } }, {}, {}), context)
+  vm.runInContext(buildCardFrameRuntime('frame-test', { stat_data: { chat: true } }, {}, {}, 'session-test', characterContext), context)
   return { window, parent, messages }
 }
 
@@ -514,6 +514,46 @@ test('SillyTavern context projection updates chat, character and extension promp
   assert.equal(context.name2, '角色')
   assert.equal(context.extensionPrompts.injected.value, '提示词')
   assert.equal(frame.window.SillyTavern.chat[0].mes, '你好')
+})
+
+test('card frontend receives RawCharacter and Prompt Template character helpers before postMessage sync', async () => {
+  const rawCharacter = {
+    spec: 'chara_card_v2',
+    spec_version: '2.0',
+    data: {
+      name: '莉娜',
+      description: '掌握火焰的旅者',
+      personality: '谨慎',
+      extensions: { hud: { theme: 'violet' } },
+      character_book: { entries: { '1': { content: '火焰' } } },
+    },
+  }
+  const frame = createFrame({
+    rawCharacter,
+    characterData: rawCharacter.data,
+    character: { ...rawCharacter.data, data: rawCharacter.data },
+    characters: [{ ...rawCharacter.data, data: rawCharacter.data }],
+    characterId: 0,
+    name1: '玩家',
+    name2: '莉娜',
+  })
+
+  assert.deepEqual(plain(frame.window.RawCharacter), rawCharacter)
+  assert.equal(frame.window.SillyTavern.getContext().character.data.extensions.hud.theme, 'violet')
+  assert.equal(frame.window.SillyTavern.getContext().character.data.character_book.entries['1'].content, '火焰')
+  assert.equal((await frame.window.getCharData()).extensions.hud.theme, 'violet')
+  assert.match(await frame.window.getchar('莉娜', '<%= name %>|<%= description %>'), /莉娜\|掌握火焰的旅者/u)
+})
+
+test('Tavern Helper generateRaw uses the isolated host RPC without changing chat', async () => {
+  const frame = createFrame()
+  await frame.window.generateRaw({ ordered_prompts: [{ role: 'user', content: '辅助问题' }] })
+  const request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'generate-raw')
+  assert.deepEqual(plain(request?.payload), { ordered_prompts: [{ role: 'user', content: '辅助问题' }] })
+  assert.equal(frame.window.getChatMessages('0-').length, 0)
+  assert.equal(frame.window.TavernHelper.generateRaw, frame.window.generateRaw)
+  assert.equal(frame.window.SillyTavern.generateRaw, frame.window.generateRaw)
 })
 
 test('function-valued injection filters are evaluated at generation preparation', async () => {
