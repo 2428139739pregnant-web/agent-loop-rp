@@ -16,6 +16,7 @@ import type {
 const MAX_TEMPLATE_CHARS = 256 * 1024
 const MAX_OUTPUT_CHARS = 256 * 1024
 const MAX_RESOURCE_CHARS = 4 * 1024 * 1024
+const MAX_RESOURCE_DEPTH = 4
 const MEMORY_LIMIT_BYTES = 16 * 1024 * 1024
 const MAX_STACK_BYTES = 512 * 1024
 const MAX_INTERRUPT_POLLS = 512
@@ -47,6 +48,21 @@ export interface EjsTemplateWorldInfoBook {
   }[]
 }
 
+/** One JSON-only character-card snapshot available to deterministic reads. */
+export interface EjsTemplateCharacterResource {
+  readonly id: string
+  readonly name?: string
+  readonly data: JsonValue
+}
+
+/** One JSON-only preset prompt snapshot available to deterministic reads. */
+export interface EjsTemplatePresetPromptResource {
+  readonly id?: string
+  readonly name: string
+  readonly content: string
+  readonly data?: JsonValue
+}
+
 /** Project normalized Session lorebooks into the read-only EJS resource index. */
 export function createEjsWorldInfoBooks(books: readonly {
   readonly id: string
@@ -75,11 +91,16 @@ export function createEjsWorldInfoBooks(books: readonly {
 /** Resource identity of the template currently being rendered. */
 export interface EjsTemplateTarget {
   readonly worldInfoBookId?: string
+  /** ST-Prompt-Template phase; omitted targets are model-generation renders. */
+  readonly runType?: EjsTemplateRunType
   /** ST-Prompt-Template context for one [GENERATE:REGEX:*] hit. */
   readonly matchedMessage?: string
   readonly matchedMessageIndex?: number
   readonly matchedMessageRole?: 'system' | 'user' | 'assistant' | 'tool'
 }
+
+/** Phases named by ST-Prompt-Template's model-side EJS environment. */
+export type EjsTemplateRunType = 'generate' | 'preparation' | 'render' | 'render_permanent'
 
 /** JSON-only values exposed to one template evaluation. */
 export interface EjsTemplateContext {
@@ -91,6 +112,14 @@ export interface EjsTemplateContext {
   readonly variableScopes?: Readonly<Partial<Record<'global' | 'preset' | 'character' | 'chat' | 'message' | 'initial', Readonly<Record<string, JsonValue>>>>>
   readonly statData?: JsonValue
   readonly worldInfoBooks?: readonly EjsTemplateWorldInfoBook[]
+  /** Optional active card JSON snapshot used when no named card list is supplied. */
+  readonly characterData?: JsonValue
+  /** Optional active/known character-card JSON snapshots. */
+  readonly characterCards?: readonly EjsTemplateCharacterResource[]
+  /** Optional preset prompt snapshots; contents are rendered in the same sandbox. */
+  readonly presetPrompts?: readonly EjsTemplatePresetPromptResource[]
+  /** Internal JSON-only locals used while formatting a character or preset resource. */
+  readonly templateData?: Readonly<Record<string, JsonValue>>
 }
 
 /** Stable failure categories that never include private template source. */
@@ -112,6 +141,61 @@ export type EjsTemplateResult =
 interface TemplateSegment {
   readonly kind: 'text' | 'code' | 'escaped' | 'raw'
   readonly value: string
+}
+
+// This is the default format documented by ST-Prompt-Template. It is kept as
+// data rather than executed by the host, so custom character formats remain
+// inside the same QuickJS boundary as ordinary model-side templates.
+const DEFAULT_CHARACTER_TEMPLATE = `<% if (name) { %>
+<<%- name %>>
+<% if (system_prompt) { %>
+System: <%- system_prompt %>
+<% } %>
+name: <%- name %>
+<% if (personality) { %>
+personality: <%- personality %>
+<% } %>
+<% if (description) { %>
+description: <%- description %>
+<% } %>
+<% if (message_example) { %>
+example:
+<%- message_example %>
+<% } %>
+<% if (depth_prompt) { %>
+System: <%- depth_prompt %>
+<% } %>
+</<%- name %>>
+<% } %>`
+
+const TEMPLATE_IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/u
+const TEMPLATE_RESERVED_LOCALS = new Set([
+  'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default',
+  'delete', 'do', 'else', 'export', 'extends', 'finally', 'for', 'function', 'if', 'import',
+  'in', 'instanceof', 'let', 'new', 'return', 'super', 'switch', 'this', 'throw', 'try',
+  'typeof', 'var', 'void', 'while', 'with', 'yield',
+  'char', 'user', 'charName', 'userName', 'runType', 'messages', 'variables', 'variableScopes',
+  'stat_data', 'getvar', 'getWorldInfo', 'getwi', 'getCharData', 'getchar', 'getChara',
+  'getpreset', 'getPresetPrompt', 'getChatMessage', 'getChatMessages', 'print', 'YAML', '_',
+  '__input', '__output', '__append', '__escape', '__transcript', '__templateData',
+])
+const TEMPLATE_RESOURCE_LOCALS = [
+  'name', 'system_prompt', 'personality', 'description', 'scenario', 'first_message',
+  'message_example', 'creatorcomment', 'alternate_greetings', 'depth_prompt',
+] as const
+const TEMPLATE_RESOURCE_LOCAL_SET = new Set<string>(TEMPLATE_RESOURCE_LOCALS)
+
+function templateLocalDeclarations(context: EjsTemplateContext): string {
+  const data = context.templateData
+  if (data === undefined) return ''
+  const standard = TEMPLATE_RESOURCE_LOCALS
+    .map(key => `const ${key} = __templateData[${JSON.stringify(key)}];`)
+  const dynamic = Object.keys(data)
+    .filter(key => TEMPLATE_IDENTIFIER.test(key)
+      && !TEMPLATE_RESERVED_LOCALS.has(key)
+      && !TEMPLATE_RESOURCE_LOCAL_SET.has(key))
+    .map(key => `const ${key} = __templateData[${JSON.stringify(key)}];`)
+  return [...standard, ...dynamic].join('\n    ')
 }
 
 function segments(template: string): TemplateSegment[] | undefined {
@@ -185,9 +269,11 @@ function compileTemplate(
     variables: context.variables ?? {},
     scopes: context.variableScopes ?? {},
     ...(context.statData === undefined ? {} : { stat_data: context.statData }),
+    ...(context.templateData === undefined ? {} : { template_data: context.templateData }),
     ...(target.matchedMessage === undefined ? {} : { matched_message: target.matchedMessage }),
     ...(target.matchedMessageIndex === undefined ? {} : { matched_message_index: target.matchedMessageIndex }),
     ...(target.matchedMessageRole === undefined ? {} : { matched_message_role: target.matchedMessageRole }),
+    run_type: target.runType ?? 'generate',
   })
   const statements = parsed.map(segment => {
     if (segment.kind === 'text') return `__append(${JSON.stringify(segment.value)});`
@@ -207,6 +293,8 @@ function compileTemplate(
     const __escape = value => String(value ?? '').replace(/[&<>"']/g, character => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&#34;', "'": '&#39;',
     })[character]);
+    const __templateData = __input.template_data ?? Object.create(null);
+    ${templateLocalDeclarations(context)}
     const __owns = (record, key) => Object.prototype.hasOwnProperty.call(record, key);
     const char = __input.char;
     const user = __input.user;
@@ -218,7 +306,7 @@ function compileTemplate(
     const matched_message = __input.matched_message;
     const matched_message_index = __input.matched_message_index;
     const matched_message_role = __input.matched_message_role;
-    const runType = 'generate';
+    const runType = __input.run_type;
     const __transcript = __input.transcript;
     const messages = __input.transcriptIsMessagePrefix
       ? [...__transcript.map(message => message.content), ...__input.messages]
@@ -437,6 +525,15 @@ function compileTemplate(
     const getMessageVar = getmessagevar;
     const getWorldInfo = async (...args) => globalThis.__agentRpGetWorldInfo(...args);
     const getwi = getWorldInfo;
+    const __decodeCharacterData = raw => raw === '' ? null : JSON.parse(raw);
+    const getCharData = async (name = char) =>
+      __decodeCharacterData(await globalThis.__agentRpGetCharData(name));
+    const __defaultCharacterTemplate = ${JSON.stringify(DEFAULT_CHARACTER_TEMPLATE)};
+    const getchar = async (name = char, template = __defaultCharacterTemplate, data = {}) =>
+      globalThis.__agentRpGetChar(name, template, data);
+    const getChara = getchar;
+    const getpreset = async (name, data = {}) => globalThis.__agentRpGetPreset(name, data);
+    const getPresetPrompt = getpreset;
     const print = (...values) => { for (const value of values) __append(value); };
     globalThis.Date = undefined;
     Math.random = () => { throw new Error('__AGENT_RP_EJS_NONDETERMINISTIC__'); };
@@ -502,6 +599,36 @@ function regexFailure(value: unknown): 'invalid' | 'execution-limit' | 'resource
   if (message.includes('interrupted')) return 'execution-limit'
   if (/out of memory|memory limit/iu.test(message)) return 'resource-limit'
   return 'invalid'
+}
+
+function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  return value as Readonly<Record<string, JsonValue>>
+}
+
+function mergeTemplateData(
+  base: JsonValue,
+  extra: unknown,
+  fallbackName?: string,
+): Readonly<Record<string, JsonValue>> {
+  const baseRecord = jsonRecord(base)
+  const result: Record<string, JsonValue> = baseRecord === undefined
+    ? { value: base }
+    : { ...baseRecord }
+  if (fallbackName !== undefined && result.name === undefined) result.name = fallbackName
+  const extraRecord = jsonRecord(extra)
+  if (extraRecord !== undefined) Object.assign(result, extraRecord)
+  return result
+}
+
+function resourceSelector(value: unknown): string | number | undefined {
+  return typeof value === 'string' || typeof value === 'number' ? value : undefined
+}
+
+function matchesResource(selector: string | number | undefined, id: string | undefined, name: string | undefined): boolean {
+  if (selector === undefined) return true
+  const text = String(selector)
+  return id === text || name === text
 }
 
 function createQuickJsRegexMatcher(quickjs: QuickJSWASMModule): LorebookRegexMatcher {
@@ -587,6 +714,15 @@ export class EjsTemplateEngine implements LorebookRegexEngine {
 
   /** Render one template without exposing Host globals, modules, files, or network APIs. */
   render(template: string, context: EjsTemplateContext, target: EjsTemplateTarget = {}): EjsTemplateResult {
+    return this.renderWithDepth(template, context, target, 0)
+  }
+
+  private renderWithDepth(
+    template: string,
+    context: EjsTemplateContext,
+    target: EjsTemplateTarget,
+    resourceDepth: number,
+  ): EjsTemplateResult {
     if (template.length > MAX_TEMPLATE_CHARS) return { ok: false, kind: 'source-limit' }
     const code = compileTemplate(template, context, target)
     if (code === undefined) return { ok: false, kind: 'syntax-error' }
@@ -599,9 +735,31 @@ export class EjsTemplateEngine implements LorebookRegexEngine {
     try {
       let resourceReads = 0
       let resourceChars = 0
-      const lookup = vm.newFunction('__agentRpGetWorldInfo', (...handles) => {
+      const chargeResource = (chars: number) => {
         resourceReads += 1
         if (resourceReads > 128) throw new Error('__AGENT_RP_EJS_RESOURCE_LIMIT__')
+        resourceChars += chars
+        if (resourceChars > MAX_RESOURCE_CHARS) throw new Error('__AGENT_RP_EJS_RESOURCE_LIMIT__')
+      }
+      const characterResources = context.characterCards ?? []
+      const currentCharacter: EjsTemplateCharacterResource | undefined = context.characterData === undefined
+        ? undefined
+        : { id: context.characterName, name: context.characterName, data: context.characterData }
+      const selectCharacter = (value: unknown): EjsTemplateCharacterResource | undefined => {
+        const selector = resourceSelector(value)
+        const listed = characterResources.find(resource => matchesResource(selector, resource.id, resource.name))
+        if (listed !== undefined) return listed
+        if (currentCharacter !== undefined && matchesResource(selector, currentCharacter.id, currentCharacter.name)) {
+          return currentCharacter
+        }
+        return undefined
+      }
+      const selectPreset = (value: unknown): EjsTemplatePresetPromptResource | undefined => {
+        const selector = resourceSelector(value)
+        return (context.presetPrompts ?? []).find(resource =>
+          matchesResource(selector, resource.id, resource.name))
+      }
+      const lookup = vm.newFunction('__agentRpGetWorldInfo', (...handles) => {
         const args = handles.map(handle => vm.dump(handle) as unknown)
         const books = context.worldInfoBooks ?? []
         const explicitEntry = typeof args[1] === 'string' || typeof args[1] === 'number'
@@ -627,12 +785,66 @@ export class EjsTemplateEngine implements LorebookRegexEngine {
           : undefined
         const text = entry?.content ?? ''
         if (/<%[=_-]?[\s\S]*?%>/imu.test(text)) throw new Error('__AGENT_RP_EJS_RESOURCE_UNSUPPORTED__')
-        resourceChars += text.length
-        if (resourceChars > MAX_RESOURCE_CHARS) throw new Error('__AGENT_RP_EJS_RESOURCE_LIMIT__')
+        chargeResource(text.length)
         return vm.newString(text)
       })
       vm.setProp(vm.global, '__agentRpGetWorldInfo', lookup)
       lookup.dispose()
+      const getCharacterData = vm.newFunction('__agentRpGetCharData', (...handles) => {
+        const args = handles.map(handle => vm.dump(handle) as unknown)
+        const selected = selectCharacter(args[0])
+        if (selected === undefined) return vm.newString('')
+        const serialized = JSON.stringify(selected.data)
+        chargeResource(serialized.length)
+        return vm.newString(serialized)
+      })
+      vm.setProp(vm.global, '__agentRpGetCharData', getCharacterData)
+      getCharacterData.dispose()
+      const getCharacter = vm.newFunction('__agentRpGetChar', (...handles) => {
+        const args = handles.map(handle => vm.dump(handle) as unknown)
+        const selected = selectCharacter(args[0])
+        if (selected === undefined || resourceDepth >= MAX_RESOURCE_DEPTH) {
+          if (resourceDepth >= MAX_RESOURCE_DEPTH) throw new Error('__AGENT_RP_EJS_RESOURCE_LIMIT__')
+          return vm.newString('')
+        }
+        const template = typeof args[1] === 'string' ? args[1] : DEFAULT_CHARACTER_TEMPLATE
+        const nested = this.renderWithDepth(
+          template,
+          {
+            ...context,
+            templateData: mergeTemplateData(selected.data, args[2], selected.name ?? selected.id),
+          },
+          target,
+          resourceDepth + 1,
+        )
+        const text = nested.ok ? nested.text : ''
+        chargeResource(text.length)
+        return vm.newString(text)
+      })
+      vm.setProp(vm.global, '__agentRpGetChar', getCharacter)
+      getCharacter.dispose()
+      const getPreset = vm.newFunction('__agentRpGetPreset', (...handles) => {
+        const args = handles.map(handle => vm.dump(handle) as unknown)
+        const selected = selectPreset(args[0])
+        if (selected === undefined || resourceDepth >= MAX_RESOURCE_DEPTH) {
+          if (resourceDepth >= MAX_RESOURCE_DEPTH) throw new Error('__AGENT_RP_EJS_RESOURCE_LIMIT__')
+          return vm.newString('')
+        }
+        const nested = this.renderWithDepth(
+          selected.content,
+          {
+            ...context,
+            templateData: mergeTemplateData(selected.data ?? {}, args[1], selected.name),
+          },
+          target,
+          resourceDepth + 1,
+        )
+        const text = nested.ok ? nested.text : ''
+        chargeResource(text.length)
+        return vm.newString(text)
+      })
+      vm.setProp(vm.global, '__agentRpGetPreset', getPreset)
+      getPreset.dispose()
       const result = vm.evalCode(code, 'agent-rp:ejs')
       const errorHandle = result.error
       if (errorHandle !== undefined) {

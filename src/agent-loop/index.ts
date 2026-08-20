@@ -117,6 +117,14 @@ export {
   type ConstantWorldbookBlocks,
 } from './agents/response.ts'
 export { tavernHelperWorldbookMetadata, tavernHelperWorldbookPosition } from './worldbook-position.ts'
+export {
+  CONTROLLED_TRIGGER_SLASH_COMMANDS,
+  MAX_TRIGGER_SLASH_SOURCE_LENGTH,
+  MAX_WAIT_MILLISECONDS,
+  parseSlashCommand,
+  parseTriggerSlash,
+  type TriggerSlashParseResult,
+} from './slash.ts'
 export { runMvuUpdate, type MvuRuntimeSettings, type MvuUpdateInput, type MvuUpdateResult } from './agents/mvu-update.ts'
 export {
   DEFAULT_RESPONSE_PERSPECTIVES,

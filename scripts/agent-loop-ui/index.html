@@ -1420,11 +1420,69 @@
   const __chatId=${chatId};
   let __variables=${variables};
   let __helperVariables=${helper};
+  let __chatMessageCache=[];
   const __listeners=new Map();
   const __parent=window.parent&&window.parent!==window?window.parent:null;
   try{window.name=__frameId;if(window.frameElement&&window.frameElement.id!==__frameId)window.frameElement.id=__frameId;}catch{}
   try{const __shared=__parent?.__agentRpSharedLibraries||{};if(__shared.z){window.z=__shared.z;globalThis.z=__shared.z;}if(__shared.YAML){window.YAML=__shared.YAML;globalThis.YAML=__shared.YAML;}if(__shared.Vue){window.Vue=__shared.Vue;globalThis.Vue=__shared.Vue;}if(__shared._){window._=__shared._;globalThis._=__shared._;}}catch{}
   const __clone=value=>{try{return JSON.parse(JSON.stringify(value));}catch{return value;}};
+  const __chatMessageId=(message,index)=>Number.isSafeInteger(message?.message_id)?message.message_id:index;
+  const __normalizeCachedChatMessage=(message,index)=>{
+    const source=message&&typeof message==='object'?message:{};
+    const role=source.role==='system'||source.role==='assistant'||source.role==='user'?source.role:source.is_user===true?'user':'assistant';
+    const content=typeof source.message==='string'?source.message:(typeof source.content==='string'?source.content:String(source.mes??''));
+    return {
+      message_id:__chatMessageId(source,index),
+      name:typeof source.name==='string'?source.name:role==='user'?'用户':role==='assistant'?'assistant':'system',
+      role,
+      is_hidden:source.is_hidden===true,
+      message:content,
+      data:source.data&&typeof source.data==='object'&&!Array.isArray(source.data)?__clone(source.data):{},
+      extra:source.extra&&typeof source.extra==='object'&&!Array.isArray(source.extra)?__clone(source.extra):{},
+      ...(Number.isSafeInteger(source.swipe_id)?{swipe_id:source.swipe_id}:{}),
+      ...(Array.isArray(source.swipes)?{swipes:source.swipes.filter(item=>typeof item==='string')}:{}),
+      ...(Array.isArray(source.swipes_data)?{swipes_data:__clone(source.swipes_data)}:{}),
+      ...(Array.isArray(source.swipes_info)?{swipes_info:__clone(source.swipes_info)}:{}),
+      ...(Array.isArray(source.swipe_info)&&!Array.isArray(source.swipes_info)?{swipes_info:__clone(source.swipe_info)}:{}),
+    };
+  };
+  const __setChatMessageCache=messages=>{
+    __chatMessageCache=(Array.isArray(messages)?messages:[]).map(__normalizeCachedChatMessage).sort((left,right)=>left.message_id-right.message_id);
+    return __chatMessageCache;
+  };
+  const __chatMessageSelection=(range,options={})=>{
+    const all=__chatMessageCache;
+    const ids=all.map((message,index)=>__chatMessageId(message,index));
+    const resolveBoundary=raw=>{
+      const text=String(raw??'').trim();
+      if(!text)return null;
+      const number=Number(text);
+      if(!Number.isFinite(number))return null;
+      if(number<0)return ids.at(number)??null;
+      return number;
+    };
+    let start=ids[0]??0;
+    let end=ids.at(-1)??-1;
+    if(range!==undefined&&range!==null&&range!==''){
+      const text=String(range).replace(/\\{\\{lastMessageId\\}\\}/gu,String(ids.at(-1)??-1));
+      const pair=text.match(/^(-?\\d+)\\s*-\\s*(-?\\d*)$/u);
+      if(pair){start=resolveBoundary(pair[1]);end=pair[2]===''?(ids.at(-1)??-1):resolveBoundary(pair[2]);}
+      else{start=resolveBoundary(text);end=start;}
+    }
+    if(start===null||end===null||start>end)return [];
+    let selected=all.filter(message=>message.message_id>=start&&message.message_id<=end);
+    const role=options?.role==='system'||options?.role==='assistant'||options?.role==='user'?options.role:'all';
+    if(role!=='all')selected=selected.filter(message=>message.role===role);
+    const hideState=options?.hide_state==='hidden'||options?.hide_state==='unhidden'?options.hide_state:'all';
+    if(hideState==='hidden')selected=selected.filter(message=>message.is_hidden===true);
+    if(hideState==='unhidden')selected=selected.filter(message=>message.is_hidden!==true);
+    const includeSwipes=options?.include_swipes===true;
+    return selected.map(message=>{
+      const copy=__clone(message);
+      if(!includeSwipes){delete copy.swipe_id;delete copy.swipes;delete copy.swipes_data;delete copy.swipes_info;}
+      return copy;
+    });
+  };
   const __scopeVariables={global:{},preset:{},character:__clone(__helperVariables),chat:__clone(__variables),message:{},script:{},extension:{}};
   const __scriptVariables={};
   const __messageVariablesById={};
@@ -1750,7 +1808,16 @@
     return normalized;
   };
   const __chatMessages=(messages,creating=false)=>(Array.isArray(messages)?messages:[]).map((message,index)=>__normalizeChatMessage(message,index,creating));
-  window.getChatMessages=(range,options={})=>__rpc('get-chat-messages',{range,options:__clone(options||{})});
+  // Tavern Helper's public getChatMessages is deliberately synchronous: the
+  // iframe receives a chat snapshot with the context event and reads that
+  // snapshot locally. The RPC remains available through this explicit sync
+  // helper for callers that need to refresh the snapshot on demand.
+  window.getChatMessages=(range,options={})=>__chatMessageSelection(range,options||{});
+  window.syncChatMessages=async()=>{
+    const snapshot=await __rpc('get-chat-messages',{range:'0-{{lastMessageId}}',options:{role:'all',hide_state:'all',include_swipes:true}});
+    __setChatMessageCache(snapshot);
+    return __chatMessageSelection('0-{{lastMessageId}}',{role:'all',hide_state:'all',include_swipes:true});
+  };
   window.getCurrentChatId=()=>String(__chatId||__frameId);
   const __contextChat=()=>Array.isArray(window.SillyTavern?.chat)?window.SillyTavern.chat:(Array.isArray(window.__stContext?.chat)?window.__stContext.chat:[]);
   window.getCurrentMessageId=()=>window.getLastMessageId();
@@ -1787,7 +1854,12 @@
   window.createChatMessages=async(messages,options={})=>__rpc('create-chat-messages',{messages:__chatMessages(messages,true),options:__clone(options||{})});
   window.deleteChatMessages=async(messageIds,options={})=>__rpc('delete-chat-messages',{messageIds:(Array.isArray(messageIds)?messageIds:[]).map(Number).filter(Number.isSafeInteger),options:__clone(options||{})});
   window.rotateChatMessages=async(begin,middle,end,options={})=>__rpc('rotate-chat-messages',{begin:Number(begin),middle:Number(middle),end:Number(end),options:__clone(options||{})});
-  window.setChatHidden=async(start,end,hidden=true)=>__rpc('set-chat-hidden',{start:Number(start),end:Number(end),hidden:Boolean(hidden)});
+  window.setChatHidden=async(start,end,hidden=true,options={})=>{
+    // Some older cards passed the options object as the third argument while
+    // omitting hidden. Preserve that harmless shorthand as well.
+    if(hidden&&typeof hidden==='object'&&!Array.isArray(hidden)){options=hidden;hidden=true;}
+    return __rpc('set-chat-hidden',{start:Number(start),end:Number(end),hidden:Boolean(hidden),options:__clone(options||{})});
+  };
   window.setMvuVariable=(path,value)=>{__set(__variables,path,value);return __replace(__variables);};
   window.updateChatVariables=value=>__replace(value);
   window.updateWorldbookWith=async(bookName,updater)=>{
@@ -1888,6 +1960,22 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
   const __updateChatMetadata=(values,reset=false)=>{const next=values&&typeof values==='object'&&!Array.isArray(values)?__clone(values):{};__stContext.chatMetadata=reset?next:Object.assign(__stContext.chatMetadata||{},next);try{window.SillyTavern.chatMetadata=__stContext.chatMetadata}catch{}void __rpc('tavern-helper-mutation',{format:0,operation:'update-chat-metadata',values:next,reset:Boolean(reset)});return __clone(__stContext.chatMetadata);};
   const __stContext={chat:[],characters:[],name1:'',name2:'',characterId:0,groupId:null,chatId:__chatId,eventSource:__stEventSource,eventTypes:window.tavern_events,extensionPrompts:{},chatMetadata:{},maxContext:0,getCurrentChatId:()=>__chatId,getCurrentMessageId:window.getCurrentMessageId,getLastMessageId:window.getLastMessageId,getChatMessages:window.getChatMessages,setChatMessage:window.setChatMessage,setChatMessages:window.setChatMessages,createChatMessages:window.createChatMessages,deleteChatMessages:window.deleteChatMessages,rotateChatMessages:window.rotateChatMessages,getVariables:window.getVariables,getVariable:window.getVariable,replaceVariables:window.replaceVariables,updateChatMetadata:__updateChatMetadata,getWorldbook:window.getWorldbook,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,injectPrompts:window.injectPrompts,uninjectPrompts:window.uninjectPrompts,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),saveChat:async()=>undefined,saveSettingsDebounced:async()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined};
   window.SillyTavern=Object.assign({},__parent?.SillyTavern||{}, {eventSource:__stEventSource,eventTypes:window.tavern_events,getContext:()=>__stContext,chat:__stContext.chat,characters:__stContext.characters,characterId:0,name2:'',chatMetadata:__stContext.chatMetadata,extensionSettings:{},chatCompletionSettings:{},getCurrentChatId:()=>__chatId,getCurrentLocale:()=> 'zh-cn',getChatCompletionModel:()=>'',getRequestHeaders:()=>({}),updateChatMetadata:__updateChatMetadata,saveChat:async()=>undefined,saveSettingsDebounced:async()=>undefined,loadWorldInfo:async()=>undefined,callGenericPopup:async()=>undefined,registerMacro:()=>undefined,unregisterMacro:()=>undefined,unregisterFunctionTool:()=>undefined});
+  // The upstream helper does not document a stable Context object shape.
+  // Keep this as a read-only projection, rather than inventing a second state
+  // store: every getter reads the same local snapshot used by the public APIs.
+  const __tavernHelperContext=Object.freeze({
+    get chat(){return __clone(__chatMessageCache);},
+    get variables(){return __clone(__variables);},
+    get name1(){return String(__stContext.name1||'');},
+    get name2(){return String(__stContext.name2||'');},
+    get chatMetadata(){return __clone(__stContext.chatMetadata||{});},
+    getChatMessages:window.getChatMessages,
+    syncChatMessages:window.syncChatMessages,
+    getLastMessageId:window.getLastMessageId,
+    getVariables:window.getVariables,
+    getVariable:window.getVariable,
+  });
+  window.TavernHelper=Object.assign({},__parent?.TavernHelper||{}, {Context:__tavernHelperContext,getAllVariables:()=>__getVariables({type:'chat'}),getVariable:(path,fallback)=>__get(__getVariables({type:'chat'}),path,fallback),getVariables:__getVariables,replaceVariables:__replaceVariables,updateVariablesWith:__updateVariablesWith,insertOrAssignVariables:__insertOrAssignVariables,insertVariables:__insertVariables,deleteVariable:__deleteVariable,getScriptTrees:__getScriptTrees,replaceScriptTrees:__replaceScriptTrees,updateScriptTreesWith:__updateScriptTreesWith,injectPrompts:__injectPrompts,uninjectPrompts:__uninjectPrompts,getChatMessages:window.getChatMessages,syncChatMessages:window.syncChatMessages,setChatMessage:window.setChatMessage,setChatMessages:window.setChatMessages,createChatMessages:window.createChatMessages,deleteChatMessages:window.deleteChatMessages,rotateChatMessages:window.rotateChatMessages,setChatHidden:window.setChatHidden,getWorldbookNames:window.getWorldbookNames,getGlobalWorldbookNames:window.getGlobalWorldbookNames,rebindGlobalWorldbooks:window.rebindGlobalWorldbooks,getCharWorldbookNames:(_characterName='current')=>window.getCharWorldbookNames(),rebindCharWorldbooks:(_characterName='current',books={})=>window.rebindCharWorldbooks(books?.primary??null,Array.isArray(books?.additional)?books.additional:[]),getChatWorldbookName:(_chatName='current')=>window.getChatWorldbookName(),rebindChatWorldbook:(_chatName='current',name=null)=>window.rebindChatWorldbook(name),getWorldbook:window.getWorldbook,replaceWorldbook:window.replaceWorldbook,updateWorldbookWith:window.updateWorldbookWith,getTavernHelperVersion:window.getTavernHelperVersion,getLastMessageId:window.getLastMessageId,eventOn:window.eventOn,eventOnce:window.eventOnce,eventMakeFirst:window.eventMakeFirst,eventMakeLast:window.eventMakeLast,eventRemoveListener:window.eventRemoveListener,eventClearEvent:window.eventClearEvent,eventClearListener:window.eventClearListener,eventClearAll:window.eventClearAll,eventEmit:window.eventEmit,waitGlobalInitialized:window.waitGlobalInitialized});
   const __wrap=items=>{const list=Array.from(items||[]),api={length:list.length};list.forEach((el,i)=>api[i]=el);api.toArray=()=>list.slice();api.get=index=>index===undefined?list.slice():list[index];api.each=fn=>{list.forEach((el,i)=>fn.call(el,i,el));return api;};api.clone=()=>__wrap(list.map(el=>el.cloneNode?.(true)).filter(Boolean));api.appendTo=target=>{const destination=typeof target==='string'?__query(target):target?.length!==undefined?target:__wrap([target]);destination?.each?.((_i,el)=>list.forEach(item=>el.append(item)));return api;};api.find=sel=>__wrap(list.flatMap(el=>[...el.querySelectorAll(sel)]));api.parent=()=>__wrap(list.map(el=>el.parentElement).filter(Boolean));api.siblings=()=>__wrap(list.flatMap(el=>el.parentElement?[...el.parentElement.children].filter(x=>x!==el):[]));api.addClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.add(x)));api.removeClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.remove(x)));api.toggleClass=v=>api.each((_i,el)=>String(v||'').split(/\\s+/).filter(Boolean).forEach(x=>el.classList.toggle(x)));api.hasClass=v=>!!list[0]?.classList.contains(String(v||''));api.html=v=>v===undefined?(list[0]?.innerHTML||''):api.each((_i,el)=>el.innerHTML=String(v));api.text=v=>v===undefined?(list[0]?.textContent||''):api.each((_i,el)=>el.textContent=String(v));api.val=v=>v===undefined?(list[0]?.value||''):api.each((_i,el)=>el.value=String(v));api.attr=(k,v)=>v===undefined?list[0]?.getAttribute(k):api.each((_i,el)=>el.setAttribute(k,String(v)));api.data=(k,v)=>v===undefined?list[0]?.dataset?.[k]:api.each((_i,el)=>el.dataset[k]=String(v));api.empty=()=>api.each((_i,el)=>el.replaceChildren());api.append=v=>api.each((_i,el)=>typeof v==='string'?el.insertAdjacentHTML('beforeend',v):v?.nodeType&&el.append(v));api.css=(k,v)=>v===undefined?(list[0]?getComputedStyle(list[0])[k]:undefined):api.each((_i,el)=>el.style[k]=String(v));api.show=()=>api.each((_i,el)=>el.style.display='');api.hide=()=>api.each((_i,el)=>el.style.display='none');api.on=(type,fn)=>api.each((_i,el)=>el.addEventListener(type,fn));api.off=(type,fn)=>api.each((_i,el)=>el.removeEventListener(type,fn));api.trigger=type=>api.each((_i,el)=>el.dispatchEvent(new Event(type,{bubbles:true})));api.sortable=()=>api;return api;};
   const __query=value=>{if(typeof value==='function'){if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',value,{once:true});else queueMicrotask(value);return __wrap([]);}if(value?.nodeType)return __wrap([value]);if(Array.isArray(value))return __wrap(value);try{return __wrap(document.querySelectorAll(String(value||'')));}catch{return __wrap([]);}};
   __stContext.setExtensionPrompt=__setExtensionPrompt;
@@ -1960,7 +2048,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       for(const key of ['name1','name2','characterId','chatId','chatMetadata','extensionPrompts','character'])if(context[key]!==undefined)__stContext[key]=__clone(context[key]);
       if(context.chatMetadata!==undefined)window.SillyTavern.chatMetadata=__stContext.chatMetadata;
       if(context.extensionPrompts!==undefined)window.SillyTavern.extensionPrompts=__stContext.extensionPrompts;
-      if(Array.isArray(context.chat)){__stContext.chat=__clone(context.chat);window.SillyTavern.chat=__stContext.chat;}
+      if(Array.isArray(context.chat)){__stContext.chat=__clone(context.chat);window.SillyTavern.chat=__stContext.chat;__setChatMessageCache(context.chat);}
       if(Array.isArray(context.characters)){__stContext.characters=__clone(context.characters);window.SillyTavern.characters=__stContext.characters;}
       window.SillyTavern.name1=__stContext.name1||'';window.SillyTavern.name2=__stContext.name2||'';window.SillyTavern.characterId=__stContext.characterId||0;
       return;
@@ -2416,8 +2504,13 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
               if (data.method === 'create-chat-messages' || data.method === 'delete-chat-messages' || data.method === 'rotate-chat-messages' || data.method === 'set-chat-hidden') {
                 const payload = data.payload || {}
                 const operation = data.method
+                const insertBefore = payload.options?.insert_before !== undefined
+                  ? payload.options.insert_before
+                  : payload.options?.insert_at !== undefined
+                    ? payload.options.insert_at
+                    : 'end'
                 const body = operation === 'create-chat-messages'
-                  ? { format: 0, operation, messages: payload.messages || [], insertAt: Number.isSafeInteger(payload.options?.insert_at) ? payload.options.insert_at : Number.isSafeInteger(payload.options?.insert_before) ? payload.options.insert_before : 'end', refresh: payload.options?.refresh }
+                  ? { format: 0, operation, messages: payload.messages || [], insertAt: insertBefore === 'end' || Number.isSafeInteger(insertBefore) ? insertBefore : 'end', refresh: payload.options?.refresh }
                   : operation === 'delete-chat-messages'
                     ? { format: 0, operation, messageIds: payload.messageIds || [], refresh: payload.options?.refresh }
                     : operation === 'rotate-chat-messages'

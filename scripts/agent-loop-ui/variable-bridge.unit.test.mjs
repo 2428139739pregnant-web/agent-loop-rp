@@ -284,6 +284,79 @@ test('Tavern Helper chat tree APIs preserve message metadata and canonical RPC a
   assert.equal(typeof frame.window.SillyTavern.getContext().deleteChatMessages, 'function')
 })
 
+test('getChatMessages is a synchronous local-cache projection with official filters and ranges', () => {
+  const frame = createFrame()
+  frame.window.dispatchEvent({
+    type: 'message',
+    source: frame.parent,
+    data: {
+      type: 'agent-rp-card-context',
+      id: 'frame-test',
+      context: {
+        name1: '玩家',
+        name2: '角色',
+        chat: [
+          { message_id: 0, name: '玩家', role: 'user', message: '开场', data: { floor: 0 }, extra: {}, swipes: ['开场', '另一开场'], swipe_id: 0 },
+          { message_id: 1, name: '角色', role: 'assistant', message: '隐藏楼层', is_hidden: true, data: {}, extra: {} },
+          { message_id: 2, name: '玩家', role: 'user', message: '最新', data: {}, extra: {}, swipes: ['最新', '重roll'], swipe_id: 1, swipes_data: [{ id: 0 }, { id: 1 }], swipes_info: [{ send_date: 1 }, { send_date: 2 }] },
+        ],
+      },
+    },
+  })
+
+  const latest = frame.window.getChatMessages(-1)
+  assert.ok(Array.isArray(latest))
+  assert.equal(typeof latest.then, 'undefined')
+  assert.deepEqual(plain(latest), [{
+    message_id: 2, name: '玩家', role: 'user', is_hidden: false, message: '最新', data: {}, extra: {},
+  }])
+  assert.deepEqual(plain(frame.window.getChatMessages('0-{{lastMessageId}}', { role: 'user', hide_state: 'unhidden' })), [
+    { message_id: 0, name: '玩家', role: 'user', is_hidden: false, message: '开场', data: { floor: 0 }, extra: {} },
+    { message_id: 2, name: '玩家', role: 'user', is_hidden: false, message: '最新', data: {}, extra: {} },
+  ])
+  assert.equal(frame.window.getChatMessages('0-').length, 3)
+  assert.deepEqual(plain(frame.window.getChatMessages('-2--1', { include_swipes: true })), [
+    { message_id: 1, name: '角色', role: 'assistant', is_hidden: true, message: '隐藏楼层', data: {}, extra: {} },
+    { message_id: 2, name: '玩家', role: 'user', is_hidden: false, message: '最新', data: {}, extra: {}, swipe_id: 1, swipes: ['最新', '重roll'], swipes_data: [{ id: 0 }, { id: 1 }], swipes_info: [{ send_date: 1 }, { send_date: 2 }] },
+  ])
+  assert.equal(frame.window.getChatMessages(1, { hide_state: 'hidden' })[0].message, '隐藏楼层')
+
+  assert.equal(typeof frame.window.TavernHelper.Context.getChatMessages, 'function')
+  assert.deepEqual(plain(frame.window.TavernHelper.Context.chat), [
+    { message_id: 0, name: '玩家', role: 'user', is_hidden: false, message: '开场', data: { floor: 0 }, extra: {}, swipe_id: 0, swipes: ['开场', '另一开场'] },
+    { message_id: 1, name: '角色', role: 'assistant', is_hidden: true, message: '隐藏楼层', data: {}, extra: {} },
+    { message_id: 2, name: '玩家', role: 'user', is_hidden: false, message: '最新', data: {}, extra: {}, swipe_id: 1, swipes: ['最新', '重roll'], swipes_data: [{ id: 0 }, { id: 1 }], swipes_info: [{ send_date: 1 }, { send_date: 2 }] },
+  ])
+  assert.deepEqual(plain(frame.window.TavernHelper.Context.variables), { stat_data: { chat: true } })
+  assert.equal(frame.window.TavernHelper.Context.getChatMessages, frame.window.getChatMessages)
+})
+
+test('setChatHidden forwards refresh options and createChatMessages preserves insert_before', async () => {
+  const frame = createFrame()
+  await frame.window.TavernHelper.setChatHidden(1, 3, true, { refresh: 'none' })
+  let request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'set-chat-hidden')
+  assert.deepEqual(plain(request?.payload), { start: 1, end: 3, hidden: true, options: { refresh: 'none' } })
+
+  await frame.window.createChatMessages([{ role: 'assistant', message: '插入前' }], { insert_before: 2, insert_at: 9, refresh: 'affected' })
+  request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'create-chat-messages')
+  assert.deepEqual(plain(request?.payload.options), { insert_before: 2, insert_at: 9, refresh: 'affected' })
+})
+
+test('explicit chat-cache sync retains an RPC escape hatch without changing getChatMessages return type', async () => {
+  const frame = createFrame()
+  const sync = frame.window.TavernHelper.Context.syncChatMessages()
+  const request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'get-chat-messages')
+  assert.deepEqual(plain(request?.payload), {
+    range: '0-{{lastMessageId}}',
+    options: { role: 'all', hide_state: 'all', include_swipes: true },
+  })
+  assert.equal(typeof sync?.then, 'function')
+  assert.deepEqual(plain(await sync), [])
+})
+
 test('displayed-message APIs use the safe host bridge', async () => {
   const frame = createFrame()
   frame.window.dispatchEvent({
