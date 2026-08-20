@@ -550,10 +550,31 @@ test('Tavern Helper generateRaw uses the isolated host RPC without changing chat
   await frame.window.generateRaw({ ordered_prompts: [{ role: 'user', content: '辅助问题' }] })
   const request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
   assert.equal(request?.method, 'generate-raw')
-  assert.deepEqual(plain(request?.payload), { ordered_prompts: [{ role: 'user', content: '辅助问题' }] })
+  assert.deepEqual(plain(request?.payload), {
+    ordered_prompts: [{ role: 'user', content: '辅助问题' }],
+    generation_id: 'frame-test-generation-1',
+  })
   assert.equal(frame.window.getChatMessages('0-').length, 0)
   assert.equal(frame.window.TavernHelper.generateRaw, frame.window.generateRaw)
   assert.equal(frame.window.SillyTavern.generateRaw, frame.window.generateRaw)
+})
+
+test('Tavern Helper generate supplies the official default placeholder order', async () => {
+  const frame = createFrame()
+  await frame.window.generate({ user_input: '普通生成' })
+  const request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'generate-raw')
+  assert.deepEqual(plain(request?.payload), {
+    user_input: '普通生成',
+    ordered_prompts: [
+      'world_info_before', 'persona_description', 'char_description',
+      'char_personality', 'scenario', 'world_info_after', 'dialogue_examples',
+      'chat_history', 'user_input',
+    ],
+    generation_id: 'frame-test-generation-1',
+  })
+  assert.notEqual(frame.window.TavernHelper.generate, frame.window.generateRaw)
+  assert.equal(frame.window.TavernHelper.generate, frame.window.generate)
 })
 
 test('function-valued injection filters are evaluated at generation preparation', async () => {

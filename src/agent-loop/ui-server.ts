@@ -81,7 +81,11 @@ import {
   readMvuStateWithSessionOverride,
   type MvuMacroContext,
 } from '../mvu.ts'
-import { generateTavernRaw, parseTavernGenerateRawRequest } from './tavern-generation.ts'
+import {
+  generateTavernRaw,
+  parseTavernGenerateRawRequest,
+  type TavernGenerationSources,
+} from './tavern-generation.ts'
 import { PersonaStore, substituteUserCharMacros } from './persona-store.ts'
 import { RegexScriptStore, applyRegexScripts, type RegexPlacement } from './regex-scripts.ts'
 import {
@@ -2616,6 +2620,48 @@ function handleGetSessionTavernHelper(state: AppState, id: string, res: ServerRe
   })
 }
 
+/** Reconstruct the read-only prompt sources exposed by the active ST session.
+ * This is only for the isolated Tavern Helper generation escape hatch: it does
+ * not run the main Agent RP stages or mutate the transcript. */
+function tavernGenerationSources(
+  state: AppState,
+  id: string,
+  userInput: string | undefined,
+): TavernGenerationSources {
+  const record = state.sessionRecords.get(id)
+  if (record === undefined) return { user_input: userInput ?? '' }
+  const persona = getCurrentUserPersona(state)
+  const macro = (value: string): string => substituteUserCharMacros(
+    value,
+    persona?.name ?? null,
+    record.character.name,
+  )
+  const before: string[] = []
+  const after: string[] = []
+  for (const entry of state.worldbook.list()) {
+    if (entry.enabled === false || entry.constant !== true) continue
+    const position = typeof entry.position === 'number' ? Math.trunc(entry.position) : 0
+    if (position !== 0 && position !== 1) continue
+    const content = macro(entry.content).trim()
+    if (content.length === 0) continue
+    const line = `### ${entry.path}\\n${content}`
+    if (position === 0) before.push(line)
+    else after.push(line)
+  }
+  const visibleHistory = state.sessions.getHistory(id).filter(message => message.is_hidden !== true)
+  return {
+    world_info_before: before.join('\\n\\n'),
+    persona_description: persona?.description ?? '',
+    char_description: macro(record.character.raw.description),
+    char_personality: macro(record.character.raw.personality),
+    scenario: macro(record.character.raw.scenario),
+    world_info_after: after.join('\\n\\n'),
+    dialogue_examples: macro(record.character.raw.messageExample),
+    chat_history: visibleHistory.map(message => ({ ...message })),
+    user_input: userInput === undefined ? '' : macro(userInput),
+  }
+}
+
 /** POST /api/sessions/:id/tavern-helper/generate-raw — one isolated
  * Tavern Helper generation. It deliberately does not append a floor or enter
  * intent/worldbook/context/response/postprocess/MVU, matching ST's helper
@@ -2630,7 +2676,11 @@ async function handleTavernGenerateRaw(state: AppState, id: string, req: Incomin
     return sendError(res, 400, error instanceof Error ? error.message : 'invalid generateRaw request')
   }
   try {
-    const result = await generateTavernRaw(resolveProvider(getGlobalConfig(state)), request)
+    const result = await generateTavernRaw(
+      resolveProvider(getGlobalConfig(state)),
+      request,
+      tavernGenerationSources(state, id, request.user_input),
+    )
     sendJson(res, 200, {
       content: result.content,
       text: result.content,
