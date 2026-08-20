@@ -36,6 +36,8 @@
 - 对齐主生成的酒馆生命周期：普通发送补发 `USER_MESSAGE_RENDERED`，重 roll 使用 `MESSAGE_SWIPED`，`GENERATION_ENDED` 传递消息楼层号；新 assistant 卡片 iframe 等待 React 完成挂载后再收到消息渲染事件。
 - 真正接入 `GENERATE_AFTER_COMBINE_PROMPTS` 与 `GENERATE_AFTER_DATA`：通过 SSE 与卡片 iframe 做一次可等待握手，Tavern Helper 脚本完成注入或变量 RPC 后刷新会话状态并重组同一次 response prompt，不增加 LLM 调用；非 UI SSE 客户端不会触发握手等待。
 - 接入主链 `WORLD_INFO_ACTIVATED`：世界书 agent/复用结果在 response 前以酒馆条目形状发送给卡片脚本，脚本新增的本轮 Tavern Helper 注入会在同一条回复中被重新读取；不增加 LLM 调用。
+- 修正 `WORLD_INFO_ACTIVATED` 的激活集合：现在同时发送本轮保留的蓝灯常驻条目、关键词命中条目和 `activewi` 强制条目，并补齐 key、次关键词、选择逻辑、position、概率、递归和包含组元数据；不增加 LLM 调用。
+- 将 World Info 事件投影回归测试纳入 `pnpm test:agents`，避免后续兼容改动只通过局部测试而漏出。
 - 世界书全局扫描设置补齐 ST 的 `min_activations`/深度上限、`recursive`、`max_recursion_steps`、`include_names` 和 `use_group_scoring`；全部由确定性 matcher 执行，不增加 LLM 调用，并在 UI/API 中可持久化配置。
 - 旧角色存档首次启动时会自动迁移到新的卡片世界书结构，并将迁移后的 `preprocessed.json` 持久化，避免每次启动重复迁移。
 - Tavern Helper 世界书的 `before_author_note/after_author_note` 现在映射到 ST 的 5/6 位置；独立世界书蓝灯按 0–7 位置进入示例区、atDepth、Author's Note 和 outlet，旧自定义模板保留三文档回退。

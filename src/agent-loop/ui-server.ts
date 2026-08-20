@@ -104,6 +104,7 @@ import {
   type TavernWorldbookEntry,
 } from '../tavern-helper.ts'
 import { buildWorldbookKeyIndex, renderWorldbookKeyOnlyMd } from './worldbook-key-index.ts'
+import { buildWorldInfoActivatedEntries } from './world-info-event.ts'
 import { tavernHelperWorldbookMetadata } from './worldbook-position.ts'
 import {
   normalizeTimedEffectState,
@@ -421,41 +422,6 @@ async function awaitBrowserGenerationHook(
       })
     } catch {
       complete(false)
-    }
-  })
-}
-
-/** Project the resolved World Info matches into the public ST event shape.
- * The imported path is retained as a stable uid because this project merges
- * card, external and Tavern Helper books into one session store. */
-function buildWorldInfoActivatedEventEntries(
-  matches: ReadonlyArray<{
-    path: string
-    order: number
-    weight: number
-    content: string
-    source?: string
-    position?: number
-    depth?: number
-    role?: 'system' | 'user' | 'assistant'
-  }>,
-): readonly Record<string, unknown>[] {
-  return matches.map((match) => {
-    const slash = match.path.lastIndexOf('/')
-    const world = slash > 0 ? match.path.slice(0, slash) : match.path
-    return {
-      world,
-      uid: match.path,
-      key: [],
-      keysecondary: [],
-      comment: match.path,
-      content: match.content,
-      order: match.order,
-      weight: match.weight,
-      ...(match.source === undefined ? {} : { source: match.source }),
-      ...(match.position === undefined ? {} : { position: match.position }),
-      ...(match.depth === undefined ? {} : { depth: match.depth }),
-      ...(match.role === undefined ? {} : { role: match.role }),
     }
   })
 }
@@ -2407,11 +2373,20 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     if (wb === null) { clearPendingWorldbookActivations(); res.end(); return }
     if (ctxSegs === null) { clearPendingWorldbookActivations(); res.end(); return }
 
-    // SillyTavern exposes the resolved World Info set before the final prompt
-    // is sent. Let card scripts observe it (and, if needed, add a same-turn
-    // Tavern Helper injection) before responseAgent snapshots its prompt.
-    if (uiClient && (wb as { matches: unknown[] }).matches.length > 0) {
-      const activated = buildWorldInfoActivatedEventEntries(
+    const keptConstantPaths = (wb as {
+      budget?: { keptConstantPaths?: unknown }
+    }).budget?.keptConstantPaths
+    const allowedConstantPaths = Array.isArray(keptConstantPaths)
+      ? new Set(keptConstantPaths.filter((path): path is string => typeof path === 'string'))
+      : undefined
+
+    // SillyTavern exposes the complete resolved World Info set before the
+    // final prompt is sent: keyed matches, surviving constants, and entries
+    // force-activated by an extension. Let card scripts observe the same set
+    // (and, if needed, add a same-turn Tavern Helper injection) before
+    // responseAgent snapshots its prompt.
+    if (uiClient) {
+      const activated = buildWorldInfoActivatedEntries(
         (wb as { matches: Array<{
           path: string
           order: number
@@ -2422,8 +2397,13 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
           depth?: number
           role?: 'system' | 'user' | 'assistant'
         }> }).matches,
+        state.worldbook,
+        worldbookActivationPaths,
+        allowedConstantPaths,
       )
-      await awaitBrowserGenerationHook(state, res, sessionId, 'world_info_activated', [activated])
+      if (activated.length > 0) {
+        await awaitBrowserGenerationHook(state, res, sessionId, 'world_info_activated', [activated])
+      }
       const refreshedHelperState = state.sessionRecords.get(sessionId)?.tavernHelperState
       if (refreshedHelperState !== undefined) helperState = refreshedHelperState
       helperPromptSelection = selectTavernInjectedPrompts(helperState)
@@ -2434,12 +2414,6 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     // the same source entries visible in the structured trace input too;
     // otherwise the trace misleadingly shows only matchCount and looks as if
     // an external worldbook was never passed to the response stage.
-    const keptConstantPaths = (wb as {
-      budget?: { keptConstantPaths?: unknown }
-    }).budget?.keptConstantPaths
-    const allowedConstantPaths = Array.isArray(keptConstantPaths)
-      ? new Set(keptConstantPaths.filter((path): path is string => typeof path === 'string'))
-      : undefined
     const constantWorldbookEntries = listConstantWorldbookEntries(
       state.worldbook,
       text => text,
