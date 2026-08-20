@@ -653,6 +653,17 @@ function buildCharacterTemplateRenderer(
   return state.ejsEngine.createRenderer({
     characterName: character.name,
     userName,
+    // ST-Prompt-Template's getCharData()/getchar() read the raw character
+    // object, not the three prose projections used by the response agent.
+    // Keep the exact imported JSON snapshot in the isolated renderer so card
+    // templates can access extensions, character_book, and frontend fields
+    // without reopening files or reaching the host process.
+    characterData: character.raw.raw,
+    characterCards: [{
+      id: activeCharacterId,
+      name: character.name,
+      data: character.raw.raw,
+    }],
     messages: history.map(message => message.content),
     transcript: history
       .filter((message): message is ChatMessage & { role: 'system' | 'user' | 'assistant' } =>

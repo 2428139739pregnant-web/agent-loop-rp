@@ -4,6 +4,7 @@
 
 ### 修复
 
+- 将 EJS 当前角色资源快照真正接入服务端 renderer：`getCharData()`/`getchar()` 现在可以读取角色卡原始 JSON（含扩展字段与 `character_book`），不会回退读取文件或增加模型调用；卡片 iframe 在没有酒馆宿主时提供受限的 `triggerSlash()` 兼容子集，宿主存在时优先转发官方实现。
 - Tavern Helper 聊天 mutation 现在保留并规范化 `refresh: none/affected/all`，兼容旧的布尔值和 `options.refresh` 写法；服务端响应会回传最终 refresh 模式，避免宿主在解析或响应阶段丢失刷新语义。
 - 对齐酒馆助手公开的 `setChatMessage(fieldValues, messageId, options)` 签名：支持局部更新 `message`、`data`、`extra` 等楼层字段，保留旧版 `(messageId, message)` 调用兼容；`getChatMessages` 同时支持 `0-` 形式的开放末端范围。
 - 修正 ST-Prompt-Template 的 `[GENERATE:REGEX:*]`：正则型生成条目现在由自身消息扫描激活，不再被普通蓝/绿灯过滤提前丢弃，仍由本地插件 lane 处理且不增加 LLM 调用。

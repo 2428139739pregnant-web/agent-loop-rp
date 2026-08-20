@@ -239,6 +239,16 @@ test('iframe EjsTemplate evaluates core Prompt Template syntax in the sandbox', 
   assert.match(await frame.window.EjsTemplate.getSyntaxErrorInfo('<% if ( %>'), /Unexpected token/)
 })
 
+test('standalone triggerSlash forwards a safe subset and rejects dynamic commands', async () => {
+  const frame = createFrame()
+  assert.equal(await frame.window.triggerSlash('/pass literal value'), 'literal value')
+  assert.equal(await frame.window.triggerSlash('/echo severity=success hello'), 'hello')
+  await frame.window.triggerSlash('/wait 0')
+  await assert.rejects(() => frame.window.triggerSlash('/pass {{user}}'), /macros/u)
+  await assert.rejects(() => frame.window.triggerSlash('/unknown command'), /not available/u)
+  await assert.rejects(() => frame.window.triggerSlash('/wait 60001'), /outside/u)
+})
+
 test('Tavern Helper chat tree APIs preserve message metadata and canonical RPC arguments', async () => {
   const frame = createFrame()
   await frame.window.setChatMessages([

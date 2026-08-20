@@ -42,6 +42,8 @@ Classic scripts execute directly. ESM keeps its original module boundaries and m
 
 The iframe also exposes the core `EjsTemplate` surface used by ST-Prompt-Template: `evalTemplate`, `prepareContext`, `compileTemplate`, `getSyntaxErrorInfo`, `getvar`, `setvar`/`incvar`/`decvar`, `getChatMessage`/`getChatMessages`, and `getwi`/`getWorldInfo`. EJS conditions, loops, escaped/raw output, comments, whitespace slurping, `print`, and the current `SillyTavern`/`TavernHelper`/`Mvu` projections run inside the same frame. Variable writes use the existing Session variable bridge; World Info reads remain read-only. This is the card/plugin execution surface, separate from the bounded model-facing QuickJS renderer documented in [EJS compatibility](ejs-compatibility.md), and it deliberately does not provide `execute`, `generate`, `getchar`, `getpreset`, `getqr`, or dynamic World Info activation yet.
 
+`triggerSlash(command)` is forwarded to the host's official Promise API when the host supplies it. In standalone mode the iframe exposes only the audited `/echo`, `/pass`, `/wait`, `/delay`, and `/sleep` subset; macros, pipelines, closures, arbitrary JavaScript, and unknown side-effect commands reject instead of being guessed or executed.
+
 Displayed-message helpers are also available through the safe bridge: `retrieveDisplayedMessage`, `formatAsDisplayedMessage`, and `refreshOneMessage`. The retrieved value is a remote jQuery-like handle rather than a parent-page DOM node; text/html/append/empty changes are temporary display overrides and cannot escape the iframe or silently rewrite the canonical transcript.
 
 ### Tavern Helper prompt injection

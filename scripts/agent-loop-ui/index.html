@@ -1677,6 +1677,45 @@
   const __parentApi={};
   for(const __key of __safeParentApis){try{if(__parent&&__parent[__key]!==undefined){__parentApi[__key]=__parent[__key];if(window[__key]===undefined)window[__key]=__parent[__key];}}catch{}}
   window.__agentRpParentApi=__parentApi;
+  // Tavern Helper exposes triggerSlash as a Promise-returning host API.  The
+  // real host implementation wins when it is available; the standalone card
+  // iframe still needs a deterministic fallback for cards opened outside a
+  // full Tavern host.  Keep that fallback deliberately narrow: it cannot
+  // resolve macros, execute JavaScript, run pipelines, or mutate the session.
+  if(typeof window.triggerSlash!=='function'){
+    const __triggerSlashError=(reason)=>{throw new Error('[agent-rp triggerSlash] '+reason);};
+    window.triggerSlash=async source=>{
+      const raw=String(source??''); const command=raw.trim();
+      if(!command)return '';
+      if(command.length>65536)__triggerSlashError('command is too large');
+      if(!command.startsWith('/'))__triggerSlashError('command must start with /');
+      if(/[|]|\\{\\{|\\}\\}|\\{:\\s?|:\\}/u.test(command))__triggerSlashError('macros, pipelines, and closures are unsupported');
+      const match=/^\\/([A-Za-z][A-Za-z0-9_-]*)(?:\\s+([\\s\\S]*))?$/u.exec(command);
+      if(!match)__triggerSlashError('malformed command');
+      const name=String(match[1]).toLowerCase(); const args=String(match[2]??'').trim();
+      if(name==='echo'){
+        let text=args; let severity='info';
+        const option=/^severity=(info|warning|error|success)(?:\\s+|$)/iu.exec(text);
+        if(option){severity=String(option[1]).toLowerCase();text=text.slice(option[0].length).trim();}
+        else if(/^\\S+=/u.test(text))__triggerSlashError('unsupported echo argument');
+        const notifier=window.toastr?.[severity];
+        if(typeof notifier==='function'){try{notifier.call(window.toastr,text);}catch{}}
+        return text;
+      }
+      if(name==='pass'){
+        if(!args)__triggerSlashError('pass requires a literal value');
+        return args;
+      }
+      if(name==='wait'||name==='delay'||name==='sleep'){
+        if(!/^\\d+$/u.test(args))__triggerSlashError('delay must be an integer in milliseconds');
+        const delay=Number(args);
+        if(!Number.isSafeInteger(delay)||delay>60000)__triggerSlashError('delay is outside the 0-60000ms range');
+        await new Promise(resolve=>setTimeout(resolve,delay));
+        return '';
+      }
+      __triggerSlashError('command is not available in the standalone compatibility subset');
+    };
+  }
   window._th_impl=Object.assign({},__parent?(()=>{try{return __parent._th_impl||{}}catch{return{}}})():{}, {
     iframe_id:__frameId,
     getIframeName:()=>__frameId,
