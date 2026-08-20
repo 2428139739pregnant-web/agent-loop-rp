@@ -217,6 +217,7 @@ export function buildWorldbookMatchInput(intent: IntentOutput, ctx: AgentContext
   // 一次准备可供 ST 深度扩展的历史，实际使用深度仍由确定性 matcher 控制。
   const history = ctx.session.getHistory(ctx.sessionId) as readonly ChatMessage[]
   const recentMessages: WorldbookScanMessage[] = history
+    .filter(m => m.is_hidden !== true)
     .filter(m => m.role === 'user' || m.role === 'assistant' || m.role === 'system')
     .slice(-Math.min(scanHistoryDepth, 1_000))
     .map(m => ({

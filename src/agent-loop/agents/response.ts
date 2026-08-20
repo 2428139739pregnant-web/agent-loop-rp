@@ -300,6 +300,9 @@ export function buildContextBlock(
     const mode = seg?.mode ?? 'drop'
     if (mode === 'drop') continue
     if (mode === 'full') {
+      // Keep hidden floors as turn boundaries so the context decision IDs
+      // remain stable, but never copy their contents into the prompt.
+      if (msg.is_hidden === true) continue
       const content = card === undefined ? msg.content : renderCharacterPromptView(
         msg.content, regexCharacter(card),
         AI_OUTPUT_PLACEMENT,
@@ -354,19 +357,26 @@ export function buildContextMessages(
 
   for (const [index, message] of history.entries()) {
     if (message.role !== 'assistant') {
-      pending.push({ message, index })
+      if (message.is_hidden !== true) pending.push({ message, index })
       continue
     }
     assistantTurn += 1
     const mode = decisions.get(assistantTurn) ?? 'drop'
     if (mode === 'full') {
       for (const item of pending) messages.push(renderHistoryMessage(item.message, item.index))
-      messages.push(renderHistoryMessage(message, index))
+      if (message.is_hidden !== true) messages.push(renderHistoryMessage(message, index))
     } else if (mode === 'summary') {
       const summary = readSummary(assistantTurn)
       if (summary) messages.push({ role: 'system', content: `[对话 ${assistantTurn} 摘要]\n${summary}` })
     }
     pending.length = 0
+  }
+  // A visible user floor can legitimately be left without a visible
+  // assistant pair when the assistant floor was hidden by Tavern. Preserve
+  // that user input when the context agent selected the corresponding full
+  // turn instead of silently dropping it at the end of the scan.
+  if (pending.length > 0 && decisions.get(assistantTurn + 1) === 'full') {
+    for (const item of pending) messages.push(renderHistoryMessage(item.message, item.index))
   }
   return messages
 }
@@ -641,7 +651,10 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     // 1. Load + render the system prompt.
     const template = renderEjs(ctx, await ctx.prompts.load('response'))
     const useStMessageTree = template.includes(ST_MESSAGE_TREE_MARKER)
-    const history = ctx.session.getHistory(ctx.sessionId)
+    // SillyTavern's `is_hidden` floors remain available to chat APIs and
+    // floor editing, but are excluded before custom context turn numbering
+    // so the context agent and response agent address the same visible tree.
+    const history = ctx.session.getHistory(ctx.sessionId).filter(message => message.is_hidden !== true)
     const currentMvu = ctx.statData === undefined
       ? readMvuStateFromMessages(input.character.raw, history)
       : { statData: ctx.statData, updateCount: 0 }

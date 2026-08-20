@@ -303,6 +303,36 @@ test('responseAgent.run returns the LLM content as reply', async () => {
   assert.equal(result.usedContextSegmentation, false)
 })
 
+test('responseAgent excludes hidden Tavern floors from the model-facing tree', async () => {
+  let captured: ChatMessage[] = []
+  const provider: LLMProvider = {
+    name: 'spy',
+    async chat(messages) { captured = messages; return { content: 'r' } },
+  }
+  const ctx = makeCtx({
+    provider,
+    history: [
+      { role: 'user', content: 'VISIBLE_USER' },
+      { role: 'assistant', content: 'HIDDEN_ASSISTANT', is_hidden: true },
+      { role: 'user', content: 'CURRENT_USER' },
+    ],
+  })
+  await responseAgent.run(
+    {
+      intent: makeIntent(),
+      worldbook: { matches: [] },
+      contextSegmentation: { segments: [{ id: 1, mode: 'full' }] },
+      userInput: 'CURRENT_USER',
+      character: makeCharacter(),
+    },
+    ctx,
+  )
+  const promptText = captured.map(message => message.content).join('\n')
+  assert.ok(promptText.includes('VISIBLE_USER'))
+  assert.ok(!promptText.includes('HIDDEN_ASSISTANT'))
+  assert.ok(promptText.includes('CURRENT_USER'))
+})
+
 test('responseAgent applies configurable perspective, length, and max token cap', async () => {
   let captured: ChatMessage[] = []
   let options: ChatOptions | undefined

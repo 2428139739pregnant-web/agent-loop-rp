@@ -54,6 +54,7 @@ function buildContextReader(session: SessionStore, sessionId: string): import('.
       let turn = 0
       const out: import('./agents/context-process.ts').ConversationSegment[] = []
       for (const m of history) {
+        if (m.is_hidden === true) continue
         if (m.role !== 'assistant') continue
         turn += 1
         out.push({ id: turn, content: m.content })
@@ -64,6 +65,7 @@ function buildContextReader(session: SessionStore, sessionId: string): import('.
       const history = session.getHistory(sessionId)
       let turn = 0
       for (const m of history) {
+        if (m.is_hidden === true) continue
         if (m.role !== 'assistant') continue
         turn += 1
         if (turn === id) return { id, content: m.content }

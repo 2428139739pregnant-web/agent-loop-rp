@@ -179,6 +179,11 @@ test('Tavern Helper chat tree APIs preserve message metadata and canonical RPC a
     swipes_info: [{ send_date: 1 }],
   }])
 
+  await frame.window.setChatMessages([{ message_id: 7, data: { source: 'updated' } }], { refresh: 'none' })
+  request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.deepEqual(plain(request?.payload.messages), [{ message_id: 7, data: { source: 'updated' } }])
+  assert.equal(request?.payload.options.refresh, 'none')
+
   await frame.window.createChatMessages([{ role: 'user', content: '插入' }], { insert_before: 1 })
   request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
   assert.equal(request?.method, 'create-chat-messages')

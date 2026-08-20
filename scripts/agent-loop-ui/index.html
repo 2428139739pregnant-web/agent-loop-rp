@@ -1714,13 +1714,14 @@
   window.getMvuVariable=window.getVariable;
   const __normalizeChatMessage=(message,index,creating=false)=>{
     const source=message&&typeof message==='object'?message:{};
-    const role=source.role==='system'||source.role==='user'||source.role==='assistant'||source.role==='tool'?source.role:(creating?'assistant':'assistant');
+    const role=source.role==='system'||source.role==='user'||source.role==='assistant'||source.role==='tool'?source.role:undefined;
+    const hasContent=typeof source.message==='string'||typeof source.content==='string'||source.mes!==undefined;
     const content=typeof source.message==='string'?source.message:(typeof source.content==='string'?source.content:String(source.mes??''));
     const normalized={
       ...(Number.isSafeInteger(source.message_id)?{message_id:source.message_id}:{}),
       ...(typeof source.name==='string'?{name:source.name}:{}),
-      role,
-      message:content,
+      ...(role===undefined?{}:{role}),
+      ...(hasContent?{message:content}:{}),
       ...(typeof source.is_hidden==='boolean'?{is_hidden:source.is_hidden}:{}),
       ...(source.data&&typeof source.data==='object'&&!Array.isArray(source.data)?{data:__clone(source.data)}:{}),
       ...(source.extra&&typeof source.extra==='object'&&!Array.isArray(source.extra)?{extra:__clone(source.extra)}:{}),
@@ -1729,14 +1730,19 @@
       ...(Array.isArray(source.swipes_data)?{swipes_data:__clone(source.swipes_data)}:{}),
       ...(Array.isArray(source.swipes_info)?{swipes_info:__clone(source.swipes_info)}:{}),
     };
-    if(!('message_id' in normalized)&&creating)normalized.message_id=index;
+    if(creating){if(normalized.role===undefined)normalized.role='assistant';if(normalized.message===undefined)normalized.message='';}
     return normalized;
   };
   const __chatMessages=(messages,creating=false)=>(Array.isArray(messages)?messages:[]).map((message,index)=>__normalizeChatMessage(message,index,creating));
   window.getChatMessages=(range,options={})=>__rpc('get-chat-messages',{range,options:__clone(options||{})});
   window.getCurrentChatId=()=>String(__chatId||__frameId);
-  window.getCurrentMessageId=()=>-1;
-  window.getLastMessageId=()=>-1;
+  const __contextChat=()=>Array.isArray(window.SillyTavern?.chat)?window.SillyTavern.chat:(Array.isArray(window.__stContext?.chat)?window.__stContext.chat:[]);
+  window.getCurrentMessageId=()=>window.getLastMessageId();
+  window.getLastMessageId=()=>{
+    const chat=__contextChat();
+    const last=chat.at(-1);
+    return Number.isSafeInteger(last?.message_id)?last.message_id:(chat.length-1);
+  };
   window.getCharWorldbookNames=()=>__rpc('get-char-worldbook-names',{});
   window.getWorldbookNames=()=>__rpc('get-worldbook-names',{});
   window.getGlobalWorldbookNames=()=>__rpc('get-global-worldbook-names',{});
@@ -2008,16 +2014,18 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       }
     }
 
-    function CardHtmlSurface({ source, mvuState, character, characterId = '', historyLength = 0, sessionId = null, surfaceKind = 'content', userName = '用户', onVariablesChange = null }) {
+    function CardHtmlSurface({ source, mvuState, character, characterId = '', historyLength = 0, sessionId = null, surfaceKind = 'content', userName = '用户', onVariablesChange = null, onChatRefresh = null }) {
       const frameRef = useRef(null)
       const frameId = useRef(`card-frame-${Math.random().toString(36).slice(2)}`)
       const sessionIdRef = useRef(sessionId)
       const initialMvuState = useRef(mvuState)
       const latestMvuState = useRef(mvuState)
       const onVariablesChangeRef = useRef(onVariablesChange)
+      const onChatRefreshRef = useRef(onChatRefresh)
       sessionIdRef.current = sessionId
       latestMvuState.current = mvuState
       onVariablesChangeRef.current = onVariablesChange
+      onChatRefreshRef.current = onChatRefresh
       const helperScripts = character?.frontend?.tavernHelperScripts || []
       const [height, setHeight] = useState(1)
       const frameDocument = useMemo(
@@ -2026,25 +2034,33 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
       )
       const syncFrameState = () => {
         const frame = frameRef.current
-        if (!frame?.contentWindow) return
+        if (!frame?.contentWindow) return Promise.resolve()
         const state = latestMvuState.current
         frame.contentWindow.postMessage({ type: 'agent-rp-card-variables', id: frameId.current, variables: state?.stat_data ? state : { stat_data: state || {} } }, '*')
         frame.contentWindow.postMessage({ type: 'agent-rp-card-theme', id: frameId.current, theme: document.documentElement.dataset.theme || '' }, '*')
         const activeSessionId = sessionIdRef.current
         if (activeSessionId) {
-          void Promise.all([
+          return Promise.all([
             apiGet(`/api/history?sessionId=${encodeURIComponent(activeSessionId)}&raw=1`),
             apiGet(`/api/sessions/${encodeURIComponent(activeSessionId)}/tavern-helper`),
           ]).then(([historySnapshot, helperSnapshot]) => {
             const messages = (historySnapshot.history || []).map((message, index) => ({
-              message_id: index,
+              message_id: Number.isSafeInteger(message?.message_id) ? message.message_id : index,
               name: message.role === 'user' ? userName : message.role === 'assistant' ? (character?.name || 'assistant') : 'system',
               role: message.role || 'assistant',
               is_user: message.role === 'user',
-              is_system: message.role === 'system',
+              // In ST's context `is_system` means hidden from the model, not
+              // a system-role message. Keep the role separately for callers
+              // that use the compatibility projection.
+              is_system: message.is_hidden === true,
               mes: String(message.content || ''),
               message: String(message.content || ''),
               content: String(message.content || ''),
+              ...(message.data && typeof message.data === 'object' ? { data: message.data } : {}),
+              ...(message.extra && typeof message.extra === 'object' ? { extra: message.extra } : {}),
+              ...(Number.isSafeInteger(message.swipe_id) ? { swipe_id: message.swipe_id } : {}),
+              ...(Array.isArray(message.swipes) ? { swipes: message.swipes } : {}),
+              ...(Array.isArray(message.swipe_info) ? { swipe_info: message.swipe_info } : {}),
             }))
             const helperState = helperSnapshot.tavernHelperState || {}
             const characterProjection = {
@@ -2081,6 +2097,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
             }, '*')
           }).catch(() => { /* a card may render before a session is available */ })
         }
+        return Promise.resolve()
       }
       const notifyFrameReady = () => {
         syncFrameState()
@@ -2118,6 +2135,16 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
             if (!requestId || !activeSessionId) { fail(new Error('no active session for Tavern Helper RPC')); return }
             const runRpc = async () => {
               const endpoint = `/api/sessions/${encodeURIComponent(activeSessionId)}/tavern-helper`
+              const refreshMode = value => value === false || value === 'none' ? 'none' : value === true ? 'affected' : value === 'all' ? 'all' : 'affected'
+              const refreshMutation = async (mode, messageIds = []) => {
+                if (mode === 'none') return
+                if (mode === 'all') {
+                  await broadcastCardHostEvent(activeSessionId, 'chat_id_changed', activeSessionId)
+                  return
+                }
+                const ids = messageIds.length > 0 ? messageIds : [-1]
+                for (const messageId of ids) await broadcastCardHostEvent(activeSessionId, 'message_updated', messageId)
+              }
               if (data.method === 'get-chat-messages') {
                 const result = await apiGet(`/api/history?sessionId=${encodeURIComponent(activeSessionId)}&raw=1`)
                 const source = Array.isArray(result.history) ? result.history : []
@@ -2132,25 +2159,42 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                   mes: String(message?.content || ''),
                   message: String(message?.content || ''),
                   content: String(message?.content || ''),
-                  ...(message?.data && typeof message.data === 'object' ? { data: message.data } : {}),
-                  ...(message?.extra && typeof message.extra === 'object' ? { extra: message.extra } : {}),
+                  data: message?.data && typeof message.data === 'object' ? message.data : {},
+                  extra: message?.extra && typeof message.extra === 'object' ? message.extra : {},
                   ...(Number.isSafeInteger(message?.swipe_id) ? { swipe_id: message.swipe_id } : {}),
                   ...(Array.isArray(message?.swipes) ? { swipes: message.swipes } : {}),
                   ...(Array.isArray(message?.swipes_data) ? { swipes_data: message.swipes_data } : {}),
                   ...(Array.isArray(message?.swipes_info) ? { swipes_info: message.swipes_info } : {}),
                 }))
-                const visible = options.hide_state === true ? allMessages : allMessages.filter(message => !message.is_hidden)
+                allMessages.sort((left, right) => left.message_id - right.message_id)
+                const ids = allMessages.map(message => message.message_id)
+                const resolveBoundary = (raw) => {
+                  const number = Number(raw)
+                  if (!Number.isFinite(number)) return null
+                  if (number < 0) return ids.at(number) ?? null
+                  return number
+                }
                 const range = data.payload?.range
-                if (range === undefined || range === null || range === '') return options.include_swipes === true ? visible : visible.map(({swipe_id,swipes,swipes_data,swipes_info,...message})=>message)
-                const indexes = Array.isArray(range) && range.length >= 2
-                  ? [Number(range[0]), Number(range[1])]
-                  : typeof range === 'number' || /^-?\d+$/.test(String(range))
-                    ? [Number(range), Number(range)]
-                    : String(range).replace(/\{\{lastMessageId\}\}/gu, String(visible.length - 1)).split('-').slice(0, 2).map(Number)
-                let [start, end] = indexes
-                if (start < 0) start = visible.length + start
-                if (end < 0) end = visible.length + end
-                const selected = visible.slice(Math.max(0, start), Math.min(visible.length, end + 1))
+                let start = ids[0] ?? 0
+                let end = ids.at(-1) ?? -1
+                if (range !== undefined && range !== null && range !== '') {
+                  const text = String(range).replace(/\{\{lastMessageId\}\}/gu, String(ids.at(-1) ?? -1))
+                  const pair = text.match(/^(-?\d+)\s*-\s*(-?\d+)$/u)
+                  if (pair) {
+                    start = resolveBoundary(pair[1])
+                    end = resolveBoundary(pair[2])
+                  } else {
+                    start = resolveBoundary(text)
+                    end = start
+                  }
+                }
+                if (start === null || end === null || start > end) return []
+                let selected = allMessages.filter(message => message.message_id >= start && message.message_id <= end)
+                const role = options.role === 'system' || options.role === 'assistant' || options.role === 'user' ? options.role : 'all'
+                if (role !== 'all') selected = selected.filter(message => message.role === role)
+                const hideState = options.hide_state === 'hidden' || options.hide_state === 'unhidden' ? options.hide_state : 'all'
+                if (hideState === 'hidden') selected = selected.filter(message => message.is_hidden)
+                if (hideState === 'unhidden') selected = selected.filter(message => !message.is_hidden)
                 return options.include_swipes === true ? selected : selected.map(({swipe_id,swipes,swipes_data,swipes_info,...message})=>message)
               }
               const state = data.method === 'get-worldbook' || data.method === 'get-char-worldbook-names' || data.method === 'get-worldbook-names'
@@ -2172,11 +2216,19 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
               if (data.method === 'set-chat-message') {
                 const messageId = Number(data.payload?.messageId)
                 if (!Number.isSafeInteger(messageId) || messageId < 0) throw new Error('chat message id must be a non-negative integer')
-                return apiPut(`/api/sessions/${encodeURIComponent(sessionId)}/message/${messageId}`, { content: String(data.payload?.message ?? '') })
+                const result = await apiPut(`/api/sessions/${encodeURIComponent(sessionId)}/message/${messageId}`, { content: String(data.payload?.message ?? '') })
+                await syncFrameState()
+                await refreshMutation('affected', [messageId])
+                await onChatRefreshRef.current?.('affected', [messageId])
+                return result
               }
               if (data.method === 'set-chat-messages') {
                 const result = await apiPut(endpoint, { format: 0, operation: 'set-chat-messages', messages: data.payload?.messages || [] })
-                if (data.payload?.options?.refresh !== false) await broadcastCardHostEvent(activeSessionId, 'message_updated', -1)
+                await syncFrameState()
+                const ids = (Array.isArray(data.payload?.messages) ? data.payload.messages : []).map(message => message?.message_id).filter(Number.isSafeInteger)
+                const mode = refreshMode(data.payload?.options?.refresh)
+                await refreshMutation(mode, ids)
+                await onChatRefreshRef.current?.(mode, ids)
                 return result
               }
               if (data.method === 'create-chat-messages' || data.method === 'delete-chat-messages' || data.method === 'rotate-chat-messages' || data.method === 'set-chat-hidden') {
@@ -2190,21 +2242,33 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                       ? { format: 0, operation, begin: payload.begin, middle: payload.middle, end: payload.end }
                       : { format: 0, operation, start: payload.start, end: payload.end, hidden: payload.hidden }
                 const result = await apiPut(endpoint, body)
-                if (payload.options?.refresh !== false) {
-                  if (operation === 'delete-chat-messages') {
-                    for (const messageId of Array.isArray(payload.messageIds) ? payload.messageIds : []) await broadcastCardHostEvent(activeSessionId, 'message_deleted', messageId)
-                  } else await broadcastCardHostEvent(activeSessionId, 'message_updated', -1)
-                }
+                await syncFrameState()
+                const mode = refreshMode(payload.options?.refresh)
+                if (mode !== 'none' && operation === 'delete-chat-messages') {
+                  if (mode === 'all') await refreshMutation(mode)
+                  else for (const messageId of Array.isArray(payload.messageIds) ? payload.messageIds : []) await broadcastCardHostEvent(activeSessionId, 'message_deleted', messageId)
+                } else await refreshMutation(mode, operation === 'create-chat-messages' ? [] : [payload.begin, payload.middle, payload.end].filter(Number.isSafeInteger))
+                await onChatRefreshRef.current?.(mode, operation === 'delete-chat-messages'
+                  ? (Array.isArray(payload.messageIds) ? payload.messageIds : [])
+                  : operation === 'create-chat-messages'
+                    ? []
+                    : [payload.begin, payload.middle, payload.end].filter(Number.isSafeInteger))
                 return result
               }
               if (data.method === 'tavern-helper-mutation') {
                 const payload = data.payload || {}
                 const result = await apiPut(endpoint, payload)
+                await syncFrameState()
                 if (['replace-worldbook', 'bind-global-worldbooks', 'bind-character-worldbooks', 'bind-chat-worldbook', 'update-worldbook'].includes(String(payload.operation || ''))) {
                   broadcastCardHostEvent(activeSessionId, 'worldinfo_updated', payload.name || null)
                 }
                 if (['set-chat-messages', 'create-chat-messages', 'delete-chat-messages', 'rotate-chat-messages', 'set-chat-hidden', 'set-chat-message'].includes(String(payload.operation || ''))) {
                   broadcastCardHostEvent(activeSessionId, 'message_updated', Number.isSafeInteger(payload.messageId) ? payload.messageId : -1)
+                  const mode = refreshMode(payload.options?.refresh)
+                  const ids = Array.isArray(payload.messageIds)
+                    ? payload.messageIds
+                    : Number.isSafeInteger(payload.messageId) ? [payload.messageId] : []
+                  await onChatRefreshRef.current?.(mode, ids)
                 }
                 return result
               }
@@ -2323,13 +2387,13 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
      * 角色卡的 markdownOnly 脚本只影响显示，promptOnly 脚本不会污染显示；
      * 普通 Markdown 继续走 marked + 白名单净化，角色卡前端进入独立
      * iframe；iframe 只负责自身排版，滚动仍由外层 .chat 统一负责。 */
-    function MessageContent({ content, role, character, characterId = '', historyLength = 0, sessionId = null, depth = 0, userName = '用户', mvuState = null, onVariablesChange = null }) {
+    function MessageContent({ content, role, character, characterId = '', historyLength = 0, sessionId = null, depth = 0, userName = '用户', mvuState = null, onVariablesChange = null, onChatRefresh = null }) {
       const processed = applyDisplayRegex(content, role === 'user' ? 1 : 2, character, depth, userName)
       const segments = compileDisplaySegments(processed)
       const rendered = segments.flatMap((segment, index) => {
         if (segment.kind === 'html') {
           return [h('div', { key: `html-surface-${index}`, className: 'msg-html-surface', 'data-surface-kind': 'content' },
-            h(CardHtmlSurface, { source: segment.source, mvuState, character, characterId, historyLength, sessionId, userName, surfaceKind: 'content', onVariablesChange }),
+            h(CardHtmlSurface, { source: segment.source, mvuState, character, characterId, historyLength, sessionId, userName, surfaceKind: 'content', onVariablesChange, onChatRefresh }),
           )]
         }
         const markdownHtml = marked.parse(segment.source, { gfm: true, breaks: true })
@@ -2345,7 +2409,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
      * corrected without losing them to the renderer.
      */
     function MessageFloor({
-      message, index, total, character, characterId, sessionId, userName, mvuState, onVariablesChange,
+      message, index, total, character, characterId, sessionId, userName, mvuState, onVariablesChange, onChatRefresh,
       disabled = false, onReroll = null, onSwipe = null, onSaveEdit, onDelete,
     }) {
       const [collapsed, setCollapsed] = useState(false)
@@ -2435,7 +2499,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
             ? h('div', { className: 'floor-collapsed-body' }, preview || '(空消息)')
             : h(MessageContent, {
                 content: message.content, role: message.role, character, characterId, historyLength: total,
-                sessionId, depth: Math.max(0, total - index - 1), userName, mvuState, onVariablesChange,
+                sessionId, depth: Math.max(0, total - index - 1), userName, mvuState, onVariablesChange, onChatRefresh,
               }),
       )
     }
@@ -3688,6 +3752,22 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           })
           .catch((err) => setError(`保存角色卡变量失败: ${String(err?.message || err)}`))
       }, [currentSessionId])
+      // Tavern Helper mutations happen inside a card iframe.  ST refreshes
+      // the visible message list after those mutations; keep the outer chat
+      // surface in the same state instead of only refreshing the iframe's
+      // context snapshot.  The iframe callback is intentionally cheap and
+      // ignores refresh:'none', which is used for silent batch updates.
+      const refreshCurrentHistory = useCallback(async (mode = 'affected') => {
+        if (mode === 'none' || currentSessionId === null) return
+        try {
+          const r = await apiGet(`/api/history?sessionId=${encodeURIComponent(currentSessionId)}`)
+          setHistory(r.history || [])
+          setMvuState(r.mvuState ?? null)
+          if (Number.isInteger(r.greetingIndex)) setActiveGreetingIdx(r.greetingIndex)
+        } catch (err) {
+          setError(String(err.message || err))
+        }
+      }, [currentSessionId])
       useEffect(() => {
         (async () => {
           try {
@@ -4285,6 +4365,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                       message: m, index: i, total: history.length,
                       character: currentCharacter, characterId: currentCharacterId, sessionId: currentSessionId, userName: currentUserName, mvuState,
                       onVariablesChange: onCardVariablesChange,
+                      onChatRefresh: refreshCurrentHistory,
                       disabled: currentSessionId === null || loading,
                       onReroll: i === history.length - 1 && m.role === 'assistant' ? reroll : null,
                       onSwipe: switchSwipe,

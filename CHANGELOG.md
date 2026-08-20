@@ -4,6 +4,8 @@
 
 ### 修复
 
+- 按酒馆助手官方消息接口修正楼层语义：`setChatMessages` 现在按 `message_id` 做局部 patch，不会因为只更新 `data`/`is_hidden` 而清空正文、角色名或 swipe；`getChatMessages` 按真实楼层号处理负数深度、`role`、`hide_state` 和 `include_swipes`，隐藏楼层也不会进入 response/worldbook 的模型提示词。
+- 卡片 iframe 内的聊天楼层变更现在会按 `refresh: none/affected/all` 回刷宿主对话区；隐藏楼层继续保留上下文边界但不渲染、不送入模型，避免状态栏/插件修改后外层楼层停留在旧快照。
 - 隐藏楼层现在保留在会话和原始消息 API 中，但不会被普通对话表面渲染；编辑/删除仍按原始楼层索引操作，避免隐藏楼层导致后续消息错位。
 - 对齐 Tavern Helper 的聊天消息树基础 API：`getChatMessages` 支持范围、隐藏状态和 swipe 选项，新增 `createChatMessages`、`deleteChatMessages`、`rotateChatMessages`、`setChatHidden`；插入/删除/旋转/隐藏/整段替换统一写入会话 JSONL，并保留 `message_id`、角色名、`data`、`extra` 和 swipe 元数据。
 - iframe 内的 `SillyTavern.getContext()` 不再只是 `{ chat: [] }` 占位：宿主会同步当前会话消息、角色/用户投影、chat id、extension prompts、MVU/变量读写和 World Info 查询入口；消息按 ST 常用的 `name`/`mes`/`is_user`/`is_system` 形状提供给卡片脚本。

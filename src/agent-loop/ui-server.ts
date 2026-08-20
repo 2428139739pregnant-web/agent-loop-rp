@@ -457,14 +457,16 @@ function displayHistory(
   }))
 }
 
-/** Convert the public Tavern Helper message shape into the durable session
- * shape without dropping card/plugin metadata.  The session store remains
- * the single source of truth; the iframe bridge only translates at its edge. */
-function tavernChatMessageToInternal(message: TavernChatMessageInput): ChatMessage {
+/** Convert a public Tavern Helper message/patch into the durable session
+ * shape without dropping card/plugin metadata. The optional base message is
+ * important: official setChatMessages is a partial patch, not a replacement
+ * of the whole chat or floor. */
+function tavernChatMessageToInternal(message: TavernChatMessageInput, base?: ChatMessage): ChatMessage {
   return {
+    ...(base === undefined ? {} : { ...base }),
     ...(message.message_id === undefined ? {} : { message_id: message.message_id }),
-    role: message.role ?? 'assistant',
-    content: message.message ?? '',
+    role: message.role ?? base?.role ?? 'assistant',
+    content: message.message ?? base?.content ?? '',
     ...(message.name === undefined ? {} : { name: message.name }),
     ...(message.is_hidden === undefined ? {} : { is_hidden: message.is_hidden }),
     ...(message.data === undefined ? {} : { data: { ...message.data } }),
@@ -481,9 +483,24 @@ function tavernMessageId(message: ChatMessage, index: number): number {
   return Number.isSafeInteger(message.message_id) ? message.message_id as number : index
 }
 
+function resolveTavernMessageId(history: readonly ChatMessage[], rawId: number): number {
+  if (rawId >= 0) return rawId
+  const ids = history.map((message, index) => tavernMessageId(message, index))
+  return ids.at(rawId) ?? rawId
+}
+
 function chatIndicesForIds(history: readonly ChatMessage[], messageIds: readonly number[]): Set<number> {
-  const wanted = new Set(messageIds)
+  const wanted = new Set(messageIds.map(messageId => resolveTavernMessageId(history, messageId)))
   return new Set(history.flatMap((message, index) => wanted.has(tavernMessageId(message, index)) ? [index] : []))
+}
+
+function resolveTavernInsertIndex(history: readonly ChatMessage[], rawId: number | 'end'): number {
+  if (rawId === 'end') return history.length
+  const index = history.findIndex((message, messageIndex) => tavernMessageId(message, messageIndex) === rawId)
+  if (index >= 0) return index
+  // In a normal ST chat the next floor id is also the append position.
+  if (rawId === history.length) return history.length
+  throw new Error('create-chat-messages insertAt does not identify a chat floor')
 }
 
 function rotateChatHistory(history: readonly ChatMessage[], begin: number, middle: number, end: number): ChatMessage[] {
@@ -2488,16 +2505,25 @@ async function handlePutSessionTavernHelper(
   let historyChanged = false
   if ('operation' in mutation) {
     if (mutation.operation === 'set-chat-messages') {
-      nextHistory = mutation.messages.map(tavernChatMessageToInternal)
-      historyChanged = true
+      nextHistory = [...previousHistory]
+      for (const patch of mutation.messages) {
+        const messageId = patch.message_id
+        if (messageId === undefined) return sendError(res, 400, 'set-chat-messages requires message_id')
+        const index = previousHistory.findIndex((message, messageIndex) => tavernMessageId(message, messageIndex) === messageId)
+        if (index < 0) return sendError(res, 404, `set-chat-messages message_id not found: ${messageId}`)
+        const current = previousHistory[index]
+        if (current === undefined) return sendError(res, 404, `set-chat-messages message_id not found: ${messageId}`)
+        nextHistory[index] = tavernChatMessageToInternal(patch, current)
+      }
+      historyChanged = mutation.messages.length > 0
     } else if (mutation.operation === 'create-chat-messages') {
-      const insertAt = mutation.insertAt === 'end' ? previousHistory.length : mutation.insertAt
-      if (insertAt < 0 || insertAt > previousHistory.length) {
-        return sendError(res, 400, 'create-chat-messages insertAt is out of range')
+      let insertAt: number
+      try { insertAt = resolveTavernInsertIndex(previousHistory, mutation.insertAt) } catch (error: unknown) {
+        return sendError(res, 400, error instanceof Error ? error.message : 'create-chat-messages insertAt is invalid')
       }
       nextHistory = [
         ...previousHistory.slice(0, insertAt),
-        ...mutation.messages.map(tavernChatMessageToInternal),
+        ...mutation.messages.map(message => tavernChatMessageToInternal(message)),
         ...previousHistory.slice(insertAt),
       ]
       historyChanged = mutation.messages.length > 0
