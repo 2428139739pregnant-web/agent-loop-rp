@@ -4406,16 +4406,22 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           lifecycleFinished = true
           broadcastCardHostEvent(sessionId, 'generation_stopped', generationType)
         }
-        // Evaluate Tavern Helper's function-valued filters at the same
-        // generation boundary as ST. This is a local iframe handshake, not
-        // an extra LLM request; failures leave the durable snapshot intact.
-        try { await prepareCardHostInjections(sessionId) } catch (error) { console.warn('[agent-rp Tavern Helper filter]', error) }
         // Match SillyTavern's host lifecycle. The actual prompt pipeline still
         // runs on the server, but card extensions must see the same ordering
         // before their generation hooks are evaluated.
         if (!bodyObj?.reroll) await broadcastCardHostEvent(sessionId, 'message_sent', Number.isSafeInteger(lifecycle.userMessageId) ? lifecycle.userMessageId : -1)
         await broadcastCardHostEvent(sessionId, 'generation_started', generationType, {}, false)
         await broadcastCardHostEvent(sessionId, 'GENERATION_AFTER_COMMANDS', generationType, {}, false)
+        // Tavern Helper/JS-Slash-Runner uses this awaited hook for prompt
+        // injections and other generation-bound preparation. It must finish
+        // before /api/run snapshots helper state and starts the agent stages.
+        await broadcastCardHostEvent(sessionId, 'generate_before_combine_prompts')
+        // Evaluate function-valued filters after the generation hooks have
+        // finished. Tavern Helper cards commonly create their injection in
+        // GENERATION_AFTER_COMMANDS or GENERATE_BEFORE_COMBINE_PROMPTS; doing
+        // this earlier would miss a newly-created filter for this request.
+        // This is a local iframe handshake, not an extra LLM request.
+        try { await prepareCardHostInjections(sessionId) } catch (error) { console.warn('[agent-rp Tavern Helper filter]', error) }
         if (bodyObj?.reroll) await broadcastCardHostEvent(sessionId, 'message_deleted', messageId)
         let resp
         try {
