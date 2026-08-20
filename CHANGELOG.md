@@ -4,6 +4,8 @@
 
 ### 修复
 
+- 对齐酒馆助手公开的 `setChatMessage(fieldValues, messageId, options)` 签名：支持局部更新 `message`、`data`、`extra` 等楼层字段，保留旧版 `(messageId, message)` 调用兼容；`getChatMessages` 同时支持 `0-` 形式的开放末端范围。
+- 修正 ST-Prompt-Template 的 `[GENERATE:REGEX:*]`：正则型生成条目现在由自身消息扫描激活，不再被普通蓝/绿灯过滤提前丢弃，仍由本地插件 lane 处理且不增加 LLM 调用。
 - 补齐酒馆原生 `setExtensionPrompt` 位置语义：`NONE`、`IN_PROMPT`、`IN_CHAT`、`BEFORE_PROMPT`（`-1/0/1/2`）现在会分别进入扫描、主提示词后、聊天深度和主提示词前锚点；保留深度、角色、扫描开关与函数过滤器。
 - 修正 ST World Info 位置映射：`2/3` 现在进入 Author's Note 前后，`5/6` 进入示例消息前后；角色卡与独立世界书的蓝灯、绿灯命中条目统一使用同一套位置语义。
 - 补齐酒馆助手 `chatMetadata` 桥接：支持 `SillyTavern.getContext().chatMetadata` 与 `updateChatMetadata(values, reset)`，并将更新持久化到当前会话。

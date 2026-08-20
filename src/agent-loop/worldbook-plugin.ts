@@ -281,7 +281,11 @@ export function buildWorldbookPluginOutput(
   const skipped: Array<{ path: string; reason: string }> = []
 
   for (const candidate of candidates) {
-    if (!isActivated(candidate)) {
+    // A [GENERATE:REGEX:*] entry is activated by its own message scan. It
+    // must reach the regex placement branch even when the ordinary ST
+    // blue/green key lane did not mark it active.
+    const regexGeneration = generatePlacementForCandidate(directive(candidate.comment, 'GENERATE'))?.kind === 'regex'
+    if (!isActivated(candidate) && !regexGeneration) {
       skipped.push({ path: candidate.path, reason: 'entry was not activated by ST key/constant rules' })
       continue
     }

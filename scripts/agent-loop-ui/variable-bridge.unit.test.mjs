@@ -202,6 +202,28 @@ test('SillyTavern setExtensionPrompt preserves the four official insertion posit
   assert.equal(typeof frame.window.TavernHelper.setExtensionPrompt, 'function')
 })
 
+test('Tavern Helper setChatMessage uses the public field-patch signature', async () => {
+  const frame = createFrame()
+  await frame.window.TavernHelper.setChatMessage(
+    { message: '修改后的正文', data: { source: 'card' }, extra: { floor: 3 } },
+    4,
+    { refresh: 'none' },
+  )
+  const request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'set-chat-message')
+  assert.deepEqual(plain(request?.payload), {
+    messageId: 4,
+    fields: { message: '修改后的正文', data: { source: 'card' }, extra: { floor: 3 }, message_id: 4 },
+    options: { refresh: 'none' },
+  })
+
+  // Keep the pre-canonical local signature working for cards imported before
+  // the public Tavern Helper bridge was aligned.
+  await frame.window.setChatMessage(5, '旧签名正文')
+  const legacy = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.deepEqual(plain(legacy?.payload.fields), { message: '旧签名正文', message_id: 5 })
+})
+
 test('Tavern Helper chat tree APIs preserve message metadata and canonical RPC arguments', async () => {
   const frame = createFrame()
   await frame.window.setChatMessages([

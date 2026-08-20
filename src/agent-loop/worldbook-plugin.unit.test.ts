@@ -78,6 +78,22 @@ test('generation/render placement respects ST blue-light and green activation ru
   assert.ok(output.skipped.some(item => item.path === 'green-render-before'))
 })
 
+test('[GENERATE:REGEX:*] activates independently of ordinary blue/green keys', () => {
+  const output = buildWorldbookPluginOutput([
+    candidate({
+      path: 'regex-owned',
+      comment: '[GENERATE:REGEX:Hello world]',
+      content: 'regex prompt',
+      active: false,
+      constant: false,
+    }),
+  ], makeContext())
+  assert.deepEqual(output.promptInjections.map(item => item.path), ['regex-owned'])
+  assert.deepEqual(output.promptInjections[0]?.placement, {
+    kind: 'regex', pattern: 'Hello world', at: 'before',
+  })
+})
+
 test('prompt injections preserve roles and apply absolute, target, and regex placement', () => {
   const base: ChatMessage[] = [
     { role: 'system', content: 'system' },
