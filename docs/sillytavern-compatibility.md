@@ -50,6 +50,8 @@ It also awaits `WORLDINFO_SCAN_DONE` immediately before `WORLD_INFO_ACTIVATED`. 
 
 `WORLDINFO_FORCE_ACTIVATE` is also bridged in the iframe runtime. When a card or helper emits raw Tavern entries (including the official `{ world, uid }` shape), the bridge sends the identity to the host, which resolves it against the merged WorldbookStore and records the canonical path for the current generation. Imported card and external-book entries retain their original source uid for this lookup. This mirrors Tavern's host-side listener without persisting the activation into later turns.
 
+World Info observer payloads use the same identity split: `world` prefers the imported/display book name and `uid` prefers the source-local uid; canonical paths remain internal and are still accepted as a backward-compatible activation identity.
+
 Worldbook UI mutations now follow Tavern's notification split: global scan-setting saves emit `WORLDINFO_SETTINGS_UPDATED` without arguments, while worldbook/entry/link changes emit `WORLDINFO_UPDATED`. Both are delivered to the active card iframe after the host mutation succeeds.
 
 Main UI generations carry a bounded `generation_id` through the card event handshake and `/api/run`. `activewi()` / `activateWorldInfoByKeywords()` include that id in their host RPC, so pending forced activations are isolated per generation; callers that use the legacy host RPC without an id retain the session-scoped fallback.

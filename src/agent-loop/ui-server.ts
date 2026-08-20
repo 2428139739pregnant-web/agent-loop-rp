@@ -5548,6 +5548,15 @@ function safeFileName(name: string): string {
   return cleaned.length > 0 ? cleaned : 'unnamed'
 }
 
+/** Preserve numeric Tavern UIDs in public World Info events when the source
+ * identifier is an ordinary non-negative decimal; retain authored strings
+ * such as UUIDs and named fixture ids unchanged. */
+function sourceUidValue(value: string): string | number {
+  if (!/^(?:0|[1-9]\d*)$/u.test(value)) return value
+  const numeric = Number(value)
+  return Number.isSafeInteger(numeric) ? numeric : value
+}
+
 /** 把一条角色卡内嵌 lorebook 条目转成 `WorldbookEntry`,并用 `<char>/<entry>` 命名空间隔离。
  *  ST 条目参数(constant/selectiveLogic/probability/position 等)全量透传:
  *  2.1 worldbook-match 用它们组装绿灯候选参数表,③ response 用 constant+position
@@ -5559,13 +5568,15 @@ function lorebookEntryToWorldbookEntry(
     readonly recursiveScanning: boolean
     readonly recursiveBookId: string
     readonly sourceBookId?: string
+    readonly sourceBookName?: string
     readonly sourceBookTokenBudget?: number
   },
 ): WorldbookEntry {
   const displayName = e.name ?? `(未命名 ${e.sourceId})`
   return {
     path: `${charName}/${displayName}`,
-    sourceUid: e.sourceId,
+    ...(recursion.sourceBookName === undefined ? {} : { sourceBookName: recursion.sourceBookName }),
+    sourceUid: sourceUidValue(e.sourceId),
     ...(recursion.sourceBookId === undefined ? {} : { sourceBookId: recursion.sourceBookId }),
     ...(recursion.sourceBookTokenBudget === undefined ? {} : { sourceBookTokenBudget: recursion.sourceBookTokenBudget }),
     ...(e.comment === undefined && e.name === undefined ? {} : { comment: e.comment ?? e.name }),
@@ -5640,7 +5651,8 @@ function tavernHelperWorldbookEntryToWorldbookEntry(bookName: string, entry: Tav
   return {
     path,
     sourceBookId: `tavern-helper:${bookName}`,
-    sourceUid: String(entry.uid),
+    sourceBookName: bookName,
+    sourceUid: entry.uid,
     comment: entry.name,
     keywords: [...entry.strategy.keys],
     order: entry.position.order,
@@ -5727,6 +5739,7 @@ function getMergedWorldbook(
             recursiveScanning: rec.preprocessed.lorebook?.recursiveScanning === true,
             recursiveBookId: `character:${safeFileName(rec.name)}`,
             sourceBookId: `character:${safeFileName(rec.name)}`,
+            sourceBookName: rec.preprocessed.lorebook?.name?.trim() || `${rec.name}'s Lorebook`,
             ...(rec.preprocessed.lorebook?.tokenBudget === undefined
               ? {}
               : { sourceBookTokenBudget: rec.preprocessed.lorebook.tokenBudget }),
@@ -5741,6 +5754,7 @@ function getMergedWorldbook(
             recursiveScanning: rec.preprocessed.lorebook?.recursiveScanning === true,
             recursiveBookId: `character:${safeFileName(rec.name)}`,
             sourceBookId: `character:${safeFileName(rec.name)}`,
+            sourceBookName: rec.preprocessed.lorebook?.name?.trim() || `${rec.name}'s Lorebook`,
             ...(rec.preprocessed.lorebook?.tokenBudget === undefined
               ? {}
               : { sourceBookTokenBudget: rec.preprocessed.lorebook.tokenBudget }),
@@ -5770,6 +5784,7 @@ function getMergedWorldbook(
           recursiveScanning: book.recursiveScanning === true,
           recursiveBookId: `worldbook:${name}`,
           sourceBookId: `worldbook:${name}`,
+          sourceBookName: book.name?.trim() || name,
           ...(book.tokenBudget === undefined ? {} : { sourceBookTokenBudget: book.tokenBudget }),
         },
       ))

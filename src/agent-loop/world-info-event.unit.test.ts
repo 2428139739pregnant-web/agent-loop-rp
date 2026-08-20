@@ -11,7 +11,7 @@ import {
 test('WORLD_INFO_ACTIVATED projects green, constant, and forced entries with ST metadata', () => {
   const store = new MemoryWorldbookStore([
     {
-      path: 'book/green.md', sourceBookId: 'worldbook:book', keywords: ['魔法'],
+      path: 'book/green.md', sourceBookId: 'worldbook:book', sourceBookName: '展示世界书', sourceUid: 3, keywords: ['魔法'],
       secondaryKeywords: ['火'], selective: true, selectiveLogic: 'and-all',
       order: 2, weight: 10, content: 'GREEN', position: 4, depth: 3,
     },
@@ -28,7 +28,8 @@ test('WORLD_INFO_ACTIVATED projects green, constant, and forced entries with ST 
     { path: 'book/green.md', order: 2, weight: 10, content: 'GREEN', position: 4 },
   ], store, new Map([['book/forced.md', true]]))
 
-  assert.deepEqual(result.map(entry => entry.uid), ['book/blue.md', 'book/green.md', 'book/forced.md'])
+  assert.deepEqual(result.map(entry => entry.uid), ['book/blue.md', 3, 'book/forced.md'])
+  assert.equal(result[1]?.world, '展示世界书')
   assert.equal(result[0]?.constant, true)
   assert.equal(result[0]?.position, 0)
   assert.equal(result[1]?.selectiveLogic, 3)
@@ -80,13 +81,13 @@ test('WORLDINFO_ENTRIES_LOADED groups merged books by their source prefix', () =
 
 test('WORLDINFO_FORCE_ACTIVATE resolves raw Tavern world and uid across merged sources', () => {
   const store = new MemoryWorldbookStore([
-    { path: '角色/条目', sourceBookId: 'character:角色', sourceUid: 'card-7', keywords: [], order: 1, weight: 1, content: 'CARD' },
-    { path: '世界书/外部/条目', sourceBookId: 'worldbook:外部', sourceUid: 'external-3', keywords: [], order: 2, weight: 1, content: 'EXTERNAL' },
-    { path: '酒馆助手/插件书/9', sourceBookId: 'tavern-helper:插件书', sourceUid: '9', keywords: [], order: 3, weight: 1, content: 'HELPER' },
+    { path: '角色/条目', sourceBookId: 'character:角色', sourceBookName: '角色背景', sourceUid: 'card-7', keywords: [], order: 1, weight: 1, content: 'CARD' },
+    { path: '世界书/外部/条目', sourceBookId: 'worldbook:外部', sourceBookName: '外部展示名', sourceUid: 'external-3', keywords: [], order: 2, weight: 1, content: 'EXTERNAL' },
+    { path: '酒馆助手/插件书/9', sourceBookId: 'tavern-helper:插件书', sourceBookName: '插件书', sourceUid: '9', keywords: [], order: 3, weight: 1, content: 'HELPER' },
   ])
 
-  assert.equal(resolveWorldInfoEntryPath(store, '角色', 'card-7'), '角色/条目')
-  assert.equal(resolveWorldInfoEntryPath(store, '外部', 'external-3'), '世界书/外部/条目')
+  assert.equal(resolveWorldInfoEntryPath(store, '角色背景', 'card-7'), '角色/条目')
+  assert.equal(resolveWorldInfoEntryPath(store, '外部展示名', 'external-3'), '世界书/外部/条目')
   assert.equal(resolveWorldInfoEntryPath(store, '插件书', 9), '酒馆助手/插件书/9')
   assert.equal(resolveWorldInfoEntryPath(store, '不存在', 9), null)
 })

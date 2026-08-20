@@ -1,10 +1,9 @@
 /** Project Agent RP's resolved World Info entries into SillyTavern's
  * WORLD_INFO_ACTIVATED payload vocabulary.
  *
- * The host keeps a path as the canonical entry id because card, imported and
- * Tavern Helper books are merged into one Store.  SillyTavern normally uses
- * a numeric uid local to a book; a stable string uid is safer here than
- * inventing a number that can change when books are reordered.
+ * The host keeps a path as the canonical internal id because card, imported
+ * and Tavern Helper books are merged into one Store. Public event payloads
+ * retain the source book name and source uid whenever the importer has them.
  */
 
 import type { WorldbookEntry } from './session.ts'
@@ -22,7 +21,7 @@ export interface WorldInfoEventMatch {
 
 export interface WorldInfoActivatedEntry {
   readonly world: string
-  readonly uid: string
+  readonly uid: string | number
   readonly key: readonly string[]
   readonly keysecondary: readonly string[]
   readonly comment: string
@@ -86,7 +85,9 @@ function selectiveLogicValue(value: WorldbookEntry['selectiveLogic']): number {
   }
 }
 
-function worldName(entry: Pick<WorldbookEntry, 'path' | 'sourceBookId'>): string {
+function worldName(entry: Pick<WorldbookEntry, 'path' | 'sourceBookId' | 'sourceBookName'>): string {
+  const sourceName = entry.sourceBookName?.trim()
+  if (sourceName !== undefined && sourceName.length > 0) return sourceName
   const source = entry.sourceBookId?.trim()
   if (source !== undefined && source.length > 0) {
     const separator = source.indexOf(':')
@@ -98,6 +99,8 @@ function worldName(entry: Pick<WorldbookEntry, 'path' | 'sourceBookId'>): string
 
 function worldInfoBookAliases(entry: WorldbookEntry): ReadonlySet<string> {
   const aliases = new Set<string>()
+  const sourceName = entry.sourceBookName?.trim()
+  if (sourceName !== undefined && sourceName.length > 0) aliases.add(sourceName)
   const source = entry.sourceBookId?.trim()
   if (source !== undefined && source.length > 0) {
     aliases.add(source)
@@ -124,7 +127,7 @@ export function resolveWorldInfoEntryPath(
   const worldText = typeof world === 'string' ? world.trim() : ''
   return worldbook.list().find(entry => {
     if (worldText.length > 0 && !worldInfoBookAliases(entry).has(worldText)) return false
-    if (entry.sourceUid !== undefined && entry.sourceUid === uidText) return true
+    if (entry.sourceUid !== undefined && String(entry.sourceUid) === uidText) return true
     return entry.path === uidText
       || entry.path.endsWith(`/${uidText}`)
       || entry.path.endsWith(`/${uidText}.md`)
@@ -141,7 +144,9 @@ export function toWorldInfoActivatedEntry(
   const resolvedRole = match.role ?? entry?.role
   return {
     world: entry === undefined ? worldName({ path: match.path }) : worldName(entry),
-    uid: match.path,
+    // Keep the canonical path internal, but expose the original Tavern uid
+    // when available so helper listeners can round-trip the official shape.
+    uid: entry?.sourceUid ?? match.path,
     key: [...(entry?.keywords ?? [])],
     keysecondary: [...(entry?.secondaryKeywords ?? [])],
     comment: entry?.comment ?? match.path,
