@@ -703,10 +703,68 @@ export const responseAgent: Agent<ResponseInput, ReplyResult> = {
     const contextBlock = contextMessages.length > 0
       ? '(相关历史已按 ST chatHistory 消息层注入)'
       : contextBlockFallback
-    const resolvedWorldbookMatches = input.worldbook.matches.map(match => ({
-      ...match,
-      content: renderEjs(ctx, match.content),
-    }))
+    // Prompt Template's activewi()/activateWorldInfoByKeywords() may mark a
+    // new entry while an already selected World Info entry is being rendered.
+    // ST adds that entry to the same generation's activation set. Resolve the
+    // set here, before position buckets and budget assembly, so the dynamic
+    // entry is indistinguishable from an ordinary match in the final prompt.
+    const resolvedWorldbookMatches: WorldbookMatch[] = []
+    const seenWorldbookPaths = new Set<string>()
+    let pendingWorldbookMatches: WorldbookMatch[] = [...input.worldbook.matches]
+    // Card iframe hooks run before /api/run opens, so their activation set may
+    // already contain entries even when ordinary keyword matching returned no
+    // green-light result. Seed those entries before entering the render loop.
+    const preActivatedWorldbookPaths = ctx.worldbookActivationPaths
+    if (preActivatedWorldbookPaths !== undefined) {
+      for (const [path, force] of preActivatedWorldbookPaths.entries()) {
+        if (pendingWorldbookMatches.some(match => match.path === path)) continue
+        const entry = ctx.worldbook.list().find(candidate => candidate.path === path)
+        if (entry === undefined || (!force && entry.enabled === false)) continue
+        pendingWorldbookMatches.push({
+          path: entry.path,
+          order: entry.order,
+          weight: entry.weight,
+          content: entry.content,
+          source: 'plugin',
+          ...(entry.position === undefined ? {} : { position: entry.position }),
+          ...(entry.depth === undefined ? {} : { depth: entry.depth }),
+          ...(entry.role === undefined ? {} : { role: entry.role }),
+        })
+      }
+    }
+    let activationPasses = 0
+    const maxActivationPasses = Math.max(1, Math.min(ctx.worldbook.list().length + 1, 256))
+    while (pendingWorldbookMatches.length > 0 && activationPasses < maxActivationPasses) {
+      activationPasses += 1
+      for (const match of pendingWorldbookMatches) {
+        if (seenWorldbookPaths.has(match.path)) continue
+        seenWorldbookPaths.add(match.path)
+        resolvedWorldbookMatches.push({
+          ...match,
+          content: renderEjs(ctx, match.content),
+        })
+      }
+      const activations = ctx.worldbookActivationPaths
+      if (activations === undefined || activations.size === 0) break
+      const nextWorldbookMatches: WorldbookMatch[] = []
+      for (const [path, force] of activations.entries()) {
+        if (seenWorldbookPaths.has(path)) continue
+        const entry = ctx.worldbook.list().find(candidate => candidate.path === path)
+        if (entry === undefined || (!force && entry.enabled === false)) continue
+        nextWorldbookMatches.push({
+          path: entry.path,
+          order: entry.order,
+          weight: entry.weight,
+          content: entry.content,
+          source: 'plugin',
+          ...(entry.position === undefined ? {} : { position: entry.position }),
+          ...(entry.depth === undefined ? {} : { depth: entry.depth }),
+          ...(entry.role === undefined ? {} : { role: entry.role }),
+        })
+      }
+      pendingWorldbookMatches = nextWorldbookMatches
+      if (pendingWorldbookMatches.length === 0) break
+    }
     const worldbookPlacement = splitWorldbookMatches(resolvedWorldbookMatches)
     const constantBlocks = buildConstantWorldbookBlocks(ctx.worldbook, macro, {
       ...(input.worldbook.budget?.keptConstantPaths === undefined

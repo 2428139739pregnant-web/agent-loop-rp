@@ -19,6 +19,7 @@ import { DEFAULT_RESPONSE_PERSPECTIVES } from '../response-settings.ts'
 import { InMemoryPromptLoader, type AgentContext } from './types.ts'
 import type { PreprocessedCharacter } from '../character-loader.ts'
 import type { ChatMessage, ChatOptions, LLMProvider } from '../provider.ts'
+import { EjsTemplateEngine } from '../../ejs-template.ts'
 import {
   type ContextSegmentOutput,
   type IntentOutput,
@@ -253,6 +254,8 @@ interface CtxOpts {
   readonly turnCount?: number
   readonly worldbook?: AgentContext['worldbook']
   readonly tavernHelperState?: AgentContext['tavernHelperState']
+  readonly renderTemplate?: AgentContext['renderTemplate']
+  readonly worldbookActivationPaths?: Map<string, boolean>
 }
 
 function makeCtx(opts: CtxOpts): AgentContext {
@@ -279,6 +282,8 @@ function makeCtx(opts: CtxOpts): AgentContext {
     worldbook: opts.worldbook ?? { match: () => [], getContent: () => undefined, list: () => [] },
     sessionId: 'test',
     ...(opts.tavernHelperState === undefined ? {} : { tavernHelperState: opts.tavernHelperState }),
+    ...(opts.renderTemplate === undefined ? {} : { renderTemplate: opts.renderTemplate }),
+    ...(opts.worldbookActivationPaths === undefined ? {} : { worldbookActivationPaths: opts.worldbookActivationPaths }),
   }
 }
 
@@ -691,6 +696,79 @@ test('responseAgent.run renders every template variable', async () => {
   assert.ok(capturedSystem.includes('火系, 剑术'),     'keywords')
   assert.ok(capturedSystem.includes('fire.md'),      'worldbook_block path')
   assert.ok(capturedSystem.includes('FIRE_MAGIC'),   'worldbook_block content')
+})
+
+test('responseAgent includes Prompt Template dynamically activated World Info in the same prompt', async () => {
+  let capturedSystem = ''
+  const provider: LLMProvider = {
+    name: 'spy',
+    async chat(messages) {
+      capturedSystem = messages.find(m => m.role === 'system')?.content ?? ''
+      return { content: 'r' }
+    },
+  }
+  const engine = await EjsTemplateEngine.create()
+  const activations = new Map<string, boolean>()
+  const worldbook = {
+    match: () => [],
+    getContent: (path: string) => path === 'dynamic.md' ? 'DYNAMIC_WORLD_INFO' : undefined,
+    list: () => [{ path: 'dynamic.md', keywords: ['dynamic'], order: 2, weight: 5, content: 'DYNAMIC_WORLD_INFO' }],
+  }
+  const renderTemplate: AgentContext['renderTemplate'] = (template, target) => engine.render(template, {
+    characterName: 'Lina',
+    userName: '小明',
+    messages: [],
+    worldInfoBooks: [{
+      id: 'external-book',
+      name: 'external-book',
+      entries: [{ sourceId: 'dynamic', name: 'Dynamic entry', data: { path: 'dynamic.md' }, content: 'DYNAMIC_WORLD_INFO' }],
+    }],
+    worldInfoActivation: {
+      activate(path, force = false) {
+        activations.set(path, (activations.get(path) ?? false) || force)
+      },
+    },
+  }, target)
+  const ctx = makeCtx({ provider, worldbook, renderTemplate, worldbookActivationPaths: activations })
+  await responseAgent.run({
+    intent: makeIntent(),
+    worldbook: { matches: [{ path: 'base.md', order: 1, weight: 5, content: `<% await activewi('Dynamic entry') %>BASE_WORLD_INFO` }] },
+    contextSegmentation: { segments: [] },
+    userInput: 'go',
+    character: makeCharacter(),
+  }, ctx)
+  assert.equal(activations.get('dynamic.md'), false)
+  assert.ok(capturedSystem.includes('BASE_WORLD_INFO'))
+  assert.ok(capturedSystem.includes('DYNAMIC_WORLD_INFO'))
+})
+
+test('responseAgent includes iframe-preactivated World Info without a keyword match', async () => {
+  let capturedSystem = ''
+  const provider: LLMProvider = {
+    name: 'spy',
+    async chat(messages) {
+      capturedSystem = messages.map(message => message.content).join('\n')
+      return { content: 'r' }
+    },
+  }
+  const activations = new Map<string, boolean>([['dynamic.md', false]])
+  const ctx = makeCtx({
+    provider,
+    worldbookActivationPaths: activations,
+    worldbook: {
+      match: () => [],
+      getContent: path => path === 'dynamic.md' ? 'IFRAME_DYNAMIC_WORLD_INFO' : undefined,
+      list: () => [{ path: 'dynamic.md', keywords: ['never-matched'], order: 2, weight: 5, content: 'IFRAME_DYNAMIC_WORLD_INFO' }],
+    },
+  })
+  await responseAgent.run({
+    intent: makeIntent(),
+    worldbook: { matches: [] },
+    contextSegmentation: { segments: [] },
+    userInput: 'go',
+    character: makeCharacter(),
+  }, ctx)
+  assert.ok(capturedSystem.includes('IFRAME_DYNAMIC_WORLD_INFO'))
 })
 
 test('responseAgent.run falls back to placeholders when inputs are empty', async () => {

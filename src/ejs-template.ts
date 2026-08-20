@@ -40,6 +40,8 @@ export interface EjsTemplateMessage {
 export interface EjsTemplateWorldInfoBook {
   readonly id: string
   readonly name?: string
+  /** ST-Prompt-Template source selector category. */
+  readonly sourceType?: 'character' | 'global' | 'persona' | 'character_extra' | 'chat'
   readonly entries: readonly {
     readonly sourceId: string
     readonly name?: string
@@ -78,6 +80,11 @@ export interface EjsTemplatePromptInjectionStore {
   inject(key: string, prompt: string, order?: number, sticky?: number, uid?: string): void
   get(key: string, postprocess?: unknown): string
   has(key: string): boolean
+}
+
+/** Per-generation sink for Prompt Template dynamic World Info activation. */
+export interface EjsTemplateWorldInfoActivationSink {
+  activate(path: string, force?: boolean): void
 }
 
 interface StoredPromptInjection {
@@ -169,8 +176,9 @@ export function createEjsTemplatePromptInjectionStore(): EjsTemplatePromptInject
 
 /** Project normalized Session lorebooks into the read-only EJS resource index. */
 export function createEjsWorldInfoBooks(books: readonly {
-  readonly id: string
-  readonly name?: string
+    readonly id: string
+    readonly name?: string
+    readonly sourceType?: EjsTemplateWorldInfoBook['sourceType']
   readonly lorebook: {
     readonly entries: readonly {
       readonly sourceId: string
@@ -184,6 +192,7 @@ export function createEjsWorldInfoBooks(books: readonly {
   return books.map(book => ({
     id: book.id,
     ...(book.name === undefined ? {} : { name: book.name }),
+    ...(book.sourceType === undefined ? {} : { sourceType: book.sourceType }),
     entries: book.lorebook.entries.map(entry => ({
       sourceId: entry.sourceId,
       ...(entry.name === undefined ? {} : { name: entry.name }),
@@ -226,6 +235,8 @@ export interface EjsTemplateContext {
   readonly presetPrompts?: readonly EjsTemplatePresetPromptResource[]
   /** Prompt Template's per-generation dependency-injection store. */
   readonly promptInjections?: EjsTemplatePromptInjectionStore
+  /** Current-generation dynamic World Info activation sink. */
+  readonly worldInfoActivation?: EjsTemplateWorldInfoActivationSink
   /** Internal JSON-only locals used while formatting a character or preset resource. */
   readonly templateData?: Readonly<Record<string, JsonValue>>
 }
@@ -904,8 +915,26 @@ function compileTemplate(
     const getWorldInfoActivatedData = async (name, keywords, condition = {}) =>
       selectActivatedEntries(await getWorldInfoData(name), keywords, condition);
     const getEnabledWorldInfoEntries = async (...args) => {
-      void args;
-      return getWorldInfoData();
+      const [chara = true, global = true, persona = true, charaExtra = true, onlyExisting = true] = args;
+      const entries = await getWorldInfoData();
+      const include = entry => {
+        const sourceType = String(entry.sourceType ?? '');
+        // Older snapshots have no source category. Preserve their historical
+        // all-visible behavior instead of dropping entries silently.
+        if (sourceType === '') return true;
+        if (sourceType === 'character') return chara !== false;
+        if (sourceType === 'global') return global !== false;
+        if (sourceType === 'persona') return persona !== false;
+        if (sourceType === 'character_extra') return charaExtra !== false;
+        return onlyExisting !== false;
+      };
+      return entries.filter(include);
+    };
+    const __activateWorldInfoEntry = (entry, force = false) => {
+      const record = entry && typeof entry === 'object' ? entry : {};
+      const path = typeof record.path === 'string' ? record.path : '';
+      if (path !== '') globalThis.__agentRpActivateWorldInfo(path, force === true);
+      return entry;
     };
     const __findWorldInfoEntry = async (book, title, force = false) => {
       const entries = await getWorldInfoData(book);
@@ -916,12 +945,15 @@ function compileTemplate(
     };
     const activewi = async (...args) => {
       const explicitBook = args.length >= 2 && (typeof args[0] === 'string' || typeof args[0] === 'number');
-      return __findWorldInfoEntry(explicitBook ? args[0] : undefined,
+      const entry = await __findWorldInfoEntry(explicitBook ? args[0] : undefined,
         explicitBook ? args[1] : args[0], explicitBook ? args[2] === true : args[1] === true);
+      return entry === null ? null : __activateWorldInfoEntry(entry, explicitBook ? args[2] === true : args[1] === true);
     };
     const activateWorldInfo = activewi;
-    const activateWorldInfoByKeywords = async (keywords, condition = {}) =>
-      selectActivatedEntries(await getEnabledWorldInfoEntries(), keywords, condition);
+    const activateWorldInfoByKeywords = async (keywords, condition = {}) => {
+      const entries = selectActivatedEntries(await getEnabledWorldInfoEntries(), keywords, condition);
+      return entries.map(entry => __activateWorldInfoEntry(entry, entry.disable === true));
+    };
     const __stripJsonComments = text => {
       let output = '';
       let quote = '';
@@ -1400,7 +1432,9 @@ export class EjsTemplateEngine implements LorebookRegexEngine {
             disable: source?.disable === true,
             world: source?.world ?? book.name ?? book.id,
             worldbook: book.id,
+            ...(book.sourceType === undefined ? {} : { sourceType: book.sourceType }),
             sourceId: entry.sourceId,
+            path: typeof source?.path === 'string' ? source.path : `${book.id}/${entry.sourceId}`,
             ...(entry.name === undefined ? {} : { name: entry.name }),
           }
         }))
@@ -1484,6 +1518,12 @@ export class EjsTemplateEngine implements LorebookRegexEngine {
       })
       vm.setProp(vm.global, '__agentRpGetPromptsInjected', getPromptsInjected)
       getPromptsInjected.dispose()
+      const activateWorldInfo = vm.newFunction('__agentRpActivateWorldInfo', (...handles) => {
+        const args = handles.map(handle => vm.dump(handle) as unknown)
+        context.worldInfoActivation?.activate(injectionText(args[0]), args[1] === true)
+      })
+      vm.setProp(vm.global, '__agentRpActivateWorldInfo', activateWorldInfo)
+      activateWorldInfo.dispose()
       const hasPromptsInjected = vm.newFunction('__agentRpHasPromptsInjected', (...handles) => {
         const args = handles.map(handle => vm.dump(handle) as unknown)
         return context.promptInjections?.has(injectionText(args[0])) === true ? vm.true : vm.false

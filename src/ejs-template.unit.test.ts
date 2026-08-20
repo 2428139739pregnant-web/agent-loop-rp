@@ -128,6 +128,49 @@ test('EJS runType follows the explicit render target and defaults to generate', 
   )
 })
 
+test('EJS World Info helpers honor source filters and record same-generation activation', async () => {
+  const engine = await EjsTemplateEngine.create()
+  const activated = new Map<string, boolean>()
+  const result = engine.render(
+    `<% const all = await getEnabledWorldInfoEntries();
+       const characterOnly = await getEnabledWorldInfoEntries(true, false, false, false);
+       await activewi('global-book', 'Global entry');
+       await activateWorldInfoByKeywords('magic'); %><%- JSON.stringify({
+         all: all.map(entry => entry.comment),
+         characterOnly: characterOnly.map(entry => entry.comment),
+       }) %>`,
+    {
+      characterName: '莉娜',
+      userName: '小明',
+      messages: [],
+      worldInfoBooks: [
+        {
+          id: 'character-book',
+          name: 'character-book',
+          sourceType: 'character',
+          entries: [{ sourceId: '1', name: 'Character entry', data: { key: ['magic'], path: 'character-book/1' }, content: 'CHARACTER' }],
+        },
+        {
+          id: 'global-book',
+          name: 'global-book',
+          sourceType: 'global',
+          entries: [{ sourceId: '2', name: 'Global entry', data: { key: ['magic'], path: 'global-book/2' }, content: 'GLOBAL' }],
+        },
+      ],
+      worldInfoActivation: {
+        activate(path, force = false) {
+          activated.set(path, (activated.get(path) ?? false) || force)
+        },
+      },
+    },
+  )
+  assert.deepEqual(result, {
+    ok: true,
+    text: '{"all":["Character entry","Global entry"],"characterOnly":["Character entry"]}',
+  })
+  assert.deepEqual([...activated.entries()], [['global-book/2', false], ['character-book/1', false]])
+})
+
 test('EJS Prompt Template injection is shared across renders in one generation', async () => {
   const engine = await EjsTemplateEngine.create()
   const promptInjections = createEjsTemplatePromptInjectionStore()

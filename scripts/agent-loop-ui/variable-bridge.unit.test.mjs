@@ -17,7 +17,7 @@ function loadFrameRuntime() {
   return vm.runInNewContext(`(${source})`, { safeCardScriptJson })
 }
 
-function createFrame(characterContext = null) {
+function createFrame(characterContext = null, rpcValues = {}) {
   const listeners = new Map()
   const messages = []
   const parent = {
@@ -32,7 +32,9 @@ function createFrame(characterContext = null) {
           id: message.id,
           requestId: message.requestId,
           ok: true,
-          value: message.method === 'format-as-displayed-message'
+          value: Object.prototype.hasOwnProperty.call(rpcValues, message.method)
+            ? rpcValues[message.method]
+            : message.method === 'format-as-displayed-message'
             ? { html: '<p>formatted</p>', text: 'formatted' }
             : { ok: true },
         },
@@ -159,6 +161,32 @@ test('Tavern Helper injectPrompts and uninjectPrompts use the canonical mutation
   assert.equal(frame.window.TavernHelper.getWorldbook, frame.window.getWorldbook)
   assert.equal(typeof frame.window.TavernHelper.replaceWorldbook, 'function')
   assert.equal(typeof frame.window.TavernHelper.rebindCharWorldbooks, 'function')
+})
+
+test('Tavern Helper activewi records a generation-scoped host activation', async () => {
+  const entry = {
+    uid: 7,
+    name: 'Magic entry',
+    enabled: true,
+    strategy: { type: 'selective', keys: ['magic'], keys_secondary: { logic: 'and_any', keys: [] }, scan_depth: 'same_as_global' },
+    position: { type: 'after_character_definition', role: 'system', depth: 0, order: 1 },
+    content: 'MAGIC',
+    probability: 100,
+    recursion: { prevent_incoming: false, prevent_outgoing: false, delay_until: null },
+    effect: { sticky: null, cooldown: null, delay: null },
+  }
+  const frame = createFrame(null, { 'get-worldbook-names': ['helper-book'], 'get-worldbook': [entry] })
+  const entries = await frame.window.getWorldInfoData('helper-book')
+  assert.equal(entries.length, 1)
+  assert.equal(entries[0].name, 'Magic entry')
+  const activated = await frame.window.activewi('helper-book', 'Magic entry')
+  assert.equal(activated.path, '酒馆助手/helper-book/7')
+  const request = messagesOf(frame, 'agent-rp-card-rpc').at(-1)
+  assert.equal(request?.method, 'activate-world-info')
+  assert.deepEqual(plain(request?.payload), { path: '酒馆助手/helper-book/7', force: false })
+  const matches = await frame.window.activateWorldInfoByKeywords('magic')
+  assert.equal(matches.length, 1)
+  assert.equal(messagesOf(frame, 'agent-rp-card-rpc').at(-1)?.method, 'activate-world-info')
 })
 
 test('SillyTavern chat metadata uses the canonical persistent mutation bridge', () => {

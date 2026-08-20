@@ -167,6 +167,8 @@ export interface AgentContext {
   readonly renderTemplate?: (template: string, target?: EjsTemplateTarget) => EjsTemplateResult
   /** Per-generation ST-Prompt-Template injectPrompt/getPromptsInjected store. */
   readonly promptInjections?: EjsTemplatePromptInjectionStore
+  /** Paths activated by Prompt Template activewi/activateWorldInfo helpers. */
+  readonly worldbookActivationPaths?: ReadonlyMap<string, boolean>
   /** Current MVU `stat_data`, exposed to prompts/templates when available. */
   readonly statData?: JsonValue
   /**

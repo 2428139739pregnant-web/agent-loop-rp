@@ -12,14 +12,14 @@ Agent RP 只执行能够从当前 Session 日志确定性重建的模板语义�
 | `_` 与 `YAML.stringify` | 支持 JSON 数据子集 | `_` 提供 `get`、`cloneDeep`、`mapValues`、`isEmpty`、`omit`、`pick`、`transform`；YAML 输出保持确定性并可由 YAML 1.2 读取，不提供页面对象或插件实例 |
 | `setvar`、`incvar`、`decvar`、`delvar`、`insvar`、`patchVariables` | 渲染副本支持 | 支持常用作用域、增减、插入/删除和 JSON patch；修改只在当前 QuickJS render-local 副本内生效，不写回 Session |
 | `getwi`、`getWorldInfo` | 只读支持 | 按当前 Session 的世界书来源和条目标识读取纯文本条目；支持当前书及显式书名，找不到返回空字符串，读取次数和累计字符受限 |
-| `getWorldInfoData`、`getWorldInfoActivatedData`、`getEnabledWorldInfoEntries` | 快照支持 | 返回角色卡、独立世界书和 Tavern Helper 世界书的 ST 形状条目元数据；激活判断使用当前快照，不替代宿主 matcher |
+| `getWorldInfoData`、`getWorldInfoActivatedData`、`getEnabledWorldInfoEntries` | 快照支持 | 返回角色卡、独立世界书和 Tavern Helper 世界书的 ST 形状条目元数据；`getEnabledWorldInfoEntries` 支持角色卡/全局/persona/角色扩展来源开关 |
 | `selectActivatedEntries`、`matchChatMessages`、`parseJSON`、`jsonPatch` | 支持 | 提供确定性的关键词/次关键词、楼层筛选和 JSON 工具子集，不调用 LLM |
 | `getCharData` | 只读支持 | 从 `EjsTemplateContext.characterData` 或 `characterCards` 读取未经过模板处理的 JSON 快照；没有快照或找不到 ID/名称时返回 `null`，不访问角色卡文件 |
 | `getchar`、`getChara` | 只读支持 | 使用官方默认角色定义格式或调用方传入的 EJS 格式，在同一隔离 QuickJS 中渲染；没有角色资源、递归超限或模板失败时返回空字符串 |
 | `getpreset`、`getPresetPrompt` | 只读支持 | 从可选的 `presetPrompts` JSON 快照读取并在同一隔离 QuickJS 中渲染；缺少资源或名称未命中时返回空字符串，不读取磁盘预设 |
 | `[GENERATE:REGEX:*]` 的 `matched_message`、`matched_message_index`、`matched_message_role` | 支持 | 每个正则命中楼层分别渲染；同一条目命中多楼层不会复用另一楼层的模板结果，也不会增加 LLM 调用 |
 | `getqr`、`getQuickReply` | 未提供 | 当前没有 Quick Reply 的 JSON 资源模型，因此不伪造该接口，也不访问 UI、文件或网络；调用方应把它视为未兼容能力 |
-| `activewi`、`activateWorldInfo`、`activateWorldInfoByKeywords` | 查询支持，动态激活未执行 | 可在当前快照中查询或筛选条目；不会建立下一轮的 pending activation 队列，也不会改写宿主 World Info 状态 |
+| `activewi`、`activateWorldInfo`、`activateWorldInfoByKeywords` | 支持本轮动态激活 | 查询/筛选结果会写入当前 generation 的临时 activation sink；response 组装时追加完整条目，结束后丢弃，不改写持久 World Info 状态 |
 | `injectPrompt`、`activateRegex`、`@@` 装饰器 | 未执行 | 会改变提示词结构或激活顺序，需要独立的 Session 事件和可检查的执行计划 |
 | 页面对象、JQuery、toastr、SillyTavern 全局对象 | 不提供 | 模型提示词模板不得访问 UI、网络或宿主页面 |
 | `Date`、随机数和 Host 异步 API | 不提供 | 保证同一 Session 日志可以重放出相同提示词 |

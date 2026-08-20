@@ -412,6 +412,8 @@ function buildAgentContext(deps: {
   renderTemplate?: (template: string, target?: EjsTemplateTarget) => EjsTemplateResult
   /** Per-generation Prompt Template injection store shared by all EJS renders. */
   promptInjections?: EjsTemplatePromptInjectionStore
+  /** Paths dynamically activated by Prompt Template World Info helpers. */
+  worldbookActivationPaths?: ReadonlyMap<string, boolean>
   /** Current MVU stat_data for this card/session. */
   statData?: import('@deepseek-ai/dsh-session').JsonValue
 }): import('./agents/types.ts').AgentContext {
@@ -434,6 +436,7 @@ function buildAgentContext(deps: {
     ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
     ...(deps.renderTemplate !== undefined ? { renderTemplate: deps.renderTemplate } : {}),
     ...(deps.promptInjections !== undefined ? { promptInjections: deps.promptInjections } : {}),
+    ...(deps.worldbookActivationPaths === undefined ? {} : { worldbookActivationPaths: deps.worldbookActivationPaths }),
     ...(deps.statData === undefined ? {} : { statData: deps.statData }),
   }
 }
@@ -597,6 +600,7 @@ function ejsWorldInfoData(entry: WorldbookEntry, sourceId = entry.path): JsonVal
   const uid = Number.isSafeInteger(Number(sourceId)) ? Number(sourceId) : sourceId
   const data: Record<string, JsonValue> = {
     uid,
+    path: entry.path,
     key: [...entry.keywords],
     keysecondary: [...(entry.secondaryKeywords ?? [])],
     comment: entry.comment ?? '',
@@ -627,9 +631,10 @@ function ejsWorldInfoData(entry: WorldbookEntry, sourceId = entry.path): JsonVal
 function ejsImportedLorebookData(
   bookName: string | undefined,
   entry: ImportedLorebookEntry,
+  pathOverride?: string,
 ): JsonValue {
   const normalized: WorldbookEntry = {
-    path: `${bookName ?? 'worldbook'}/${entry.name ?? entry.sourceId}`,
+    path: pathOverride ?? `${bookName ?? 'worldbook'}/${entry.name ?? entry.sourceId}`,
     ...(entry.comment === undefined && entry.name === undefined ? {} : { comment: entry.comment ?? entry.name! }),
     keywords: [...entry.keys],
     order: entry.insertionOrder,
@@ -662,6 +667,7 @@ function buildCharacterTemplateRenderer(
   sessionId: string,
   userName: string,
   promptInjections?: EjsTemplatePromptInjectionStore,
+  worldbookActivationPaths?: Map<string, boolean>,
 ): ReturnType<EjsTemplateEngine['createRenderer']> | undefined {
   if (state.ejsEngine === undefined) return undefined
   const history = session.getHistory(sessionId)
@@ -702,6 +708,7 @@ function buildCharacterTemplateRenderer(
   const worldInfoSources: Array<{
     readonly id: string
     readonly name?: string
+    readonly sourceType?: 'character' | 'global' | 'persona' | 'character_extra' | 'chat'
     readonly lorebook: {
       readonly entries: readonly {
       readonly sourceId: string
@@ -719,13 +726,18 @@ function buildCharacterTemplateRenderer(
     worldInfoSources.push({
       id: `character:${safeFileName(character.name)}`,
       name: cardBook.name ?? character.name,
+      sourceType: 'character',
       lorebook: {
         entries: cardBook.entries.map(entry => ({
           sourceId: entry.sourceId,
           ...(entry.name === undefined ? {} : { name: entry.name }),
           ...(entry.comment === undefined ? {} : { comment: entry.comment }),
           content: entry.content,
-          data: ejsImportedLorebookData(cardBook.name ?? character.name, entry),
+          data: ejsImportedLorebookData(
+            cardBook.name ?? character.name,
+            entry,
+            `${character.name}/${entry.name ?? `(未命名 ${entry.sourceId})`}`,
+          ),
         })),
       },
     })
@@ -735,6 +747,7 @@ function buildCharacterTemplateRenderer(
     worldInfoSources.push({
       id: 'fixture',
       name: 'fixture',
+      sourceType: 'global',
       lorebook: {
         entries: fixtureEntries.map(entry => ({
           sourceId: entry.path,
@@ -754,13 +767,18 @@ function buildCharacterTemplateRenderer(
     worldInfoSources.push({
       id: `worldbook:${bookId}`,
       name: book.name ?? bookId,
+      sourceType: 'global',
       lorebook: {
         entries: book.entries.map(entry => ({
           sourceId: entry.sourceId,
           ...(entry.name === undefined ? {} : { name: entry.name }),
           ...(entry.comment === undefined ? {} : { comment: entry.comment }),
           content: entry.content,
-          data: ejsImportedLorebookData(book.name ?? bookId, entry),
+          data: ejsImportedLorebookData(
+            book.name ?? bookId,
+            entry,
+            `世界书/${bookId}/${entry.name ?? `(未命名 ${entry.sourceId})`}`,
+          ),
         })),
       },
     })
@@ -772,6 +790,7 @@ function buildCharacterTemplateRenderer(
     worldInfoSources.push({
       id: `tavern-helper:${bookName}`,
       name: bookName,
+      sourceType: 'character_extra',
       lorebook: {
         entries: entries.map(entry => ({
           sourceId: String(entry.uid),
@@ -812,6 +831,14 @@ function buildCharacterTemplateRenderer(
     },
     worldInfoBooks: createEjsWorldInfoBooks(worldInfoSources),
     ...(promptInjections === undefined ? {} : { promptInjections }),
+    ...(worldbookActivationPaths === undefined ? {} : {
+      worldInfoActivation: {
+        activate: (path: string, force = false): void => {
+          if (!state.worldbook.list().some(entry => entry.path === path)) return
+          worldbookActivationPaths.set(path, (worldbookActivationPaths.get(path) ?? false) || force)
+        },
+      },
+    }),
     ...(mvu === undefined ? {} : { statData: mvu.statData }),
   })
 }
@@ -1362,6 +1389,8 @@ interface AppState {
   readonly worldbook: WorldbookStore
   readonly sessions: MemorySessionStore
   readonly sessionRecords: Map<string, SessionRecord>
+  /** Ephemeral Prompt Template/Tavern Helper World Info activations for the in-flight generation. */
+  readonly pendingWorldbookActivations: Map<string, Map<string, boolean>>
   /** 酒馆风格的"角色库":所有 import 过的角色卡都在这里。key = CharacterId。 */
   readonly characters: Map<CharacterId, CharacterRecord>
   /** 当前选中的角色 id(由前端在 UI 上点选控制)。 */
@@ -1424,6 +1453,7 @@ function buildState(opts: StartServerOptions, env: NodeJS.ProcessEnv): AppState 
     worldbook: undefined as unknown as WorldbookStore, // populated in startServer
     sessions: new MemorySessionStore(),
     sessionRecords: new Map<string, SessionRecord>(),
+    pendingWorldbookActivations: new Map<string, Map<string, boolean>>(),
     characters: new Map<CharacterId, CharacterRecord>(),
     currentCharacterId: null,
     currentSessionId: null,
@@ -1927,6 +1957,17 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     ? await findReusableTurn(sessionId, rerollTurn, userInput)
     : null
   const runId = randomUUID()
+  // Card iframe generation hooks run immediately before this request, so
+  // activewi() records its one-generation activation in this ephemeral map.
+  // Reuse the same object while response EJS is rendering, then discard it
+  // before postprocess/MVU and the next turn.
+  const worldbookActivationPaths = state.pendingWorldbookActivations.get(sessionId) ?? new Map<string, boolean>()
+  state.pendingWorldbookActivations.set(sessionId, worldbookActivationPaths)
+  const clearPendingWorldbookActivations = (): void => {
+    if (state.pendingWorldbookActivations.get(sessionId) === worldbookActivationPaths) {
+      state.pendingWorldbookActivations.delete(sessionId)
+    }
+  }
 
   // SSE headers — once these are written we cannot go back to JSON error responses.
   res.writeHead(200, {
@@ -1999,6 +2040,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     sessionId,
     activeUserName,
     promptInjections,
+    worldbookActivationPaths,
   )
   const mvuState = readSessionMvuState(record, session.getHistory(sessionId), mvuMacros)?.statData
   const agentCtx = buildAgentContext({
@@ -2018,6 +2060,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
     postprocessSettings: state.postprocessSettings,
     ...(templateRenderer === undefined ? {} : { renderTemplate: templateRenderer }),
     promptInjections,
+    worldbookActivationPaths,
     ...(mvuState === undefined ? {} : { statData: mvuState }),
   })
 
@@ -2234,7 +2277,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
         ))
     } else {
       intent = await runStageWithTrace('intent', { userInput }, () => intentAgent.run(userInput, agentCtx))
-      if (intent === null) { res.end(); return }
+      if (intent === null) { clearPendingWorldbookActivations(); res.end(); return }
       const currentIntent = intent
 
       // 2.1 输入改为结构化(最近 N 条消息 + 候选绿灯条目参数表,ST 语义适配):
@@ -2262,8 +2305,8 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
       wb = nextWorldbook
       ctxSegs = nextContext
     }
-    if (wb === null) { res.end(); return }
-    if (ctxSegs === null) { res.end(); return }
+    if (wb === null) { clearPendingWorldbookActivations(); res.end(); return }
+    if (ctxSegs === null) { clearPendingWorldbookActivations(); res.end(); return }
 
     // The response agent receives standalone blue-light entries through
     // agentCtx.worldbook and injects them into the final system prompt. Keep
@@ -2314,7 +2357,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
         agentCtx,
       ),
     )
-    if (result === null) { res.end(); return }
+    if (result === null) { clearPendingWorldbookActivations(); res.end(); return }
 
     usedWorldbook = (wb as { matches: unknown[] }).matches.length > 0
     usedContextSegmentation = (ctxSegs as { segments: unknown[] }).segments.length > 0
@@ -2353,12 +2396,15 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
       }
     }
   } catch (err) {
+    clearPendingWorldbookActivations()
     if (!res.writableEnded) {
       try { writeSseEvent(res, 'error', { name: 'error', status: 'error', message: String(err) }) } catch { /* */ }
       res.end()
     }
     return
   }
+
+  clearPendingWorldbookActivations()
 
   // ⑤ postprocess 编排:每个子环节独立 stage,实时追踪,无 race。
   //
@@ -2757,6 +2803,30 @@ function handleGetSessionTavernHelper(state: AppState, id: string, res: ServerRe
     ...sessionVariablesPayload(state, record),
     tavernHelperState: helperState,
   })
+}
+
+/** POST /api/sessions/:id/tavern-helper/activate-world-info — record a
+ * generation-scoped World Info activation requested by a card iframe. This
+ * is deliberately outside TavernHelperState: activewi() affects only the
+ * prompt currently being assembled and must not leak into a later turn or
+ * reroll. */
+async function handleActivateWorldInfoForGeneration(
+  state: AppState,
+  id: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  if (!state.sessionRecords.has(id)) return sendError(res, 404, `session not found: ${id}`)
+  const payload = parseJsonBody(await readBody(req, 64 * 1024))
+  const path = typeof payload?.path === 'string' ? payload.path.trim() : ''
+  if (path.length === 0 || path.length > 1024) return sendError(res, 400, 'world info path is invalid')
+  const entry = state.worldbook.list().find(candidate => candidate.path === path)
+  if (entry === undefined) return sendJson(res, 200, { activated: false, path })
+  const force = payload?.force === true
+  const pending = state.pendingWorldbookActivations.get(id) ?? new Map<string, boolean>()
+  pending.set(path, (pending.get(path) ?? false) || force)
+  state.pendingWorldbookActivations.set(id, pending)
+  sendJson(res, 200, { activated: true, path, force: pending.get(path) === true })
 }
 
 /** Reconstruct the read-only prompt sources exposed by the active ST session.
@@ -5942,6 +6012,10 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
         const stopMatch = /^\/api\/sessions\/([^/]+)\/tavern-helper\/stop-generation$/u.exec(url.pathname)
         if (method === 'POST' && stopMatch !== null) {
           return await handleTavernStopGeneration(state, decodeURIComponent(stopMatch[1] ?? ''), req, res)
+        }
+        const activateMatch = /^\/api\/sessions\/([^/]+)\/tavern-helper\/activate-world-info$/u.exec(url.pathname)
+        if (method === 'POST' && activateMatch !== null) {
+          return await handleActivateWorldInfoForGeneration(state, decodeURIComponent(activateMatch[1] ?? ''), req, res)
         }
       }
       {
