@@ -2904,13 +2904,15 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
      */
     function MessageFloor({
       message, index, total, character, characterId, sessionId, userName, mvuState, onVariablesChange, onChatRefresh, onDisplayedMessage, displayOverride = null,
-      disabled = false, onReroll = null, onSwipe = null, onSaveEdit, onDelete,
+      disabled = false, onReroll = null, onSwipe = null, onSaveEdit, onDelete, onRetryMvu = null,
     }) {
       const [collapsed, setCollapsed] = useState(false)
       const [editing, setEditing] = useState(false)
       const [draft, setDraft] = useState(message.content)
       const [saving, setSaving] = useState(false)
+      const [retrying, setRetrying] = useState(false)
       const isLatestAssistant = index === total - 1 && message.role === 'assistant'
+      const canRetryMvu = isLatestAssistant && typeof onRetryMvu === 'function'
 
       useEffect(() => {
         if (!editing) setDraft(message.content)
@@ -2924,6 +2926,16 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
           setCollapsed(false)
         } finally {
           setSaving(false)
+        }
+      }
+
+      const retryMvu = async () => {
+        if (typeof onRetryMvu !== 'function') return
+        setRetrying(true)
+        try {
+          await onRetryMvu()
+        } finally {
+          setRetrying(false)
         }
       }
 
@@ -2973,6 +2985,12 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                   className: 'floor-action', title: '重 roll 当前回复', disabled: disabled,
                   onClick: () => { void onReroll() },
                 }, '重 roll')
+              : null,
+            canRetryMvu
+              ? h('button', {
+                  className: 'floor-action', title: '对当前回复重算 MVU 变量,不会重新生成正文。', disabled: disabled || retrying,
+                  onClick: () => { void retryMvu() },
+                }, retrying ? 'MVU 重算中…' : '重算 MVU')
               : null,
             h('button', {
               className: 'floor-action floor-action-danger', title: '删除本层', disabled: disabled || saving,
@@ -4702,6 +4720,35 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
         setTimeout(() => setProgressStages(INITIAL_STAGES), 5000)
       }, [currentSessionId, loading, history, refreshCharacterSessions, streamRun])
 
+      // 单独重算最新一条 assistant 回复的 MVU 变量：不动正文,也不重 roll。
+      // 服务端会基于当前 statData 与最新正文,再走一次独立的 MVU LLM 调用,
+      // 把 <UpdateVariable> 块写回 assistant 消息并刷新会话 mvuState;卡片状态栏
+      // 因为 mvuState 变化会自动收到新的 stat_data,不必再额外推 postMessage。
+      const retryMvu = useCallback(async () => {
+        if (currentSessionId === null) return
+        const last = history[history.length - 1]
+        if (!last || last.role !== 'assistant') {
+          setError('只有最新一条角色回复支持重算 MVU。')
+          return
+        }
+        try {
+          const r = await apiPost(`/api/sessions/${encodeURIComponent(currentSessionId)}/mvu/retry`, {})
+          if (r?.applied === true) {
+            if (Array.isArray(r.history)) setHistory(r.history)
+            if (r.mvuState !== undefined) setMvuState(r.mvuState)
+            broadcastCardHostEvent(currentSessionId, 'message_updated', history.length - 1)
+            refreshCharacterSessions()
+            setError(null)
+          } else if (r?.error) {
+            setError(`MVU 重算失败: ${r.error}`)
+          } else {
+            setError('MVU 重算没有产生变量更新。')
+          }
+        } catch (err) {
+          setError(`MVU 重算失败: ${String(err?.message || err)}`)
+        }
+      }, [currentSessionId, history, refreshCharacterSessions])
+
       const saveMessageEdit = useCallback(async (index, content) => {
         if (currentSessionId === null) return
         try {
@@ -4970,6 +5017,7 @@ if(!window.showdown)window.showdown={Converter:class{constructor(options={}){thi
                       displayRefreshVersion,
                       disabled: currentSessionId === null || loading,
                       onReroll: i === history.length - 1 && m.role === 'assistant' ? reroll : null,
+                      onRetryMvu: i === history.length - 1 && m.role === 'assistant' ? retryMvu : null,
                       onSwipe: switchSwipe,
                       onSaveEdit: saveMessageEdit,
                       onDelete: deleteMessage,

@@ -33,5 +33,13 @@ WebUI 的「MVU 变量处理（独立 LLM）」面板对应 `mvu-settings.json`�
 - `POST /api/mvu-presets`
 - `PUT/DELETE /api/mvu-presets/:id`
 - `GET/PUT /api/prompts/mvu`
+- `POST /api/sessions/:id/mvu/retry` — 单独对最新一条 assistant 回复重算 MVU 变量
+  - 行为：剥离既有 `<UpdateVariable>` 块后，基于当前 `statData` 与最近一段正文再走一次独立 MVU LLM
+    调用，校验通过后把新的机器块追加回 assistant 消息并刷新会话 `mvuState`；变量失败时返回 `{ applied: false, error }`，
+    不会重 roll 也不会清空原 prose。Body 支持 `{ appendToReply?: boolean, update?: string }`，
+    其中 `update` 用于把手动编辑的 JSON Patch 走与模型输出完全相同的校验路径。
+  - 返回：`{ applied, appended?, mvuState, update?, appliedOperations?, history?, error? }`。
+  - 前端：聊天区域最新一条 assistant 楼层提供 “重算 MVU” 按钮，无需打开 Trace 面板；点击后通过 `setMvuState`
+    触发原有的 `useEffect` → `syncFrameState` 链，角色卡 iframe 状态栏立刻收到新的 `stat_data`。
 
 SSE trace 使用名称 `mvu`，token 统计也单独落在 `agents.mvu`。JSON `/api/run?format=json` 同样走独立 MVU 调用，但目前 JSON 路径不发送 SSE trace。

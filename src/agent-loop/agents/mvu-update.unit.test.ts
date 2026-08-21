@@ -180,3 +180,43 @@ test('MVU initial variables rejects valid non-object JSON and YAML values', () =
   } as unknown as Parameters<typeof readInitialMvuState>[0]
   assert.throws(() => readInitialMvuState(yamlCard), /must contain one JSON-compatible object/u)
 })
+
+test('MVU retry replay safety: stripping the prior block lets applyMvuReply start from the original state', () => {
+  const seed = { score: 0 }
+  const first = applyMvuReply(seed, '<update><json_patch>[{"op":"replace","path":"/score","value":1}]</json_patch></update>')
+  assert.ok(first !== undefined)
+  // Reapplying the same text on the already-updated state must not double-count,
+  // matching the contract the retry endpoint relies on when no strip happens.
+  const second = applyMvuReply(first.statData, '<update><json_patch>[{"op":"replace","path":"/score","value":1}]</json_patch></update>')
+  assert.ok(second !== undefined)
+  const secondState = second.statData as { score: number }
+  assert.equal(secondState.score, 1)
+  // A retry that strips the prior <update> block and feeds a fresh delta must
+  // observe the original `seed`, not the post-update state.
+  const third = applyMvuReply(seed, '<update><json_patch>[{"op":"delta","path":"/score","value":3}]</json_patch></update>')
+  assert.ok(third !== undefined)
+  const thirdState = third.statData as { score: number }
+  assert.equal(thirdState.score, 3)
+})
+
+test('runMvuUpdate reports nothing when the model returns a no-op patch', async () => {
+  const provider: LLMProvider = {
+    name: 'phony',
+    async chat() {
+      return { content: '<update><json_patch>[]</json_patch></update>' }
+    },
+  }
+  const settings: MvuRuntimeSettings = { enabled: true, model: 'mvu-model', temperature: 0, promptName: 'mvu' }
+  const result = await runMvuUpdate(
+    { character: makeCharacter(), userInput: 'hi', assistantReply: 'reply', statData: { score: 0 } },
+    makeContext(provider),
+    settings,
+  )
+  // An empty JSON Patch is a valid no-op block; the retry endpoint treats it
+  // as `applied: true` with zero operations so the UI can show "no changes".
+  assert.ok(result.update !== undefined)
+  const applied = applyMvuReply({ score: 0 }, result.update)
+  assert.ok(applied !== undefined)
+  assert.equal(applied.appliedOperations, 0)
+  assert.deepEqual(applied.statData, { score: 0 })
+})

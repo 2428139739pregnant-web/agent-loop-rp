@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### 新增
+
+- 新增独立的 MVU 变量重算入口 `POST /api/sessions/:id/mvu/retry`：在不重 roll、不重生成正文的前提下，对当前会话最新一条 assistant 回复再走一次专属 MVU LLM 调用，校验后的 `<UpdateVariable>` 块写回原 assistant 消息并刷新会话 `mvuState`，避免因 MVU 单次失败而被迫整段重 roll。返回值支持 `applied`/`appended`/`mvuState`/`appliedOperations`，并允许通过 `update` 字段直接喂入一个手动编辑的 JSON Patch 走校验路径。前端在最新一条 assistant 楼层加了一颗 “重算 MVU” 按钮，点击后通过 `setMvuState` 触发原有的 `useEffect` → `syncFrameState` 链，角色卡 iframe 状态栏会立刻收到新的 `stat_data`，不再依赖手动 postMessage。
+- 角色卡 iframe 内的 MVU/Tavern Helper 桥进一步对齐 StageDog 模板：所有命名空间写入都会按当前 host 的 `tavernHelperState` 和 `mvuState` 同时回写，host 端的 `useEffect` 直接推送 `agent-rp-card-variables`/`agent-rp-card-helper-state`/`agent-rp-card-context` 三类事件，状态栏刷新不再依赖卡片自身重新挂载。
+
 ### 修复
 
 - 补齐 `WORLDINFO_ENTRIES_LOADED`：卡片 iframe 首次加载和 Tavern Helper 状态同步后都能收到当前合并世界书的 `globalLore`、`characterLore`、`chatLore`、`personaLore` 四类投影；不增加 LLM 调用。

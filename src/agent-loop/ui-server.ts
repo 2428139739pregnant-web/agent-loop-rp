@@ -74,8 +74,10 @@ import {
   type EjsTemplateTarget,
 } from '../ejs-template.ts'
 import {
+  applyMvuReply,
   extractMvuStatData,
   normalizeMvuJsonValue,
+  normalizeMvuSupplement,
   readInitialMvuState,
   readMvuStateFromMessages,
   readMvuStateWithSessionOverride,
@@ -2936,6 +2938,179 @@ function handleGetSessionTavernHelper(state: AppState, id: string, res: ServerRe
     tavernHelperState: helperState,
     worldInfoEntries: buildWorldInfoEntriesLoadedEvent(state.worldbook),
   })
+}
+
+/**
+ * POST /api/sessions/:id/mvu/retry — rerun the dedicated MVU update call
+ * against the last assistant message without touching the prose or rerolling
+ * the response. The new <UpdateVariable> block is appended to that assistant
+ * message so subsequent reads (history / status bar / context) see the same
+ * block as a normal in-line MVU completion.
+ *
+ * Body (all optional):
+ *   - `appendToReply` (boolean, default true): if false, only the session
+ *     `mvuState` is updated and the assistant message is left untouched.
+ *   - `update` (string): caller-supplied UpdateVariable block. When present
+ *     the server skips the LLM call and validates/applies the block directly,
+ *     letting the UI surface "insert a manually-edited JSON Patch" cases.
+ */
+async function handleRetryMvu(state: AppState, id: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const record = state.sessionRecords.get(id)
+  if (record === undefined) return sendError(res, 404, `session not found: ${id}`)
+
+  const rawBody = await readBody(req, 16 * 1024)
+  const payload = parseJsonBody(rawBody) ?? {}
+  const appendToReply = payload.appendToReply === false ? false : true
+  const callerUpdate = typeof payload.update === 'string' ? payload.update : undefined
+
+  if (!state.mvuSettings.enabled) {
+    return sendError(res, 400, 'MVU 变量处理未启用,无法重算。')
+  }
+
+  const history = [...state.sessions.getHistory(id)]
+  if (history.length === 0) return sendError(res, 400, '会话为空,没有可重算的回复。')
+
+  // Locate the latest assistant message and the user turn that produced it.
+  // MVU reads the assistant prose plus the immediate user input, matching the
+  // main loop's input shape so the dedicated call sees the same context.
+  let assistantIndex = -1
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i]?.role === 'assistant') { assistantIndex = i; break }
+  }
+  if (assistantIndex < 0) return sendError(res, 400, '会话中没有 assistant 回复,无法重算 MVU。')
+  const assistantMessage = history[assistantIndex]
+  if (assistantMessage === undefined) return sendError(res, 500, 'assistant 消息丢失。')
+
+  let userInput = ''
+  for (let i = assistantIndex - 1; i >= 0; i -= 1) {
+    if (history[i]?.role === 'user') { userInput = String(history[i]?.content ?? ''); break }
+  }
+
+  const activeUserName = getCurrentUserPersona(state)?.name ?? '用户'
+  const mvuMacros: MvuMacroContext = { user: activeUserName, char: record.character.name }
+  const currentMvu = readSessionMvuState(record, history, mvuMacros)
+  if (currentMvu === undefined) {
+    return sendError(res, 400, '当前会话没有可用的 MVU 状态(卡片未定义 stat_data 或未初始化)。')
+  }
+
+  // Strip the prior <UpdateVariable> block(s) so the same prose is not
+  // double-applied when retrying. Keeping a stable input also lets the user
+  // iteratively re-run MVU without rerolling the response.
+  const proseOnly = stripMvuSupplement(assistantMessage.content)
+
+  let update: string | undefined
+  let providerError: string | undefined
+  if (callerUpdate !== undefined) {
+    try {
+      const validated = normalizeMvuSupplement(currentMvu.statData, callerUpdate)
+      if (validated === undefined) {
+        return sendError(res, 400, '提供的 UpdateVariable 块不是合法 JSON Patch。')
+      }
+      update = validated
+    } catch (err) {
+      return sendError(res, 400, `UpdateVariable 校验失败: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  } else {
+    const cfg = getGlobalConfig(state)
+    const provider = resolveProvider(cfg)
+    const prompts = new FilePromptLoader()
+    const agentCtx = buildAgentContext({
+      provider,
+      model: cfg.model,
+      prompts,
+      session: state.sessions,
+      worldbook: state.worldbook,
+      sessionId: id,
+      macros: { user: activeUserName, char: record.character.name },
+      worldbookSettings: state.worldbookSettings,
+      responseSettings: state.responseSettings,
+      worldbookGlobalScanData: {
+        personaDescription: getCurrentUserPersona(state)?.description ?? '',
+        characterDescription: record.character.raw.description,
+        characterPersonality: record.character.raw.personality,
+        scenario: record.character.raw.scenario,
+        creatorNotes: record.character.raw.creatorNotes ?? '',
+      },
+      tavernHelperState: ensureSessionTavernHelperState(record),
+      statData: currentMvu.statData,
+    })
+    try {
+      const result = await runMvuUpdate(
+        {
+          character: record.character,
+          userInput,
+          assistantReply: proseOnly,
+          statData: currentMvu.statData,
+        },
+        agentCtx,
+        state.mvuSettings,
+      )
+      update = result.update
+    } catch (err) {
+      providerError = err instanceof Error ? err.message : String(err)
+      process.stderr.write(`[ui-server] MVU retry failed for ${id}: ${providerError}\n`)
+    }
+  }
+
+  if (update === undefined) {
+    return sendJson(res, 200, {
+      sessionId: id,
+      applied: false,
+      mvuState: currentMvu.statData,
+      ...(providerError === undefined ? {} : { error: providerError }),
+    })
+  }
+
+  // Apply the validated patch to the in-memory statData so the next read of
+  // the session's mvu state sees the freshly updated snapshot. The assistant
+  // message also gets the <UpdateVariable> block appended so history replays
+  // and status-bar MVU readers see the same diff as a normal completion.
+  const applied = applyMvuReply(currentMvu.statData, update)
+  if (applied === undefined) {
+    return sendError(res, 500, 'MVU 重算结果无法回放到当前状态。')
+  }
+
+  const nextHistory = appendToReply
+    ? history.map((message, index) => index === assistantIndex
+      ? syncAssistantSwipe(message, `${proseOnly.trimEnd()}\n\n${update}`)
+      : message)
+    : history
+  if (appendToReply) {
+    state.sessions.setHistory(id, nextHistory)
+    try { await rewriteHistoryJsonl(id, nextHistory) } catch (err) {
+      process.stderr.write(`[ui-server] warn: failed to rewrite history for MVU retry on ${id}: ${err instanceof Error ? err.message : String(err)}\n`)
+    }
+  }
+
+  const nextRecord: SessionRecord = { ...record, mvuState: applied.statData }
+  state.sessionRecords.set(id, nextRecord)
+  try { await saveSession(state, nextRecord) } catch (err) {
+    state.sessionRecords.set(id, record)
+    return sendError(res, 500, `failed to persist MVU retry: ${err instanceof Error ? err.message : String(err)}`)
+  }
+
+  sendJson(res, 200, {
+    sessionId: id,
+    applied: true,
+    appended: appendToReply,
+    update,
+    mvuState: applied.statData,
+    appliedOperations: applied.appliedOperations,
+    history: displayHistory(state, id, nextHistory),
+  })
+}
+
+/**
+ * Remove every completed `<UpdateVariable>` (or legacy `<update>`) block from
+ * an assistant message so the MVU retry starts from the raw prose. Trailing
+ * `<JSONPatch>` fragments without a wrapper are not touched.
+ */
+function stripMvuSupplement(content: string): string {
+  return content
+    .replace(/<UpdateVariable(?:variable)?>[\s\S]*?<\/UpdateVariable(?:variable)?>/giu, '')
+    .replace(/<update>[\s\S]*?<\/update>/giu, '')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trimEnd()
 }
 
 /** POST /api/sessions/:id/generation-hook/:hookId — acknowledge one awaited
@@ -6189,6 +6364,12 @@ export async function startServer(options: StartServerOptions = {}): Promise<Sta
           const sid = decodeURIComponent(m[1] ?? '')
           if (method === 'GET') return await handleGetSessionVariables(state, sid, res)
           if (method === 'PUT' || method === 'POST') return await handlePutSessionVariables(state, sid, req, res)
+        }
+      }
+      {
+        const m = /^\/api\/sessions\/([^/]+)\/mvu\/retry$/u.exec(url.pathname)
+        if (method === 'POST' && m !== null) {
+          return await handleRetryMvu(state, decodeURIComponent(m[1] ?? ''), req, res)
         }
       }
       {
