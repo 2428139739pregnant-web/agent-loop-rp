@@ -670,6 +670,15 @@ function ensureStatusPlaceholder(content: string): string {
   return `${trimmed}\n\n${STATUS_PLACEHOLDER_TOKEN}`
 }
 
+function removeTrailingStatusPlaceholder(content: string): string {
+  const trailing = content.match(/\s+$/u)?.[0] ?? ''
+  const withoutTrailingWhitespace = content.slice(0, content.length - trailing.length)
+  if (!withoutTrailingWhitespace.endsWith(STATUS_PLACEHOLDER_TOKEN)) return content
+  return withoutTrailingWhitespace
+    .slice(0, -STATUS_PLACEHOLDER_TOKEN.length)
+    .replace(/\s+$/u, '')
+}
+
 interface AssistantDataWriteback {
   readonly message: ChatMessage
   readonly updatedStatData: JsonValue | undefined
@@ -2749,10 +2758,7 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
         const writeback = writeMvuBackToAssistant(last, currentMvu.statData, mvuResult.update)
         if (writeback !== undefined) {
           // 移除旧的占位符（如果有），追加新的 update 块，再加占位符
-          const baseContent = writeback.message.content.replace(
-            new RegExp(`\\s*${STATUS_PLACEHOLDER_TOKEN.replace(/[<>]/gu, '\\$&')}\\s*$`, 'u'),
-            '',
-          )
+          const baseContent = removeTrailingStatusPlaceholder(writeback.message.content)
           const contentWithUpdate = `${baseContent}\n\n${mvuResult.update}`.trimEnd()
           const anchored = ensureStatusPlaceholder(contentWithUpdate)
           const finalMessage: ChatMessage = {
@@ -3211,10 +3217,7 @@ async function handleRetryMvu(state: AppState, id: string, req: IncomingMessage,
         const writeback = writeMvuBackToAssistant(message, currentMvu.statData, update)
         if (writeback === undefined) return message
         // 移除旧占位符，追加 update 块，再加新占位符
-        const baseContent = writeback.message.content.replace(
-          new RegExp(`\\s*${STATUS_PLACEHOLDER_TOKEN.replace(/[<>]/gu, '\\$&')}\\s*$`, 'u'),
-          '',
-        )
+        const baseContent = removeTrailingStatusPlaceholder(writeback.message.content)
         const contentWithUpdate = `${baseContent}\n\n${update}`.trimEnd()
         const anchored = ensureStatusPlaceholder(contentWithUpdate)
         // message.data 已由 writeMvuBackToAssistant 设置，这里只需同步 swipe
