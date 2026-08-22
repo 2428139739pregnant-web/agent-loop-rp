@@ -8,6 +8,7 @@ import {
   type RegexCharacter,
 } from './frontend-regex.ts'
 import { compileCharacterDisplay } from './card-display-compiler.ts'
+import { normalizeMvuSupplement } from './mvu.ts'
 
 function script(overrides: Partial<ImportedRegexScript> & Pick<ImportedRegexScript, 'findRegex'>): ImportedRegexScript {
   return {
@@ -114,4 +115,35 @@ test('prompt-only status placeholders are removed before the model sees them', (
   const value = '<StatusPlaceHolderImpl/>\n正文'
   assert.equal(renderCharacterDisplay(value, current, AI_OUTPUT_PLACEMENT), '\n正文')
   assert.equal(renderCharacterPromptView(value, current, AI_OUTPUT_PLACEMENT), '\n正文')
+})
+
+test('Tavern MVU update hiding does not consume a following status-bar document', () => {
+  const current = card([
+    script({
+      scriptName: 'status',
+      findRegex: '<StatusPlaceHolderImpl/>',
+      replaceString: '```html\n<!doctype html><html><body><div id="hud">状态栏</div></body></html>\n```',
+      markdownOnly: true,
+    }),
+    script({
+      scriptName: 'hide-update',
+      findRegex: '/<update(?:variable)?>(?:(?!.*<\\/update(?:variable)?>).*$|.*<\\/update(?:variable)?>)/gsi',
+      replaceString: '',
+      markdownOnly: true,
+      promptOnly: true,
+    }),
+  ])
+  const update = normalizeMvuSupplement(
+    { score: 0 },
+    '<UpdateVariable><JSONPatch>[]</JSONPatch></UpdateVariable>',
+  )
+  assert.ok(update !== undefined)
+  const display = renderCharacterDisplay(
+    `正文\n${update}\n<StatusPlaceHolderImpl/>`,
+    current,
+    AI_OUTPUT_PLACEMENT,
+  )
+  assert.doesNotMatch(display, /<update>/iu)
+  assert.match(display, /<div id="hud">状态栏<\/div>/u)
+  assert.equal(compileCharacterDisplay(display).segments.some(segment => segment.kind === 'html'), true)
 })

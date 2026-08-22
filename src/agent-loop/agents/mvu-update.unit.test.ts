@@ -4,7 +4,7 @@ import { runMvuUpdate, type MvuRuntimeSettings } from './mvu-update.ts'
 import { InMemoryPromptLoader, type AgentContext } from './types.ts'
 import type { ChatMessage, ChatOptions, LLMProvider } from '../provider.ts'
 import type { PreprocessedCharacter } from '../character-loader.ts'
-import { applyMvuReply, readInitialMvuState, readMvuStateFromMessages } from '../../mvu.ts'
+import { applyMvuReply, normalizeMvuSupplement, readInitialMvuState, readMvuStateFromMessages } from '../../mvu.ts'
 
 function makeCharacter(): PreprocessedCharacter {
   return {
@@ -81,6 +81,21 @@ test('runMvuUpdate skips the extra call when MVU is disabled', async () => {
   )
   assert.equal(calls, 0)
   assert.equal(result.update, undefined)
+})
+
+test('MVU normalizes modern tags to the Tavern-compatible lowercase wire format', () => {
+  const normalized = normalizeMvuSupplement(
+    { score: 0 },
+    '<UpdateVariable><Analysis>changed</Analysis><JSONPatch>'
+      + '[{"op":"replace","path":"/score","value":1}]'
+      + '</JSONPatch></UpdateVariable>',
+  )
+  assert.equal(
+    normalized,
+    '<update><Analysis>changed</Analysis><json_patch>'
+      + '[{"op":"replace","path":"/score","value":1}]'
+      + '</json_patch></update>',
+  )
 })
 
 test('MVU accepts standard RFC 6902 add operations', () => {

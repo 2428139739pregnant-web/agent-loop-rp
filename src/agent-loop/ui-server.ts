@@ -3133,10 +3133,12 @@ async function handleRetryMvu(state: AppState, id: string, req: IncomingMessage,
     return sendError(res, 400, '当前会话没有可用的 MVU 状态(卡片未定义 stat_data 或未初始化)。')
   }
 
-  // Strip the prior <UpdateVariable> block(s) so the same prose is not
-  // double-applied when retrying. Keeping a stable input also lets the user
-  // iteratively re-run MVU without rerolling the response.
-  const proseOnly = stripMvuSupplement(assistantMessage.content)
+  // Rebuild retries from the assistant prose. Both the prior update blocks
+  // and display anchor belong to the old MVU writeback and must be replaced
+  // atomically after the new patch has been validated.
+  const proseOnly = removeTrailingStatusPlaceholder(
+    stripMvuSupplement(assistantMessage.content),
+  )
 
   let update: string | undefined
   let providerError: string | undefined
@@ -3214,13 +3216,14 @@ async function handleRetryMvu(state: AppState, id: string, req: IncomingMessage,
   const nextHistory = appendToReply && assistantMessage !== undefined
     ? history.map((message, index) => {
         if (index !== assistantIndex || message === undefined) return message
-        const writeback = writeMvuBackToAssistant(message, currentMvu.statData, update)
+        const proseMessage = syncAssistantSwipe(
+          { ...message, content: proseOnly },
+          proseOnly,
+        )
+        const writeback = writeMvuBackToAssistant(proseMessage, currentMvu.statData, update)
         if (writeback === undefined) return message
-        // 移除旧占位符，追加 update 块，再加新占位符
-        const baseContent = removeTrailingStatusPlaceholder(writeback.message.content)
-        const contentWithUpdate = `${baseContent}\n\n${update}`.trimEnd()
+        const contentWithUpdate = `${writeback.message.content}\n\n${update}`.trimEnd()
         const anchored = ensureStatusPlaceholder(contentWithUpdate)
-        // message.data 已由 writeMvuBackToAssistant 设置，这里只需同步 swipe
         return syncAssistantSwipe({ ...writeback.message, content: anchored }, anchored)
       })
     : history

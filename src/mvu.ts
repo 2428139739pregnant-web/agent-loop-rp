@@ -504,8 +504,18 @@ export function normalizeMvuSupplement(current: JsonValue, raw: string): string 
     }
   }
   if (candidate === undefined) return undefined
+  // MagVarUpdate cards commonly target the legacy lowercase tags in their
+  // display/prompt regex scripts. Keep accepting every supported spelling
+  // from the model, but persist one Tavern-compatible wire format so a card's
+  // own greedy update-hiding regex cannot mistake the block for unclosed text
+  // and consume a following status-bar document.
+  const normalized = candidate
+    .replace(/<UpdateVariable(?:variable)?>/giu, '<update>')
+    .replace(/<\/UpdateVariable(?:variable)?>/giu, '</update>')
+    .replace(/<JSONPatch>/giu, '<json_patch>')
+    .replace(/<\/JSONPatch>/giu, '</json_patch>')
   try {
-    return applyMvuReply(current, candidate) === undefined ? undefined : candidate
+    return applyMvuReply(current, normalized) === undefined ? undefined : normalized
   } catch {
     return undefined
   }
