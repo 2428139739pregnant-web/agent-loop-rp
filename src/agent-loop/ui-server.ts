@@ -650,6 +650,60 @@ function syncAssistantSwipe(message: ChatMessage, content: string): ChatMessage 
   return { ...message, content, swipe_id: swipeId, swipes, swipe_info: swipeInfo }
 }
 
+/**
+ * Anchor the MVU status bar on the assistant floor. MagVarUpdate /
+ * JS-Slash-Runner append `<StatusPlaceHolderImpl/>` to the end of every
+ * MVU-touched assistant message and the status bar regex script then
+ * replaces the placeholder with the live HUD on the display surface.
+ *
+ * Cards whose opening greeting already contains the placeholder keep it as
+ * is. Newer assistant messages created by the agent loop gain the anchor
+ * as soon as MVU finishes a valid UpdateVariable block, mirroring the
+ * original Tavern Helper behaviour so the markdownOnly / promptOnly regex
+ * pair (see `docs/sillytavern-compatibility.md`) keeps working unchanged.
+ */
+export const STATUS_PLACEHOLDER_TOKEN = '<StatusPlaceHolderImpl/>'
+
+function ensureStatusPlaceholder(content: string): string {
+  if (content.includes(STATUS_PLACEHOLDER_TOKEN)) return content
+  const trimmed = content.replace(/\s+$/u, '')
+  return `${trimmed}\n\n${STATUS_PLACEHOLDER_TOKEN}`
+}
+
+interface AssistantDataWriteback {
+  readonly message: ChatMessage
+  readonly updatedStatData: JsonValue | undefined
+}
+
+/**
+ * Apply a validated MVU UpdateVariable block to the assistant message.
+ *
+ * 按照 MagVarUpdate 的消息生命周期：
+ * 1. 应用 JSON Patch，得到新的 statData
+ * 2. 将新的 statData 写入 message.data.stat_data（供卡片 iframe 读取）
+ * 3. 返回更新后的 message 和 statData，调用方负责追加 <UpdateVariable> 块和占位符
+ *
+ * 注意：此函数不再负责添加占位符，占位符由调用方在追加 update 块后统一添加。
+ */
+function writeMvuBackToAssistant(
+  message: ChatMessage,
+  statData: JsonValue,
+  update: string,
+): AssistantDataWriteback | undefined {
+  if (message.role !== 'assistant') return undefined
+  const applied = applyMvuReply(statData, update)
+  if (applied === undefined) return undefined
+  // 同步当前 swipe 内容，但不添加占位符（由调用方在追加 update 块后统一添加）
+  const swipeSynced = syncAssistantSwipe(message, message.content)
+  const dataRecord: Record<string, unknown> = (() => {
+    const current = swipeSynced.data
+    return current !== undefined && typeof current === 'object' && !Array.isArray(current)
+      ? { ...current, stat_data: applied.statData }
+      : { stat_data: applied.statData }
+  })()
+  return { message: { ...swipeSynced, data: dataRecord }, updatedStatData: applied.statData }
+}
+
 /** Project normalized WorldbookEntry metadata into the shape used by
  * ST-Prompt-Template's getWorldInfoData/selectActivatedEntries helpers. */
 function ejsWorldInfoData(entry: WorldbookEntry, sourceId = entry.path): JsonValue {
@@ -910,7 +964,11 @@ function ensureSessionTavernHelperState(record: SessionRecord): TavernHelperStat
 }
 
 /** Read direct session variables first; only sessions without a snapshot
- * replay MVU tags from the transcript. */
+ * replay MVU tags from the transcript. Per-message `data.stat_data` (the
+ * MagVarUpdate/JS-Slash-Runner convention) acts as a tertiary fallback
+ * before falling back to the transcript replay, so a card whose last
+ * message carries a `data.stat_data` payload still shows the right HUD
+ * even when the session has never persisted a top-level mvuState. */
 function readSessionMvuState(
   record: SessionRecord,
   history: readonly ChatMessage[],
@@ -918,8 +976,23 @@ function readSessionMvuState(
 ): ReturnType<typeof readMvuStateFromMessages> {
   const helperState = record.tavernHelperState
   const helperStatData = helperState?.scopes.chat.stat_data
-  const persisted = record.mvuState !== undefined ? record.mvuState : helperStatData
+  const persisted = record.mvuState !== undefined
+    ? record.mvuState
+    : helperStatData !== undefined
+      ? helperStatData
+      : extractMvuStatData(lastAssistantData(history))
   return readMvuStateWithSessionOverride(record.character.raw, history, persisted, macros)
+}
+
+/** Return the `data` record of the most recent assistant message, if any. */
+function lastAssistantData(history: readonly ChatMessage[]): Record<string, JsonValue> | undefined {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const message = history[i]
+    if (message?.role !== 'assistant') continue
+    const data = message.data
+    if (data !== undefined && typeof data === 'object' && !Array.isArray(data)) return data as Record<string, JsonValue>
+  }
+  return undefined
 }
 
 /** Reconcile one record with its current character while retaining session
@@ -2668,16 +2741,77 @@ async function handleRunSse(state: AppState, req: IncomingMessage, res: ServerRe
 
     let persistedReply = proseReply
     if (mvuResult !== null && mvuResult.update !== undefined) {
-      persistedReply = `${proseReply.trimEnd()}\n\n${mvuResult.update}`
-      result.reply = persistedReply
       const history = [...session.getHistory(sessionId)]
       const last = history[history.length - 1]
       if (last?.role === 'assistant') {
-        history[history.length - 1] = syncAssistantSwipe(last, persistedReply)
+        // MagVarUpdate 消息回写: 追加 <UpdateVariable> 块和 <StatusPlaceHolderImpl/> 锚点
+        // 并将当前楼层的 stat_data 快照写入 message.data，供卡片 iframe 读取
+        const writeback = writeMvuBackToAssistant(last, currentMvu.statData, mvuResult.update)
+        if (writeback !== undefined) {
+          // 移除旧的占位符（如果有），追加新的 update 块，再加占位符
+          const baseContent = writeback.message.content.replace(
+            new RegExp(`\\s*${STATUS_PLACEHOLDER_TOKEN.replace(/[<>]/gu, '\\$&')}\\s*$`, 'u'),
+            '',
+          )
+          const contentWithUpdate = `${baseContent}\n\n${mvuResult.update}`.trimEnd()
+          const anchored = ensureStatusPlaceholder(contentWithUpdate)
+          const finalMessage: ChatMessage = {
+            ...writeback.message,
+            content: anchored,
+            swipes: (() => {
+              const swipes = Array.isArray(writeback.message.swipes) && writeback.message.swipes.length > 0
+                ? [...writeback.message.swipes]
+                : [last.content]
+              const idx = Number.isInteger(writeback.message.swipe_id) ? Number(writeback.message.swipe_id) : 0
+              swipes[idx] = anchored
+              return swipes
+            })(),
+          }
+          history[history.length - 1] = finalMessage
+          session.setHistory(sessionId, history)
+          try { await rewriteHistoryJsonl(sessionId, history) } catch (err) {
+            process.stderr.write(`[ui-server] warn: failed to persist MVU update for ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`)
+          }
+          persistedReply = finalMessage.content
+          result.reply = persistedReply
+        }
+      }
+    }
+
+    // MVU 核心适配: 即使本轮没有变量更新，只要 MVU 启用，也要确保 assistant 消息
+    // 带有占位符和 message.data，这样状态栏能显示上一轮的变量状态
+    if (state.mvuSettings.enabled && currentMvu !== undefined) {
+      const history = [...session.getHistory(sessionId)]
+      const last = history[history.length - 1]
+      if (last?.role === 'assistant' && !last.content.includes(STATUS_PLACEHOLDER_TOKEN)) {
+        // 本轮没有变量更新（或 MVU 未生成 update），但需要确保占位符存在
+        const anchored = ensureStatusPlaceholder(last.content)
+        const dataRecord: Record<string, unknown> = (() => {
+          const current = last.data
+          return current !== undefined && typeof current === 'object' && !Array.isArray(current)
+            ? { ...current, stat_data: currentMvu.statData }
+            : { stat_data: currentMvu.statData }
+        })()
+        const finalMessage: ChatMessage = {
+          ...last,
+          content: anchored,
+          data: dataRecord,
+          swipes: (() => {
+            const swipes = Array.isArray(last.swipes) && last.swipes.length > 0
+              ? [...last.swipes]
+              : [last.content]
+            const idx = Number.isInteger(last.swipe_id) ? Number(last.swipe_id) : 0
+            swipes[idx] = anchored
+            return swipes
+          })(),
+        }
+        history[history.length - 1] = finalMessage
         session.setHistory(sessionId, history)
         try { await rewriteHistoryJsonl(sessionId, history) } catch (err) {
-          process.stderr.write(`[ui-server] warn: failed to persist MVU update for ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`)
+          process.stderr.write(`[ui-server] warn: failed to persist MVU placeholder for ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`)
         }
+        persistedReply = finalMessage.content
+        result.reply = persistedReply
       }
     }
 
@@ -3063,17 +3197,29 @@ async function handleRetryMvu(state: AppState, id: string, req: IncomingMessage,
 
   // Apply the validated patch to the in-memory statData so the next read of
   // the session's mvu state sees the freshly updated snapshot. The assistant
-  // message also gets the <UpdateVariable> block appended so history replays
-  // and status-bar MVU readers see the same diff as a normal completion.
+  // message also gets the <UpdateVariable> block appended (and the
+  // <StatusPlaceHolderImpl/> anchor that the markdownOnly regex script
+  // searches for) so the status bar is restored on this floor.
   const applied = applyMvuReply(currentMvu.statData, update)
   if (applied === undefined) {
     return sendError(res, 500, 'MVU 重算结果无法回放到当前状态。')
   }
 
-  const nextHistory = appendToReply
-    ? history.map((message, index) => index === assistantIndex
-      ? syncAssistantSwipe(message, `${proseOnly.trimEnd()}\n\n${update}`)
-      : message)
+  const nextHistory = appendToReply && assistantMessage !== undefined
+    ? history.map((message, index) => {
+        if (index !== assistantIndex || message === undefined) return message
+        const writeback = writeMvuBackToAssistant(message, currentMvu.statData, update)
+        if (writeback === undefined) return message
+        // 移除旧占位符，追加 update 块，再加新占位符
+        const baseContent = writeback.message.content.replace(
+          new RegExp(`\\s*${STATUS_PLACEHOLDER_TOKEN.replace(/[<>]/gu, '\\$&')}\\s*$`, 'u'),
+          '',
+        )
+        const contentWithUpdate = `${baseContent}\n\n${update}`.trimEnd()
+        const anchored = ensureStatusPlaceholder(contentWithUpdate)
+        // message.data 已由 writeMvuBackToAssistant 设置，这里只需同步 swipe
+        return syncAssistantSwipe({ ...writeback.message, content: anchored }, anchored)
+      })
     : history
   if (appendToReply) {
     state.sessions.setHistory(id, nextHistory)
